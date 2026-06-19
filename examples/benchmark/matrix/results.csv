@@ -1,0 +1,32 @@
+Algorithm,Matrix_Size,Time_s,TFLOPS,VRAM_GB,RAM_GB,Max_Error,Status
+cuda_double_buffering,4096,0.12,1.17,0.07,0.85,5.476074e-01,SUCCESS
+cuda_incore_cublas,4096,0.02,7.10,0.10,0.92,5.476074e-01,SUCCESS
+cuda_wmma_2D_tiling,4096,0.25,0.54,0.13,0.94,7.575684e-01,SUCCESS
+gpu_2D_tiling (opencl),4096,0.16,0.85,0.00,1.04,3.540039e-03,SUCCESS
+pytorch sur gpu,4096,0.01,9.75,0.11,1.09,5.476074e-01,SUCCESS
+cuda_double_buffering,8192,0.13,8.76,0.27,1.09,1.729492e+00,SUCCESS
+cuda_incore_cublas,8192,0.07,14.88,0.40,1.36,1.729492e+00,SUCCESS
+cuda_wmma_2D_tiling,8192,0.25,4.32,0.54,1.36,1.604004e+00,SUCCESS
+gpu_2D_tiling (opencl),8192,0.34,3.24,0.00,1.45,1.000977e-02,SUCCESS
+pytorch sur gpu,8192,0.05,20.56,0.41,1.45,1.729492e+00,SUCCESS
+cuda_double_buffering,16384,0.54,16.36,1.07,1.45,3.568848e+00,SUCCESS
+cuda_incore_cublas,16384,0.35,25.29,1.61,2.52,3.568848e+00,SUCCESS
+cuda_wmma_2D_tiling,16384,1.29,6.80,2.15,2.52,3.594727e+00,SUCCESS
+gpu_2D_tiling (opencl),16384,1.76,5.01,0.00,2.61,3.027344e-02,SUCCESS
+pytorch sur gpu,16384,0.28,31.17,1.62,2.61,3.568848e+00,SUCCESS
+cuda_double_buffering,32768,2.79,25.19,4.29,2.61,7.788086e+00,SUCCESS
+cuda_incore_cublas,32768,1.79,39.22,6.44,6.91,7.788086e+00,SUCCESS
+cuda_wmma_2D_tiling,32768,7.82,9.00,8.59,6.91,8.846680e+00,SUCCESS
+gpu_2D_tiling (opencl),32768,9.99,7.04,0.00,7.00,7.714844e-02,SUCCESS
+pytorch sur gpu,32768,1.50,46.94,6.45,7.00,7.788086e+00,SUCCESS
+cuda_double_buffering,49152,46.84,5.07,0.47,7.00,1.190625e+01,SUCCESS
+cuda_incore_cublas,49152,6.95,34.18,14.50,24.45,1.190625e+01,SUCCESS
+cuda_wmma_2D_tiling,49152,57.18,4.15,2.15,24.45,1.655664e+01,SUCCESS
+gpu_2D_tiling (opencl),49152,61.09,3.89,0.00,0.50,1.728516e-01,SUCCESS
+pytorch sur gpu,49152,4.39,54.09,14.50,1.30,1.190625e+01,SUCCESS
+cuda_double_buffering,65536,66.22,8.50,0.60,1.30,1.798047e+01,SUCCESS
+cuda_incore_cublas,65536,,,,,,OOM
+cuda_wmma_2D_tiling,65536,149.78,3.76,2.68,11.33,2.446680e+01,SUCCESS
+gpu_2D_tiling (opencl),65536,208.15,2.70,0.00,0.09,2.089844e-01,SUCCESS
+pytorch sur gpu,65536,,,,,,OOM
+
