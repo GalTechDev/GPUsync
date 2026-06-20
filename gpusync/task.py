@@ -48,6 +48,8 @@ class AsyncTask:
                 block = local_size
                 if isinstance(global_size, int):
                     grid = ((global_size + block[0] - 1) // block[0],)
+                elif len(global_size) == 1:
+                    grid = ((global_size[0] + block[0] - 1) // block[0],)
                 elif len(global_size) == 2:
                     grid = ((global_size[0] + block[0] - 1) // block[0], (global_size[1] + block[1] - 1) // block[1])
                 elif len(global_size) == 3:
