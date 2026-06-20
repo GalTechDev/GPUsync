@@ -90,7 +90,7 @@ async def main():
 
     n = 30
     t = 100
-    s = 1024 * 1024 * 2 # 2 Millions d'individus (Le commentaire '64M' était erroné)
+    s = 1024 * 1024 * 64 # 2 Millions d'individus (Le commentaire '64M' était erroné)
 
     # CHUNK_SIZE = 10 Millions. 
     # Pour 64M, cela fera 7 itérations de la boucle principale. Chaque chunk pèsera ~1.2 Go.
