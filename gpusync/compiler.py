@@ -101,6 +101,8 @@ class BaseTranspiler(ast.NodeVisitor):
         if value:
             self.add_line(f"{value};")
     def visit_Constant(self, node):
+        if isinstance(node.value, bool):
+            return "true" if node.value else "false"
         return str(node.value)
         
     def visit_BinOp(self, node):
@@ -503,7 +505,7 @@ def gpusync_kernel(func=None, raw_cuda=None):
     )
     
     @auto_sync
-    async def wrapper(*args, global_size, scheduler, _pipeline_mode=False, local_size=None):
+    async def wrapper(*args, global_size, scheduler, _pipeline_mode=False, local_size=None, stream=None, fire_and_forget=False):
         out_buffers = []
         if num_returns > 0:
             import numpy as np
@@ -519,16 +521,16 @@ def gpusync_kernel(func=None, raw_cuda=None):
                 out_buffers.append(buf)
                 
         new_args = list(args) + out_buffers
-        await task.execute(scheduler, global_size, local_size, *new_args)
+        await task.execute(scheduler, global_size, local_size, *new_args, stream=stream, fire_and_forget=fire_and_forget)
         
         if num_returns == 0:
             return None
         elif num_returns == 1:
-            if _pipeline_mode:
+            if _pipeline_mode or fire_and_forget:
                 return out_buffers[0]
             return await out_buffers[0].to_host()
         else:
-            if _pipeline_mode:
+            if _pipeline_mode or fire_and_forget:
                 return tuple(out_buffers)
             return tuple([await buf.to_host() for buf in out_buffers])
         

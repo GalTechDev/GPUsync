@@ -259,6 +259,43 @@ Cette boucle asynchrone garantit que le bus PCIe est toujours saturé de donnée
 3. **Incompatibilité OpenCL/CUDA** :
    Si vous passez des buffers instanciés par un `Scheduler` OpenCL vers un kernel géré par un `Scheduler` CUDA, GPUsync le détectera dans un Pipeline et insèrera un transfert automatique par la RAM. Mais en appel manuel, cela produira un crash. Surveillez le `backend` !
 
+## 10. Support de l'Architecture ABA (Asynchronous Blackboard Architecture)
+
+GPUsync offre désormais un support natif de l'architecture ABA, conçue pour les systèmes multi-agents chaotiques où des centaines de Kernels ("Workers") modifient une mémoire commune simultanément sans ordre précis, pendant qu'un "Superviseur" CPU observe les résultats.
+
+### Le Swarm Mode (Multi-Streams)
+Au lieu d'utiliser une seule file d'attente bloquante, vous pouvez injecter dynamiquement des Streams indépendants pour créer une "mêlée" asynchrone sur la carte graphique :
+```python
+import cupy as cp
+stream_worker1 = cp.cuda.Stream(non_blocking=True)
+await mon_kernel(..., stream=stream_worker1)
+```
+
+### Le Lancement Non-Bloquant (Fire-and-Forget)
+Dans l'architecture ABA, le CPU ne doit pas attendre la fin d'un Kernel. L'argument `fire_and_forget=True` force la fonction Python à envoyer les instructions au GPU et à rendre la main instantanément :
+```python
+await mon_kernel(..., fire_and_forget=True)
+```
+
+### Le Polling Asynchrone (Dirty Read)
+Le CPU Superviseur a besoin de lire ("espionner") la VRAM en permanence pour vérifier la convergence (Entropie) sans bloquer les Workers qui tournent.
+La méthode `dirty_read()` utilise un transfert DMA vers la *Pinned Memory* (Page-Locked) pour rapatrier un tableau numpy sans geler les cœurs GPU :
+```python
+# Ne bloque ni la boucle asynchrone, ni les Streams GPU !
+canvas_snapshot = await mon_async_buffer.dirty_read()
+```
+
+### Boucles Infinies Intégrées
+Le transpileur gère désormais les booléens purs Python (True/False). Il est possible de créer un Worker "immortel" au sein du GPU :
+```python
+@gpusync_kernel
+def worker_kernel(ctx, canvas, flag_run):
+    while True:
+        if flag_run[0] == 0:
+            break
+        # Mettre à jour le canvas
+```
+
 ---
 
 **Bon code, et n'hésitez pas à explorer le dossier `examples/` pour comprendre comment implémenter un Memory Pool asynchrone robuste !**

@@ -11,18 +11,21 @@ class AsyncTask:
         self.kernel_name_cuda = kernel_name_cuda
         self._compiled_programs = {}
 
-    async def execute(self, scheduler: Scheduler, global_size, local_size, *args):
+    async def execute(self, scheduler: Scheduler, global_size, local_size, *args, stream=None, fire_and_forget=False):
         if not args:
             device_manager = scheduler.get_best_device()
         else:
             device_manager = args[0].device_manager
 
         backend = scheduler.backend
-        queue = device_manager.get_queue()
+        
+        # Le stream par défaut est la queue du device_manager, mais on peut la surcharger
+        default_queue = device_manager.get_queue()
 
         if backend == "cuda":
             import cupy as cp
             device = device_manager.device
+            queue = stream if stream is not None else default_queue
             
             device_id = device.id
             
@@ -77,10 +80,15 @@ class AsyncTask:
             with device:
                 kernel(grid, block, tuple(cuda_args), stream=queue)
                 
-            return await await_event(queue)
+            if not fire_and_forget:
+                return await await_event(queue)
+            else:
+                return None
 
         else:
+            import pyopencl as cl
             context = device_manager.context
+            queue = stream if stream is not None else default_queue
             
             if context not in self._compiled_programs:
                 prg = cl.Program(context, self.kernel_code_opencl).build()
@@ -107,8 +115,8 @@ class AsyncTask:
                     local_size = (256,)
                 elif len(global_size) == 2:
                     local_size = (16, 16)
-            elif len(global_size) == 3:
-                local_size = (8, 8, 8)
+                elif len(global_size) == 3:
+                    local_size = (8, 8, 8)
             else:
                 local_size = None
                 
@@ -117,4 +125,8 @@ class AsyncTask:
                 global_size = tuple(((g + l - 1) // l) * l for g, l in zip(global_size, local_size))
                 
             event = kernel(queue, global_size, local_size, *cl_args)
-            return await await_event(event)
+            
+            if not fire_and_forget:
+                return await await_event(event)
+            else:
+                return None

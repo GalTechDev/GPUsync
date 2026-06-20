@@ -11,6 +11,7 @@ from gpusync.compiler import gpusync_kernel
 
 @gpusync_kernel
 def math_kernel(ctx: int, a: list, b: list) -> tuple:
+    
     return a[ctx] + b[ctx], a[ctx] - b[ctx]
 
 def main():

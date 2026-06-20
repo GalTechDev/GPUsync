@@ -90,3 +90,30 @@ class AsyncBuffer:
             event = cl.enqueue_copy(queue, host_data, self.cl_buffer, is_blocking=False)
             await await_event(event)
             return host_data
+
+    @auto_sync
+    async def dirty_read(self, stream=None) -> np.ndarray:
+        """
+        Lecture 'Dirty' de la mémoire depuis le GPU sans bloquer ou synchroniser 
+        le stream de travail principal. Utilise un stream dédié (CUDA) ou 
+        une command queue séparée (OpenCL).
+        """
+        if self.backend in ["cuda", "cublas"]:
+            import cupy as cp
+            with self.device_manager.device:
+                read_stream = stream if stream is not None else cp.cuda.Stream(non_blocking=True)
+                # Allocation de mémoire Pinée (Page-Locked) pour un transfert DMA pur
+                host_pinned = cp.cuda.alloc_pinned_memory(self.cl_buffer.nbytes)
+                count = int(np.prod(self.shape))
+                host_data = np.frombuffer(host_pinned, self.dtype, count=count).reshape(self.shape)
+                # Copie asynchrone vers l'hôte sur le read_stream
+                self.cl_buffer.data.copy_to_host_async(host_data.ctypes.data, self.cl_buffer.nbytes, stream=read_stream)
+            await await_event(read_stream)
+            return host_data
+        else:
+            import pyopencl as cl
+            queue = stream if stream is not None else cl.CommandQueue(self.device_manager.context)
+            host_data = np.empty(self.shape, dtype=self.dtype)
+            event = cl.enqueue_copy(queue, host_data, self.cl_buffer, is_blocking=False)
+            await await_event(event)
+            return host_data
