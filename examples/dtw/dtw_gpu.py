@@ -15,59 +15,59 @@ from gpusync.compiler import gpusync_kernel
 @gpusync_kernel
 def batch_dtw_streaming(ctx: int, reference: list, targets: list, targets_offset: int, seq_length: int, outputs: list):
     """
-    Kernel DTW ultra-optimisé avec préchargement des registres L1.
+    Kernel DTW ultra-optimisé avec réduction de l'empreinte registre (Register Spilling prevention).
     """
     target_idx: int = targets_offset + ctx
     target_start: int = target_idx * seq_length
     
-    # Préchargement total en Registres L1 pour couper l'accès à la VRAM
-    ref_local = [0.0] * 30
+    # 1. Copie des targets en registres (30 floats)
     tgt_local = [0.0] * 30
-    
     for j in range(0, seq_length):
-        ref_local[j] = reference[j]
         tgt_local[j] = targets[target_start + j]
+        
+    # La 'reference' est lue directement depuis la VRAM car elle est identique
+    # pour tous les threads du bloc. Le cache L1 du GPU va automatiquement 
+    # la diffuser (Broadcast) à coût zéro ! Pas besoin de la copier en registre.
     
-    # Déclaration locale via le compilateur (utilisation des registres GPU)
-    prev_row = [0.0] * 30
-    curr_row = [0.0] * 30
+    # 2. Une seule ligne pour le Dynamic Programming au lieu de deux (30 floats au lieu de 60)
+    row = [0.0] * 30
     
-    # Première ligne
-    d = ref_local[0] - tgt_local[0]
-    curr_row[0] = d * d
+    # Première itération (i = 0)
+    ref_val = reference[0]
+    d = ref_val - tgt_local[0]
+    row[0] = d * d
     
     for j in range(1, seq_length):
-        d = ref_local[0] - tgt_local[j]
-        curr_row[j] = curr_row[j - 1] + d * d
+        d = ref_val - tgt_local[j]
+        row[j] = row[j - 1] + d * d
         
-    for j in range(0, seq_length):
-        prev_row[j] = curr_row[j]
-        
-    # Lignes suivantes
+    # Itérations suivantes (i > 0)
     for i in range(1, seq_length):
-        d = ref_local[i] - tgt_local[0]
-        curr_row[0] = prev_row[0] + d * d
+        ref_val = reference[i]
+        
+        d = ref_val - tgt_local[0]
+        m3 = row[0] # Ancien prev_row[0]
+        row[0] = row[0] + d * d # Devient curr_row[0]
+        m2 = row[0] # curr_row[j-1] pour la prochaine itération
         
         for j in range(1, seq_length):
-            d = ref_local[i] - tgt_local[j]
+            d = ref_val - tgt_local[j]
             cost = d * d
             
-            m1 = prev_row[j]
-            m2 = curr_row[j - 1]
-            m3 = prev_row[j - 1]
+            m1 = row[j] # prev_row[j]
             
+            # min(m1, m2, m3)
             min_val = m1
             if m2 < min_val:
                 min_val = m2
             if m3 < min_val:
                 min_val = m3
                 
-            curr_row[j] = cost + min_val
+            m3 = row[j] # L'actuel prev_row[j] deviendra le prev_row[j-1] au prochain tour
+            row[j] = cost + min_val
+            m2 = row[j] # L'actuel curr_row[j] deviendra le curr_row[j-1] au prochain tour
             
-        for j in range(0, seq_length):
-            prev_row[j] = curr_row[j]
-            
-    outputs[ctx] = curr_row[seq_length - 1]
+    outputs[ctx] = row[seq_length - 1]
 
 async def process_chunk(ref_id, chunk_id, offset, chunk_size, gpu_reference, gpu_targets_chunk, scheduler, pool, SEQ_LENGTH):
     """
@@ -90,11 +90,11 @@ async def main():
 
     n = 30
     t = 100
-    s = 1024 * 1024 * 2 # 64 Millions (Test Massif)
+    s = 1024 * 1024 * 2 # 2 Millions d'individus (Le commentaire '64M' était erroné)
 
-    # CHUNK_SIZE = 1 Million. 
-    # Pour 64M, cela fera 64 itérations de la boucle principale.
-    CHUNK_SIZE = 1_000_000
+    # CHUNK_SIZE = 10 Millions. 
+    # Pour 64M, cela fera 7 itérations de la boucle principale. Chaque chunk pèsera ~1.2 Go.
+    CHUNK_SIZE = 10_000_000
     NUM_CHUNKS = s // CHUNK_SIZE
     if s % CHUNK_SIZE != 0:
         NUM_CHUNKS += 1
@@ -118,7 +118,7 @@ async def main():
     for _ in range(IN_FLIGHT_LIMIT):
         pool.put_nowait(AsyncBuffer.empty_like(scheduler, dummy_out))
         
-    print(f"\n[4] Démarrage du TRUE STREAMING : VRAM bridée à ~120 Mo !")
+    print(f"\n[4] Démarrage du TRUE STREAMING : VRAM augmentée à ~1.2 Go par Chunk (Exploitation des 8 Go) !")
     
     matrice_distances = np.zeros((t, s), dtype=np.float32)
     active_tasks = set()
@@ -126,14 +126,18 @@ async def main():
     completed_targets = 0
     total_calculations = t * s
     
+    # Aplatissement instantané O(1) pour éviter la copie CPU dans la boucle
+    zz1_flat = zz1.reshape(-1)
+    
     # INVERSION DES BOUCLES : On parcours le grand dataset, puis les clusters.
     for chunk_id in range(NUM_CHUNKS):
         offset = chunk_id * CHUNK_SIZE
         current_chunk_size = min(CHUNK_SIZE, s - offset)
         
-        # On extrait seulement le petit bloc de RAM système
-        chunk_data = zz1[offset:offset + current_chunk_size].flatten()
-        # On l'envoie sur le GPU (120 Mo)
+        # Extraction O(1) de la vue (sans copie)
+        chunk_data = zz1_flat[offset * n : (offset + current_chunk_size) * n]
+        
+        # On l'envoie sur le GPU (1.2 Go)
         gpu_targets_chunk = await AsyncBuffer.to_device(scheduler, chunk_data)
         
         for ref_id in range(t):
