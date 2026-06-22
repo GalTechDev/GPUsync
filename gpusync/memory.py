@@ -13,20 +13,25 @@ class AsyncBuffer:
 
     @classmethod
     @auto_sync
-    async def to_device(cls, scheduler: Scheduler, host_data: np.ndarray):
+    async def to_device(cls, scheduler, host_data: np.ndarray):
         """
         Copie non-bloquante de la RAM vers la VRAM du GPU.
+        Si scheduler est un DeviceManager, l'utilise directement.
         """
-        device_manager = scheduler.get_best_device()
-        backend = scheduler.backend
+        if hasattr(scheduler, 'get_queue'):
+            device_manager = scheduler
+        else:
+            device_manager = scheduler.get_best_device()
+            
         queue = device_manager.get_queue()
-
+        
+        # Détection du backend (CUDA ou OpenCL)
+        backend = getattr(device_manager, 'backend', getattr(scheduler, 'backend', None))
+        
         if backend in ["cuda", "cublas"]:
             import cupy as cp
             with device_manager.device:
-                gpu_arr = cp.empty(host_data.shape, dtype=host_data.dtype)
-                gpu_arr.set(host_data, stream=queue)
-            await await_event(queue)
+                gpu_arr = cp.asarray(host_data)
             return cls(device_manager, gpu_arr, host_data.shape, host_data.dtype, backend="cuda")
         else:
             import pyopencl as cl
@@ -53,14 +58,18 @@ class AsyncBuffer:
             await await_event(event)
 
     @classmethod
-    def empty_like(cls, scheduler: Scheduler, host_data: np.ndarray):
+    def empty_like(cls, scheduler, host_data: np.ndarray):
         """
         Alloue un buffer vide sur le GPU ayant la même taille que host_data.
         """
-        device_manager = scheduler.get_best_device()
-        backend = scheduler.backend
+        if hasattr(scheduler, 'get_queue'):
+            device_manager = scheduler
+        else:
+            device_manager = scheduler.get_best_device()
+        
+        backend = getattr(device_manager, 'backend', getattr(scheduler, 'backend', None))
 
-        if scheduler.backend in ["cuda", "cublas"]:
+        if backend in ["cuda", "cublas"]:
             import cupy as cp
             with device_manager.device:
                 gpu_arr = cp.empty(host_data.shape, dtype=host_data.dtype)

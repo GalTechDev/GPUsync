@@ -87,3 +87,94 @@ class Scheduler:
         manager = self.devices_managers[self._next_device_idx]
         self._next_device_idx = (self._next_device_idx + 1) % len(self.devices_managers)
         return manager
+
+class SwarmScheduler:
+    """
+    Le Quartier Général pour l'architecture ABA / Swarm.
+    Initialise automatiquement CUDA pour les cartes Nvidia, et OpenCL pour le reste (Intel, AMD).
+    Unifie tous les DeviceManagers en un seul pool de calcul.
+    """
+    def __init__(self, num_queues_per_device: int = 4):
+        self.num_queues_per_device = num_queues_per_device
+        self.devices_managers = []
+        self._next_device_idx = 0
+
+    @auto_sync
+    async def initialize(self):
+        # 1. Tentative CUDA
+        try:
+            import cupy as cp
+            num_devices = cp.cuda.runtime.getDeviceCount()
+            for i in range(num_devices):
+                device = cp.cuda.Device(i)
+                props = cp.cuda.runtime.getDeviceProperties(i)
+                name = props['name'].decode('utf-8')
+                try:
+                    manager = CUDADeviceManager(device, num_queues=self.num_queues_per_device)
+                    # On marque le manager avec son nom et son backend pour le routage manuel
+                    manager.backend = "cuda"
+                    manager.name = name
+                    self.devices_managers.append(manager)
+                    logger.info(f"[Swarm] CUDA détecté et ajouté : {name}")
+                except Exception as e:
+                    logger.error(f"[Swarm] Erreur CUDA {name}: {e}")
+        except Exception as e:
+            logger.info("[Swarm] CUDA non disponible ou non détecté.")
+
+        # 2. Tentative OpenCL (en évitant Nvidia pour ne pas doubler)
+        try:
+            import pyopencl as cl
+            platforms = cl.get_platforms()
+            for platform in platforms:
+                devices = platform.get_devices(device_type=cl.device_type.GPU)
+                if not devices:
+                    devices = platform.get_devices()
+                
+                for device in devices:
+                    if "nvidia" in device.vendor.lower() or "nvidia" in device.name.lower():
+                        continue # Déjà géré par CUDA en principe, on évite le doublon
+                    
+                    try:
+                        manager = DeviceManager(device, num_queues=self.num_queues_per_device)
+                        manager.backend = "opencl"
+                        manager.name = device.name
+                        self.devices_managers.append(manager)
+                        logger.info(f"[Swarm] OpenCL détecté et ajouté : {device.name}")
+                    except Exception as e:
+                        logger.error(f"[Swarm] Erreur OpenCL {device.name}: {e}")
+        except Exception as e:
+            logger.info("[Swarm] OpenCL non disponible ou erreur.")
+
+        if not self.devices_managers:
+            raise RuntimeError("SwarmScheduler n'a pu initialiser AUCUN périphérique de calcul !")
+            
+        logger.info(f"SwarmScheduler PRÊT. {len(self.devices_managers)} périphérique(s) dans l'essaim.")
+
+    def get_best_device(self) -> DeviceManager:
+        if not self.devices_managers:
+            raise RuntimeError("SwarmScheduler non initialisé.")
+        manager = self.devices_managers[self._next_device_idx]
+        self._next_device_idx = (self._next_device_idx + 1) % len(self.devices_managers)
+        return manager
+
+    def get_device(self, identifier: str) -> DeviceManager:
+        """
+        identifier: ex "cuda:0", "opencl:1", ou "intel"
+        """
+        identifier = identifier.lower()
+        if ":" in identifier:
+            backend, idx = identifier.split(":")
+            idx = int(idx)
+            # Filtre par backend
+            managers = [m for m in self.devices_managers if hasattr(m, 'backend') and m.backend == backend]
+            if idx < len(managers):
+                return managers[idx]
+        else:
+            # Filtre par nom
+            for m in self.devices_managers:
+                if hasattr(m, 'name') and identifier in m.name.lower():
+                    return m
+        
+        # Fallback si non trouvé
+        logger.warning(f"[Swarm] Périphérique '{identifier}' non trouvé, fallback sur Round-Robin.")
+        return self.get_best_device()

@@ -11,13 +11,14 @@ class AsyncTask:
         self.kernel_name_cuda = kernel_name_cuda
         self._compiled_programs = {}
 
-    async def execute(self, scheduler: Scheduler, global_size, local_size, *args, stream=None, fire_and_forget=False):
+    async def execute(self, scheduler, global_size, local_size, *args, stream=None, fire_and_forget=False):
         if not args:
             device_manager = scheduler.get_best_device()
         else:
             device_manager = args[0].device_manager
 
-        backend = scheduler.backend
+        # Utilisation du backend du device (essentiel pour SwarmScheduler hétérogène)
+        backend = getattr(device_manager, 'backend', getattr(scheduler, 'backend', None))
         
         # Le stream par défaut est la queue du device_manager, mais on peut la surcharger
         default_queue = device_manager.get_queue()
@@ -35,7 +36,7 @@ class AsyncTask:
                 self._compiled_programs[device_id] = module
             
             kernel = self._compiled_programs[device_id]
-            
+            # Extraction des vrais arguments
             cuda_args = []
             for arg in args:
                 if hasattr(arg, 'cl_buffer'):
