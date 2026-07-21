@@ -128,13 +128,9 @@ Le système applique ensuite l'algorithme de **Tri Topologique de Kahn (1962)** 
 
 Ce planificateur de graphe permet d'abstraire la topologie matérielle : le développeur modélise son algorithme mathématique de manière linéaire, et GPUsync se charge de sa parallélisation distribuée.
 
-## 3. Implémentations Algorithmiques
-
-La véritable puissance d'un moteur d'accélération ne se mesure pas uniquement à son abstraction logicielle, mais à sa capacité à supporter des optimisations de bas niveau extrêmes. GPUsync expose des primitives matérielles critiques (mémoire partagée, opérations atomiques, cœurs tensoriels) permettant d'implémenter des algorithmes complexes avec une efficacité maximale.
-
 ## 3. Implémentations Algorithmiques et Optimisations Bas-Niveau
 
-La véritable puissance d'un moteur d'accélération ne se mesure pas uniquement à son abstraction logicielle, mais à sa capacité à supporter des optimisations matérielles extrêmes. Ce chapitre détaille comment GPUsync résout trois problèmes canoniques du calcul intensif en poussant le matériel dans ses retranchements.
+La véritable puissance d'un moteur d'accélération ne se mesure pas uniquement à son abstraction logicielle, mais à sa capacité à supporter des optimisations matérielles extrêmes. Ce chapitre détaille comment GPUsync résout plusieurs problèmes canoniques du calcul intensif en poussant le matériel dans ses retranchements.
 
 ### 3.1 Alignement Dynamique Temporel (DTW) : Contourner la complexité spatiale
 
@@ -246,6 +242,17 @@ Au-delà de l'algorithmique logicielle, GPUsync pénètre profondément dans l'a
 Le moteur de transpilation CUDA de GPUsync active dynamiquement les instructions **WMMA (Warp Matrix Multiply and Accumulate)**. Contrairement aux cœurs ALU classiques qui additionnent les nombres un par un, un *Warp* (32 threads synchronisés matériellement) charge une matrice $16 \times 16$ entière dans les Tensor Cores, et exécute la multiplication $A \times B + C$ **en un seul cycle d'horloge**.
 L'opération est effectuée en demi-précision (FP16) mais les résultats s'accumulent dans des registres en simple précision (FP32), ce qui évite toute perte de précision numérique (Underflow/Overflow) tout en offrant des pics de performance dépassant le PétaFLOPS sur les puces d'entreprise de dernière génération.
 
+#### 3.3.3 Algorithmes Avancés Intégrés (K-Shape, LOESS, STOMP)
+
+Au-delà de la multiplication matricielle et du DTW, le moteur d'exécution et de transpilation JIT de GPUsync a été étendu pour prendre en charge d'autres algorithmes complexes de Data Science :
+
+- **Clustering K-Shape (SBD)** (`examples/kshape/`) : Repose sur la *Shape-Based Distance* (SBD) et l'utilisation de la cross-corrélation normalisée accélérée par FFT sur GPU.
+- **Régression Locale LOESS** (`examples/local_regression/`) : Parallélisation massive du lissage de courbes par moindres carrés pondérés.
+- **Matrix Profile / STOMP** (`examples/matrix_profile/`) : Calcul à très grande échelle du profil de matrice pour la recherche de motifs (*motifs*) et d'anomalies (*discords*) dans les séries temporelles.
+- **KNN-DTW** (`examples/knn_dtw/`) : Classification de k plus proches voisins avec métrique DTW parallélisée en VRAM.
+
+---
+
 ## 4. Résultats Expérimentaux et Analyse de Scalabilité
 
 Pour valider l'efficience de l'architecture logicielle et matérielle de GPUsync, nous avons soumis le framework à une série de benchmarks intensifs (*Stress Tests*), ciblant spécifiquement la contention mémoire et l'orchestration asynchrone.
@@ -269,7 +276,7 @@ Afin d'évaluer la robustesse de GPUsync face au standard absolu de l'industrie,
 
 L'optimisation centrale de l'implémentation K-Means sur GPUsync repose sur le **Memory Coalescing** : avant d'être injectés dans le pipeline asynchrone, les données sont restructurées de la RAM système vers un format `SoA` (Structure of Arrays) de manière pré-calculée. Cela permet aux coeurs matériels (Warps) d'effectuer des lectures contiguës en mémoire VRAM, multipliant la bande passante par un facteur de 32x.
 
-![Métriques Exhaustives K-Means](../examples/benchmark/kmeans/kmeans_metrics.png)
+![Métriques Exhaustives K-Means](../examples/kmeans/kmeans_benchmark.png)
 
 #### 4.2.1 Analyse du Temps d'Exécution et Vitesse Matérielle
 Le graphique supérieur gauche distingue formellement 3 temps d'exécution :
@@ -291,7 +298,7 @@ Cette équivalence stricte (sur près de 20 Milliards de calculs euclidiens) val
 ### 4.3 Benchmarks du Produit Matriciel : Comparaison des Architectures et Moteurs
 Pour mesurer l'impact réel des optimisations architecturales développées au Chapitre 3, nous avons benchmarké le produit de matrices carrées géantes en virgule flottante. L'objectif est d'évaluer la qualité du code transpilé par GPUsync face aux standards de l'industrie (PyTorch, cuBLAS).
 
-![Comparatif Complet des Performances Matricielles](../examples/benchmark/matrix/benchmark_results_complet.png)
+![Benchmark STOMP Matrix Profile](../examples/matrix_profile/stomp_benchmark.png)
 
 Ce graphique met en compétition cinq implémentations distinctes, illustrant parfaitement l'escalade des techniques d'optimisation bas-niveau :
 
@@ -339,8 +346,8 @@ Pour étendre la domination du framework et asseoir son statut de standard indus
 3. **Interopérabilité Tensorielle Zero-Copy (DLPack)**
    L'intégration du protocole standardisé `DLPack` permettrait aux tampons asynchrones (`AsyncBuffer`) de GPUsync d'être partagés sans aucune copie avec des frameworks Deep Learning tels que PyTorch. GPUsync pourrait ainsi agir comme un moteur de *Data-Augmentation* ou de *Loss Custom* intégré directement dans la boucle d'un réseau de neurones.
 
-4. **Implémentation d'Algorithmes Avancés (X-Means, DBSCAN)**
-   Afin de prouver la flexibilité du moteur AST face à des structures de flux complexes, la librairie a vocation à s'enrichir d'implémentations standardisées d'algorithmes plus complexes, tels que le X-Means (découverte automatique du nombre de clusters) ou des forêts aléatoires (Random Forests) sur GPU.
+4. **Implémentation d'Algorithmes Avancés (Validé)**
+   Le framework intègre désormais avec succès des algorithmes complexes de séries temporelles tels que K-Shape (SBD), STOMP (Matrix Profile), LOESS et KNN-DTW.
 
 5. **Mémoire Virtuelle Unifiée (UVM)**
    L'intégration matérielle des APIs `cudaMallocManaged` permettrait d'utiliser le pilote matériel comme un gestionnaire de pages de mémoire virtuelle (Page Faults), simplifiant drastiquement le code utilisateur au prix d'un compromis maîtrisable sur la latence.
