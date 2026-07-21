@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from gpusync.scheduler import Scheduler
 from gpusync.memory import AsyncBuffer
 from gpusync.compiler import gpusync_kernel
-from gpusync.opencl import get_local_id, local_memory, barrier, CLK_LOCAL_MEM_FENCE
+from gpusync.api.opencl import get_local_id, local_memory, barrier, CLK_LOCAL_MEM_FENCE
 
 # Dummy functions for Python AST parsing
 def get_global_id(dim): return 0
@@ -81,7 +81,7 @@ async def process_chunk(x_sub, gpu_X, gpu_C, gpu_sums, gpu_counts, N_chunk, chun
     # On rend le buffer au pool
     pool.put_nowait(gpu_X)
 
-from gpusync.bg_loop import auto_sync
+from gpusync.utils.bg_loop import auto_sync
 
 @auto_sync
 async def kmeans_out_of_core(X_data, K: int, initial_C=None, max_iters: int = 10, backend="cuda"):

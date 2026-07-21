@@ -11,7 +11,8 @@ except ImportError:
     print("Erreur: scikit-learn n'est pas installé. Lancez 'pip install scikit-learn'.")
     sys.exit(1)
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from kmeans_gpu import kmeans_out_of_core
 
