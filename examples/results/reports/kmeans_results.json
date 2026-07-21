@@ -1,0 +1,15 @@
+{
+  "name": "KMeans",
+  "description": "K-Means Cluster Assignment Phase (N points, K=16, D=8)",
+  "num_runs": 2,
+  "results": [
+    {
+      "size": 50000,
+      "mean_cpu": 0.026890149998507695,
+      "std_cpu": 0.0004537499989964999,
+      "mean_gpusync": 0.0033038500005204696,
+      "std_gpusync": 0.0007483500012313016,
+      "speedup": 8.13903476074022
+    }
+  ]
+}

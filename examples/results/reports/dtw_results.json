@@ -1,0 +1,23 @@
+{
+  "name": "DTW",
+  "description": "Dynamic Time Warping 1-to-N distance computation",
+  "num_runs": 2,
+  "results": [
+    {
+      "size": 10000,
+      "mean_cpu": 0.1278329999986454,
+      "std_cpu": 0.017048300000169547,
+      "mean_gpusync": 0.004197550000753836,
+      "std_gpusync": 0.002230650001365575,
+      "speedup": 30.454193511855234
+    },
+    {
+      "size": 50000,
+      "mean_cpu": 0.09326990000045043,
+      "std_cpu": 0.00043279999954393134,
+      "mean_gpusync": 0.005366749999666354,
+      "std_gpusync": 0.001171349998912774,
+      "speedup": 17.379214609633195
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "MatrixMult",
+  "description": "2D Dense Matrix Multiplication (N x N)",
+  "num_runs": 2,
+  "results": [
+    {
+      "size": 128,
+      "mean_cpu": 0.00031895000029180665,
+      "std_cpu": 8.954999975685496e-05,
+      "mean_gpusync": 0.0025652500007709023,
+      "std_gpusync": 0.0001124500013247598,
+      "speedup": 0.12433486022647174
+    }
+  ]
+}
