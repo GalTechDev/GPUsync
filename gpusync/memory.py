@@ -63,3 +63,72 @@ class AsyncBuffer:
         le stream de travail principal.
         """
         return await self.device_manager.dirty_read_buffer(self.cl_buffer, self.shape, self.dtype, stream=stream)
+
+    def __dlpack__(self, stream=None):
+        """
+        Exporte le buffer sous forme de PyCapsule DLPack (Zero-Copy VRAM).
+        Compatible avec PyTorch (torch.from_dlpack), CuPy (cupy.from_dlpack), etc.
+        """
+        if hasattr(self.cl_buffer, '__dlpack__'):
+            try:
+                return self.cl_buffer.__dlpack__(stream=stream)
+            except TypeError:
+                return self.cl_buffer.__dlpack__()
+        elif hasattr(self.cl_buffer, 'toDlpack'):
+            return self.cl_buffer.toDlpack()
+        else:
+            raise NotImplementedError(
+                f"L'objet buffer sous-jacent ({type(self.cl_buffer).__name__}) sous le backend '{self.backend}' "
+                "ne prend pas en charge l'exportation DLPack directe."
+            )
+
+    def __dlpack_device__(self):
+        """
+        Renvoie la description du périphérique au format DLPack : (device_type, device_id).
+        Ex: (1, 0) pour kDLCUDA (device 0), (13, 0) pour kDLCPU, (3, 0) pour kDLOpenCL.
+        """
+        if hasattr(self.cl_buffer, '__dlpack_device__'):
+            return self.cl_buffer.__dlpack_device__()
+        
+        if self.backend == "cuda":
+            dev_id = getattr(getattr(self.device_manager, 'device', None), 'id', 0)
+            return (1, dev_id)  # 1 = kDLCUDA
+        elif self.backend == "opencl":
+            return (3, 0)  # 3 = kDLOpenCL
+        else:
+            return (13, 0)  # 13 = kDLCPU
+
+    @classmethod
+    def from_dlpack(cls, dlpack_obj, scheduler=None):
+        """
+        Crée un AsyncBuffer à partir d'un objet externe compatible DLPack (ex: PyTorch Tensor, CuPy array)
+        sans aucune copie mémoire (Zero-Copy).
+        """
+        if scheduler is not None:
+            if hasattr(scheduler, 'get_queue'):
+                device_manager = scheduler
+            else:
+                device_manager = scheduler.get_best_device()
+        else:
+            device_manager = None
+
+        buffer_obj = None
+        backend = "cuda"
+        
+        try:
+            # pyrefly: ignore [missing-import]
+            import cupy as cp
+            if isinstance(dlpack_obj, cp.ndarray):
+                buffer_obj = dlpack_obj
+            else:
+                buffer_obj = cp.from_dlpack(dlpack_obj)
+            backend = "cuda"
+        except Exception:
+            buffer_obj = dlpack_obj
+            backend = getattr(dlpack_obj, 'backend', "cuda")
+
+        shape = getattr(buffer_obj, 'shape', ())
+        dtype = getattr(buffer_obj, 'dtype', np.float32)
+
+        return cls(device_manager, buffer_obj, shape, dtype, backend=backend)
+
