@@ -15,11 +15,11 @@ En intégrant un orchestrateur basé sur des graphes de dépendance acycliques (
 
 La documentation complète est disponible dans le dossier `docs/` :
 
-- [Sommaire du Wiki](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/Home.md)
-- [1. Architecture du Compilateur AST](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/1.-Architecture-du-Compilateur-AST.md)
-- [2. Gestion de la Mémoire et des Buffers (VRAM)](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/2.-Gestion-de-la-Mémoire-et-Buffers.md)
-- [3. Sélection des Périphériques et Schedulers](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/3.-Sélection-des-Périphériques-et-Schedulers.md)
-- [4. Guide de Démarrage Développeur](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/4.-Guide-de-Démarrage-Développeur.md)
+- [Sommaire du Wiki](https://github.com/GalTechDev/GPUsync/blob/main/docs/Home.md)
+- [1. Architecture du Compilateur AST](https://github.com/GalTechDev/GPUsync/blob/main/docs/1.-Architecture-du-Compilateur-AST.md)
+- [2. Gestion de la Mémoire et des Buffers (VRAM)](https://github.com/GalTechDev/GPUsync/blob/main/docs/2.-Gestion-de-la-Mémoire-et-Buffers.md)
+- [3. Sélection des Périphériques et Schedulers](https://github.com/GalTechDev/GPUsync/blob/main/docs/3.-Sélection-des-Périphériques-et-Schedulers.md)
+- [4. Guide de Démarrage Développeur](https://github.com/GalTechDev/GPUsync/blob/main/docs/4.-Guide-de-Démarrage-Développeur.md)
 
 ## Exemples
 
