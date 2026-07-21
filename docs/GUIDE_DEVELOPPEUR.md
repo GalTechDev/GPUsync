@@ -92,22 +92,44 @@ def addition_kernel(ctx: int, a: list, b: list) -> tuple:
 
 ---
 
-## 4. L'Exécution Multi-GPU avec `@gpusync_pipeline`
+## 4. Ordonnancement Multi-GPU : `SwarmScheduler` vs `MultiDeviceScheduler`
 
-Si vous chaînez plusieurs calculs, vous ne voulez pas rapatrier la donnée sur la RAM CPU entre chaque étape. De plus, si deux étapes sont indépendantes (ex: `A + B` et `C * D`), vous souhaitez qu'elles s'exécutent en parallèle sur des GPUs différents.
+GPUsync propose deux niveaux d'ordonnancement multi-GPU complémentaires selon l'architecture de vos calculs.
 
-Utilisez le **Planificateur DAG (Graphe Orienté Acyclique)** intégré :
+### A. Grain Fin (Périphériques) : `SwarmScheduler`
+
+Le `SwarmScheduler` regroupe plusieurs processeurs de calcul (GPUs CUDA et OpenCL) sous une même entité d'exécution. Il distribue les lancements de kernels individuels au niveau bas-niveau en mode Round-Robin / Multi-Streams :
 
 ```python
-from gpusync import MultiDeviceScheduler, gpusync_pipeline
+from gpusync import list_gpus, SwarmScheduler
 
-# 1. On donne au planificateur accès à nos cartes graphiques
-multi_sched = MultiDeviceScheduler([scheduler])
+gpus = list_gpus()
+# Pool d'exécution d'essaim regroupant tous les GPUs disponibles
+swarm = SwarmScheduler(gpus=gpus)
+swarm.initialize()
 
-# 2. Définition du pipeline
+# L'exécution du kernel sera automatiquement attribuée aux cartes du swarm
+res = addition_kernel(a_gpu, b_gpu, global_size=(1_000_000,), scheduler=swarm)
+```
+
+### B. Grain Gros (Pipelines DAG) : `MultiDeviceScheduler` & `@gpusync_pipeline`
+
+Lorsque votre algorithme comporte plusieurs étapes (graphe orienté acyclique - DAG), vous ne souhaitez pas rapatrier les données sur la RAM CPU entre chaque étape. De plus, les étapes indépendantes (ex: `A + B` et `C * D`) doivent s'exécuter simultanément.
+
+Le `MultiDeviceScheduler` orchestre les étapes de haut niveau d'un pipeline complet :
+
+```python
+from gpusync import list_gpus, Scheduler, MultiDeviceScheduler, gpusync_pipeline
+
+gpus = list_gpus()
+sched1 = Scheduler(gpu=gpus[0])
+sched2 = Scheduler(gpu=gpus[1]) if len(gpus) > 1 else sched1
+
+multi_sched = MultiDeviceScheduler([sched1, sched2])
+
 @gpusync_pipeline(multi_sched)
 def mon_gros_algorithme(a, b, c):
-    # Les étapes sans dépendance mutuelle s'exécutent en parallèle sur le cluster de GPUs
+    # Les étapes sans dépendance mutuelle s'exécutent en parallèle sur sched1 et sched2
     res1 = addition_kernel(a, b, global_size=(1_000_000,))
     res2 = addition_kernel(b, c, global_size=(1_000_000,))
     
@@ -116,6 +138,15 @@ def mon_gros_algorithme(a, b, c):
     
     return final # Seul le résultat final est téléchargé sur le CPU
 ```
+
+### Comparatif :
+
+| Caractéristique | `SwarmScheduler` | `MultiDeviceScheduler` |
+| :--- | :--- | :--- |
+| **Action** | Grain Fin : Répartit l'exécution de chaque kernel individuel. | Grain Gros : Répartit les étapes du graphe de calcul (DAG). |
+| **Backend** | Hétérogène (Mélange CUDA / OpenCL sous une même queue). | Orchestre une liste d'instances `Scheduler` ou `SwarmScheduler`. |
+| **Usage** | Passé via l'argument `scheduler=` d'un kernel. | Passé au décorateur `@gpusync_pipeline`. |
+
 
 ---
 
