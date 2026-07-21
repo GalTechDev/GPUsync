@@ -262,35 +262,7 @@ async def streaming_pipeline(X_disk, scheduler):
     await asyncio.gather(*active_tasks)
 ```
 
----
-
-## 9. Support de l'Architecture ABA (Asynchronous Blackboard Architecture)
-
-GPUsync supporte l'architecture ABA pour les traitements asynchrones multi-agents, où des kernels modifient un espace mémoire partagé pendant qu'un superviseur CPU observe l'état du système.
-
-### Le Swarm Mode (Multi-Streams)
-Vous pouvez injecter des Streams indépendants pour exécuter des calculs en parallèle sur le GPU :
-```python
-import cupy as cp
-stream_worker1 = cp.cuda.Stream(non_blocking=True)
-await mon_kernel(..., stream=stream_worker1)
-```
-
-### Le Lancement Non-Bloquant (Fire-and-Forget)
-L'argument `fire_and_forget=True` demande à GPUsync d'envoyer l'ordre d'exécution au GPU et de retourner immédiatement le buffer `AsyncBuffer` VRAM sans attendre la fin du calcul ni rapatrier les données sur le CPU :
-```python
-buf_res = await mon_kernel(..., fire_and_forget=True)
-```
-
-### Le Polling Asynchrone (Dirty Read)
-La méthode `dirty_read()` effectue un transfert DMA direct de la VRAM vers la RAM hôte sans geler les Streams de travail GPU en cours :
-```python
-canvas_snapshot = await mon_async_buffer.dirty_read()
-```
-
----
-
-## 10. Résolution des Problèmes Communs
+## 9. Résolution des Problèmes Communs
 
 1. **Memory Error / CUDA Out Of Memory** :
    Réduisez la taille des blocs ou utilisez l'approche Out-Of-Core (Section 8) avec `asyncio.Queue`.
