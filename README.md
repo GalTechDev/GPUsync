@@ -35,4 +35,4 @@ Le dossier `examples/` contient des implémentations de référence prêtes à l
 
 ## Remerciements
 
-Une mention toute particulière est adressée à **ThePhoenix78** pour son aide inestimable sur l'architecture mathématique et l'implémentation de l'ordonnanceur de Graphe Orienté Acyclique (DAG) Multi-GPU.
+Une mention toute particulière est adressée à **[`ThePhoenix78`](https://github.com/ThePhoenix78)** pour son aide inestimable sur l'architecture mathématique et l'implémentation de l'ordonnanceur de Graphe Orienté Acyclique (DAG) Multi-GPU.
