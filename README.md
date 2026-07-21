@@ -1,15 +1,45 @@
 # GPUsync
 
-**GPUsync** est un framework open-source novateur d'accélération matérielle Multi-GPU. Il offre une surcouche asynchrone intelligente capable de transpiler du code Python vers du C++ (CUDA) et du C99 (OpenCL) à la volée via une analyse de l'Arbre Syntaxique Abstrait (AST).
+**GPUsync** est un framework open-source novateur d'accélération matérielle Multi-GPU. Il offre une surcouche asynchrone intelligente capable de transpiler du code Python vers du C++ (CUDA), du C99 (OpenCL), du JIT CPU (LLVM) et de l'assembleur PTX (NVIDIA) à la volée via une analyse de l'Arbre Syntaxique Abstrait (AST).
 
-En intégrant un orchestrateur basé sur des graphes de dépendance acycliques (DAG) et du *Memory Pooling*, GPUsync permet d'exécuter des algorithmes complexes de manière asynchrone, distribuée, et en *Out-Of-Core* (Streaming). Il masque totalement la latence matérielle derrière une interface Python idiomatique.
+En intégrant un orchestrateur basé sur des graphes de dépendance acycliques (DAG), du *Zero-Copy DLPack*, et du *Memory Pooling*, GPUsync permet d'exécuter des algorithmes complexes de manière asynchrone, distribuée, et en *Out-Of-Core* (Streaming). Il masque totalement la latence matérielle derrière une interface Python idiomatique.
 
 ## Fonctionnalités Principales
 
-- **Transpilation JIT via AST** : Écrivez des kernels GPU directement en syntaxe Python pure. Le framework se charge de les transpiler et de les exécuter en CUDA C++ ou OpenCL C99.
-- **Exécution Asynchrone (Background Loop)** : L'utilisation du PCIe est maximisée grâce à une boucle d'exécution asynchrone tournant en tâche de fond.
-- **Ordonnancement Multi-GPU (DAG & Swarm)** : Répartition automatique de la charge de travail entre plusieurs cartes graphiques hétérogènes (NVIDIA CUDA, Intel OpenCL, AMD OpenCL).
-- **Traitement Out-Of-Core (Streaming)** : Dépassez les limites physiques de la VRAM (*Memory Wall*) grâce au *True Streaming* et au *Memory Pooling*.
+- **Transpilation JIT Multi-Backend (AST)** : Écrivez vos kernels en syntaxe Python pure (avec commentaires et docstrings gérés). GPUsync les transpile en CUDA C++, OpenCL C99, LLVM JIT CPU et NVIDIA PTX.
+- **Traitement Out-Of-Core Monoligne** : Découpez, streamez et traitez automatiquement des jeux de données géants (dépassant la VRAM) en 1 seule ligne de code via `kernel.map_out_of_core(dataset, scheduler)`.
+- **Streaming Disque Continu par Générateurs** : Passez directement une fonction génératrice Python (`yield`) lisant un fichier SSD NVMe/HDF5 dans `map_out_of_core` sans jamais charger l'intégralité du dataset en RAM.
+- **Zero-Copy DLPack Interopérabilité** : Échangez des pointeurs mémoire VRAM directement avec PyTorch et CuPy via `AsyncBuffer.__dlpack__` et `from_dlpack`.
+- **Moteur CPU LLVM Natif** : Exécutez vos kernels sur le processeur hôte (CPU) avec compilation JIT native (`backend="llvm"` via `llvmlite`).
+- **Ordonnancement Multi-GPU (DAG & Swarm)** : Répartition automatique de la charge de travail entre plusieurs cartes graphiques hétérogènes.
+
+## Démarrage Rapide (1 ligne Out-Of-Core)
+
+```python
+from gpusync import gpusync_kernel, Scheduler, list_gpus
+import numpy as np
+
+@gpusync_kernel
+def process_signal(ctx: int, data: list) -> tuple:
+    # Code exécuté en parallèle sur des millions de threads GPU
+    return data[ctx] * 2.5 + 1.0
+
+scheduler = Scheduler(gpu=list_gpus()[0])
+scheduler.initialize()
+
+# 1. Traitement automatique d'un dataset géant NumPy en Out-Of-Core (1 seule ligne !)
+resultat = process_signal.map_out_of_core(large_dataset_50GB, scheduler=scheduler)
+
+# 2. Streaming direct depuis un fichier sur disque SSD NVMe (Générateur yield)
+def stream_fichier_disque(filepath):
+    with open(filepath, "rb") as f:
+        while True:
+            chunk = np.fromfile(f, dtype=np.float32, count=1_000_000)
+            if len(chunk) == 0: break
+            yield chunk
+
+resultat_disque = process_signal.map_out_of_core(stream_fichier_disque("big.bin"), scheduler=scheduler)
+```
 
 ## Documentation
 
@@ -20,18 +50,6 @@ La documentation complète est disponible dans le dossier `docs/` :
 - [2. Gestion de la Mémoire et des Buffers (VRAM)](https://github.com/GalTechDev/GPUsync/blob/main/docs/2.-Gestion-de-la-Mémoire-et-Buffers.md)
 - [3. Sélection des Périphériques et Schedulers](https://github.com/GalTechDev/GPUsync/blob/main/docs/3.-Sélection-des-Périphériques-et-Schedulers.md)
 - [4. Guide de Démarrage Développeur](https://github.com/GalTechDev/GPUsync/blob/main/docs/4.-Guide-de-Démarrage-Développeur.md)
-
-## Exemples
-
-Le dossier `examples/` contient des implémentations de référence prêtes à l'emploi :
-- **DTW** (`examples/dtw/`) : Dynamic Time Warping.
-- **K-Means** (`examples/kmeans/`) : K-Means standard, Spherical K-Means et Mini-Batch K-Means.
-- **Multiplication Matricielle** (`examples/matrix/`) : Tiling 2D, Tensor Cores (WMMA), Double Buffering.
-- **KNN-DTW** (`examples/knn_dtw/`) : Classification K-Nearest Neighbors basée sur DTW.
-- **K-Shape** (`examples/kshape/`) : Clustering de séries temporelles par cross-corrélation (SBD).
-- **LOESS** (`examples/local_regression/`) : Régression locale pondérée.
-- **STOMP / Matrix Profile** (`examples/matrix_profile/`) : Calcul du Matrix Profile pour la détection de motifs et d'anomalies.
-- **Soft-DTW** (`examples/gr_soft_dtw/`) : Implémentation différentiable de Soft-DTW.
 
 ## Remerciements
 

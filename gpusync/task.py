@@ -1,13 +1,27 @@
 class AsyncTask:
     """
     Représente une tâche de calcul asynchrone (Kernel JIT) qui peut être exécutée
-    sur n'importe quel périphérique disponible (CUDA ou OpenCL).
+    sur n'importe quel périphérique disponible (CUDA, OpenCL, LLVM ou LLVM NVPTX).
     """
-    def __init__(self, kernel_code_opencl: str, kernel_name_opencl: str, kernel_code_cuda: str, kernel_name_cuda: str):
+    def __init__(
+        self,
+        kernel_code_opencl: str,
+        kernel_name_opencl: str,
+        kernel_code_cuda: str,
+        kernel_name_cuda: str,
+        kernel_code_llvm: str = None,
+        kernel_name_llvm: str = None,
+        kernel_code_ptx: str = None,
+        kernel_name_ptx: str = None
+    ):
         self.kernel_code_opencl = kernel_code_opencl
         self.kernel_name_opencl = kernel_name_opencl
         self.kernel_code_cuda = kernel_code_cuda
         self.kernel_name_cuda = kernel_name_cuda
+        self.kernel_code_llvm = kernel_code_llvm
+        self.kernel_name_llvm = kernel_name_llvm
+        self.kernel_code_ptx = kernel_code_ptx
+        self.kernel_name_ptx = kernel_name_ptx
         self._compiled_programs = {}
 
     async def execute(self, scheduler, global_size, local_size, *args, stream=None, fire_and_forget=False):

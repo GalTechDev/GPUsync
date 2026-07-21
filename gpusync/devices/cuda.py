@@ -74,7 +74,9 @@ class CUDADeviceManager:
         device_id = self.device.id
         
         if device_id not in task._compiled_programs:
-            module = cp.RawKernel(task.kernel_code_cuda, task.kernel_name_cuda)
+            code = getattr(task, 'kernel_code_ptx', None) or task.kernel_code_cuda
+            name = getattr(task, 'kernel_name_ptx', None) or task.kernel_name_cuda
+            module = cp.RawKernel(code, name)
             task._compiled_programs[device_id] = module
             
         kernel = task._compiled_programs[device_id]
