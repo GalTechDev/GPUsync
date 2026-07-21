@@ -13,13 +13,13 @@ En intégrant un orchestrateur basé sur des graphes de dépendance acycliques (
 
 ## Documentation
 
-La documentation complète est disponible sur le [Wiki GitHub](https://github.com/GalTechDev/GPUsync/wiki) ainsi que dans le dossier `docs/` :
+La documentation complète est disponible dans le dossier `docs/` :
 
-- [Sommaire du Wiki](https://github.com/GalTechDev/GPUsync/wiki/Home) ([docs/Home.md](docs/Home.md))
-- [1. Architecture du Compilateur AST](https://github.com/GalTechDev/GPUsync/wiki/1.-Architecture-du-Compilateur-AST) ([docs/1.-Architecture-du-Compilateur-AST.md](docs/1.-Architecture-du-Compilateur-AST.md))
-- [2. Gestion de la Mémoire et des Buffers (VRAM)](https://github.com/GalTechDev/GPUsync/wiki/2.-Gestion-de-la-M%C3%A9moire-et-Buffers) ([docs/2.-Gestion-de-la-Mémoire-et-Buffers.md](docs/2.-Gestion-de-la-Mémoire-et-Buffers.md))
-- [3. Sélection des Périphériques et Schedulers](https://github.com/GalTechDev/GPUsync/wiki/3.-S%C3%A9lection-des-P%C3%A9riph%C3%A9riques-et-Schedulers) ([docs/3.-Sélection-des-Périphériques-et-Schedulers.md](docs/3.-Sélection-des-Périphériques-et-Schedulers.md))
-- [4. Guide de Démarrage Développeur](https://github.com/GalTechDev/GPUsync/wiki/4.-Guide-de-D%C3%A9marrage-D%C3%A9veloppeur) ([docs/4.-Guide-de-Démarrage-Développeur.md](docs/4.-Guide-de-Démarrage-Développeur.md))
+- [Sommaire du Wiki](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/Home.md)
+- [1. Architecture du Compilateur AST](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/1.-Architecture-du-Compilateur-AST.md)
+- [2. Gestion de la Mémoire et des Buffers (VRAM)](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/2.-Gestion-de-la-Mémoire-et-Buffers.md)
+- [3. Sélection des Périphériques et Schedulers](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/3.-Sélection-des-Périphériques-et-Schedulers.md)
+- [4. Guide de Démarrage Développeur](https://github.com/GalTechDev/GPUsync/blob/main/gpusync/docs/4.-Guide-de-Démarrage-Développeur.md)
 
 ## Exemples
 
