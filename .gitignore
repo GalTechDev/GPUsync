@@ -1,0 +1,4 @@
+*.dat
+__pycache__/
+scratch/*
+.pytest_cache/

@@ -1,0 +1,191 @@
+# pyrefly: ignore [missing-import]
+import pyopencl as cl
+import logging
+from typing import List
+from .utils.bg_loop import auto_sync
+
+logger = logging.getLogger(__name__)
+
+class Scheduler:
+    def __init__(self, num_queues_per_device: int = 4, backend: str = None, gpu = None):
+        """
+        Initialise un Scheduler.
+        
+        Args:
+            num_queues_per_device (int): Nombre de files de commande (streams/queues) par GPU.
+            backend (str, optional): "opencl" ou "cuda". Si None et gpu est fourni, on utilise le backend du gpu.
+            gpu (GPUDeviceInfo ou raw device, optional): GPU spécifique à utiliser.
+        """
+        self.gpu = gpu
+        if gpu is not None and hasattr(gpu, 'backend'):
+            self.backend = backend.lower() if backend is not None else gpu.backend
+        else:
+            self.backend = backend.lower() if backend is not None else "opencl"
+            
+        self.devices_managers = []
+        self.num_queues_per_device = num_queues_per_device
+        self._next_device_idx = 0
+
+    @auto_sync
+    async def initialize(self, device_name_filter: str = None):
+        """
+        Initialise le(s) périphérique(s) de calcul.
+        Si un `gpu` spécifique a été passé dans le constructeur, il est configuré directement.
+        Sinon, effectue une découverte automatique filtrée par `device_name_filter`.
+        """
+        from .devices import ALL_DEVICE_MANAGERS
+        manager_cls = next((c for c in ALL_DEVICE_MANAGERS if c.backend == self.backend), None)
+        
+        if manager_cls is None:
+            raise ValueError(f"Backend '{self.backend}' non supporté. Backends disponibles: {[c.backend for c in ALL_DEVICE_MANAGERS]}")
+
+        if self.gpu is not None:
+            # 1. Utilisation du GPU spécifié
+            raw_device = getattr(self.gpu, 'raw_device', self.gpu)
+            if self.backend == "cuda" and isinstance(raw_device, int):
+                # pyrefly: ignore [missing-import]
+                import cupy as cp
+                raw_device = cp.cuda.Device(raw_device)
+            
+            manager = manager_cls(raw_device, num_queues=self.num_queues_per_device)
+            self.devices_managers.append(manager)
+            logger.info(f"Périphérique {self.backend.upper()} initialisé (spécifié) : {manager.name}")
+        else:
+            # 2. Découverte automatique dynamique
+            devs = manager_cls.discover_devices(name_filter=device_name_filter)
+            for dev in devs:
+                try:
+                    manager = manager_cls(dev, num_queues=self.num_queues_per_device)
+                    self.devices_managers.append(manager)
+                    logger.info(f"Périphérique {self.backend.upper()} initialisé : {manager.name}")
+                except Exception as e:
+                    dev_name = getattr(dev, 'name', dev)
+                    logger.error(f"Impossible d'initialiser le GPU {self.backend.upper()} {dev_name}: {e}")
+
+            if not self.devices_managers:
+                raise RuntimeError(f"Le Scheduler {self.backend.upper()} n'a pu initialiser aucun périphérique.")
+
+        logger.info(f"Scheduler {self.backend.upper()} prêt. {len(self.devices_managers)} périphérique(s) disponible(s).")
+
+    def get_best_device(self):
+        """
+        Répartit la charge entre les différents GPUs physiques détectés (Round-Robin).
+        """
+        if not self.devices_managers:
+            raise RuntimeError("Scheduler non initialisé ou aucun périphérique détecté.")
+        
+        manager = self.devices_managers[self._next_device_idx]
+        self._next_device_idx = (self._next_device_idx + 1) % len(self.devices_managers)
+        return manager
+
+class SwarmScheduler:
+    """
+    Le Quartier Général pour l'architecture ABA / Swarm.
+    Initialise automatiquement CUDA pour les cartes Nvidia, et OpenCL pour le reste (Intel, AMD).
+    Unifie tous les managers de périphériques en un seul pool de calcul.
+    """
+    def __init__(self, num_queues_per_device: int = 4, gpus: List = None):
+        """
+        Initialise un SwarmScheduler.
+        
+        Args:
+            num_queues_per_device (int): Nombre de files de commande par GPU.
+            gpus (List, optional): Liste restreinte de périphériques (GPUDeviceInfo ou bruts) à ajouter à l'essaim.
+                                   Si None, découvre automatiquement tous les GPUs du système.
+        """
+        self.num_queues_per_device = num_queues_per_device
+        self.gpus = gpus
+        self.devices_managers = []
+        self._next_device_idx = 0
+
+    @auto_sync
+    async def initialize(self):
+        from .devices import ALL_DEVICE_MANAGERS
+        
+        # 1. Si une liste spécifique de périphériques est fournie
+        if self.gpus is not None:
+            for gpu in self.gpus:
+                backend = getattr(gpu, 'backend', None)
+                raw_device = getattr(gpu, 'raw_device', gpu)
+                
+                # Détection automatique du backend si non spécifié (heuristic)
+                if backend is None:
+                    try:
+                        # pyrefly: ignore [missing-import]
+                        import pyopencl as cl
+                        if isinstance(raw_device, cl.Device):
+                            backend = "opencl"
+                    except Exception:
+                        pass
+                    if backend is None:
+                        backend = "cuda"  # fallback par défaut
+                
+                # Recherche du manager de périphérique associé au backend
+                manager_cls = next((c for c in ALL_DEVICE_MANAGERS if c.backend == backend), None)
+                if manager_cls is None:
+                    logger.error(f"[Swarm] Aucun manager trouvé pour le backend '{backend}'")
+                    continue
+                    
+                try:
+                    if backend == "cuda" and isinstance(raw_device, int):
+                        # pyrefly: ignore [missing-import]
+                        import cupy as cp
+                        raw_device = cp.cuda.Device(raw_device)
+                    manager = manager_cls(raw_device, num_queues=self.num_queues_per_device)
+                    self.devices_managers.append(manager)
+                    logger.info(f"[Swarm] Périphérique {backend.upper()} initialisé (spécifié) : {manager.name}")
+                except Exception as e:
+                    logger.error(f"[Swarm] Impossible d'initialiser {backend.upper()} pour {raw_device}: {e}")
+        else:
+            # 2. Découverte automatique sur l'ensemble des managers enregistrés
+            for manager_cls in ALL_DEVICE_MANAGERS:
+                devs = manager_cls.discover_devices()
+                for dev in devs:
+                    # En mode découverte auto sur Swarm, on évite le doublon Nvidia sous OpenCL
+                    if manager_cls.backend == "opencl":
+                        dev_name = getattr(dev, 'name', '')
+                        dev_vendor = getattr(dev, 'vendor', '')
+                        if "nvidia" in dev_name.lower() or "nvidia" in dev_vendor.lower():
+                            continue # Déjà géré par CUDA en principe
+                            
+                    try:
+                        manager = manager_cls(dev, num_queues=self.num_queues_per_device)
+                        self.devices_managers.append(manager)
+                        logger.info(f"[Swarm] {manager_cls.backend.upper()} détecté et ajouté : {manager.name}")
+                    except Exception as e:
+                        dev_name = getattr(dev, 'name', dev)
+                        logger.error(f"[Swarm] Erreur lors de l'initialisation de {dev_name}: {e}")
+
+        if not self.devices_managers:
+            raise RuntimeError("SwarmScheduler n'a pu initialiser AUCUN périphérique de calcul !")
+            
+        logger.info(f"SwarmScheduler PRÊT. {len(self.devices_managers)} périphérique(s) dans l'essaim.")
+
+    def get_best_device(self):
+        if not self.devices_managers:
+            raise RuntimeError("SwarmScheduler non initialisé.")
+        manager = self.devices_managers[self._next_device_idx]
+        self._next_device_idx = (self._next_device_idx + 1) % len(self.devices_managers)
+        return manager
+
+    def get_device(self, identifier: str):
+        """
+        identifier: ex "cuda:0", "opencl:1", ou "intel"
+        """
+        identifier = identifier.lower()
+        if ":" in identifier:
+            backend, idx = identifier.split(":")
+            idx = int(idx)
+            # Filtre par backend
+            managers = [m for m in self.devices_managers if hasattr(m, 'backend') and m.backend == backend]
+            if idx < len(managers):
+                return managers[idx]
+        else:
+            # Filtre par nom
+            for m in self.devices_managers:
+                if hasattr(m, 'name') and identifier in m.name.lower():
+                    return m
+        
+        # Fallback si non trouvé
+        logger.warning(f"[Swarm] Périphérique '{identifier}' non trouvé, fallback sur Round-Robin.")
+        return self.get_best_device()
