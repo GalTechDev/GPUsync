@@ -1,0 +1,40 @@
+{
+  "name": "STOMP",
+  "description": "Matrix Profile Computation using STOMP",
+  "num_runs": 2,
+  "variants": [
+    "GPUsync STOMP Fit"
+  ],
+  "results": [
+    {
+      "size": 10000,
+      "mean_cpu": 0.1547829785711907,
+      "std_cpu": 0.0017991695707947656,
+      "variants": {
+        "GPUsync STOMP Fit": {
+          "mean": 0.07474794999961887,
+          "std": 0.00269525000021531,
+          "speedup": 2.070732087929902,
+          "skipped": false,
+          "scaled_cpu_mean": 0.1547829785711907,
+          "scaled_cpu_std": 0.0017991695707947656
+        }
+      }
+    },
+    {
+      "size": 25000,
+      "mean_cpu": 0.35181284942994356,
+      "std_cpu": 0.017704689867283015,
+      "variants": {
+        "GPUsync STOMP Fit": {
+          "mean": 0.3249494500005312,
+          "std": 0.024582549999649927,
+          "speedup": 1.0826694719113032,
+          "skipped": false,
+          "scaled_cpu_mean": 0.35181284942994356,
+          "scaled_cpu_std": 0.017704689867283015
+        }
+      }
+    }
+  ]
+}

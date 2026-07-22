@@ -1,15 +1,156 @@
 {
   "name": "MatrixMult",
-  "description": "2D Dense Matrix Multiplication (N x N)",
+  "description": "2D Dense Matrix Multiplication (N x N) - Comparison of 6 variants",
   "num_runs": 2,
+  "variants": [
+    "OpenCL Tiled",
+    "OpenCL 2D Tiling",
+    "CUDA Double Buffering",
+    "CUDA WMMA",
+    "CUDA WMMA 2D",
+    "CUDA Direct cuBLAS"
+  ],
   "results": [
     {
       "size": 128,
-      "mean_cpu": 0.00031895000029180665,
-      "std_cpu": 8.954999975685496e-05,
-      "mean_gpusync": 0.0025652500007709023,
-      "std_gpusync": 0.0001124500013247598,
-      "speedup": 0.12433486022647174
+      "mean_cpu": 0.0003347999991092365,
+      "std_cpu": 3.079999987676274e-05,
+      "variants": {
+        "OpenCL Tiled": {
+          "mean": 0.004374250000182656,
+          "std": 0.00022754999918106478,
+          "speedup": 0.07653883502206237,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0003347999991092365,
+          "scaled_cpu_std": 3.079999987676274e-05
+        },
+        "OpenCL 2D Tiling": {
+          "mean": 0.005429199999525736,
+          "std": 0.0001098000002457411,
+          "speedup": 0.06166654371518507,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0003347999991092365,
+          "scaled_cpu_std": 3.079999987676274e-05
+        },
+        "CUDA Double Buffering": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA WMMA": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA WMMA 2D": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA Direct cuBLAS": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        }
+      }
+    },
+    {
+      "size": 256,
+      "mean_cpu": 0.0005004999993616366,
+      "std_cpu": 6.8700000156241e-05,
+      "variants": {
+        "OpenCL Tiled": {
+          "mean": 0.005160450000403216,
+          "std": 0.0005680499998561572,
+          "speedup": 0.0969876656730575,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0005004999993616366,
+          "scaled_cpu_std": 6.8700000156241e-05
+        },
+        "OpenCL 2D Tiling": {
+          "mean": 0.0047594999996363185,
+          "std": 4.269999953976367e-05,
+          "speedup": 0.10515810471685695,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0005004999993616366,
+          "scaled_cpu_std": 6.8700000156241e-05
+        },
+        "CUDA Double Buffering": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA WMMA": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA WMMA 2D": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA Direct cuBLAS": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        }
+      }
+    },
+    {
+      "size": 512,
+      "mean_cpu": 0.0017404999998689163,
+      "std_cpu": 0.0001126000006479444,
+      "variants": {
+        "OpenCL Tiled": {
+          "mean": 0.011155150000377034,
+          "std": 0.0012805500000467873,
+          "speedup": 0.15602658859899587,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0017404999998689163,
+          "scaled_cpu_std": 0.0001126000006479444
+        },
+        "OpenCL 2D Tiling": {
+          "mean": 0.0071702999994158745,
+          "std": 9.110000064538326e-05,
+          "speedup": 0.24273740289955867,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0017404999998689163,
+          "scaled_cpu_std": 0.0001126000006479444
+        },
+        "CUDA Double Buffering": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA WMMA": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA WMMA 2D": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        },
+        "CUDA Direct cuBLAS": {
+          "mean": null,
+          "std": null,
+          "speedup": null,
+          "skipped": true
+        }
+      }
     }
   ]
 }

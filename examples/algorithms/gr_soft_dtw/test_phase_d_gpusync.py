@@ -9,9 +9,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 
 from gpusync.scheduler import Scheduler
 from gpusync.memory import AsyncBuffer
-from gpusync.utils.bg_loop import auto_sync
 from examples.algorithms.gr_soft_dtw.gr_soft_dtw_engine import get_sdtw_fwd_bwd_kernel, get_sdtw_double_bwd_kernel
-
+from gpusync.utils.bg_loop import auto_sync
 @auto_sync
 async def run_test_8_gpusync_benchmark():
     print("=== TEST 8: Benchmark GPUsync OpenCL JIT Kernel ===")

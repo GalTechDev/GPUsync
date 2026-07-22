@@ -1,0 +1,40 @@
+{
+  "name": "KShape",
+  "description": "KShape Time Series Clustering",
+  "num_runs": 2,
+  "variants": [
+    "GPUsync Hybrid Fit"
+  ],
+  "results": [
+    {
+      "size": 100,
+      "mean_cpu": 0.22060784999939642,
+      "std_cpu": 0.0021723500003645313,
+      "variants": {
+        "GPUsync Hybrid Fit": {
+          "mean": 0.09199235000050976,
+          "std": 0.0036288499995862367,
+          "speedup": 2.3981108211516933,
+          "skipped": false,
+          "scaled_cpu_mean": 0.22060784999939642,
+          "scaled_cpu_std": 0.0021723500003645313
+        }
+      }
+    },
+    {
+      "size": 250,
+      "mean_cpu": 0.4686610999997356,
+      "std_cpu": 0.02976640000088082,
+      "variants": {
+        "GPUsync Hybrid Fit": {
+          "mean": 0.16062679999959073,
+          "std": 0.00021419999939098489,
+          "speedup": 2.9177017782893624,
+          "skipped": false,
+          "scaled_cpu_mean": 0.4686610999997356,
+          "scaled_cpu_std": 0.02976640000088082
+        }
+      }
+    }
+  ]
+}

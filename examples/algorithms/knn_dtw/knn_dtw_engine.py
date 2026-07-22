@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from gpusync.scheduler import Scheduler
 from gpusync.memory import AsyncBuffer
 
-from examples.dtw.dtw_gpu_engine import get_sliding_dtw_kernel
+from examples.algorithms.dtw.dtw_gpu_engine import get_sliding_dtw_kernel
 
 
 

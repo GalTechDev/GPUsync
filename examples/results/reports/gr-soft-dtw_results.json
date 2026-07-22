@@ -1,0 +1,40 @@
+{
+  "name": "GR-Soft-DTW",
+  "description": "Graph-Regularized Soft-DTW Forward/Backward/HVP",
+  "num_runs": 2,
+  "variants": [
+    "GPUsync FWD+BWD+HVP"
+  ],
+  "results": [
+    {
+      "size": 50,
+      "mean_cpu": 1.2336680999997043,
+      "std_cpu": 0.044115400000009686,
+      "variants": {
+        "GPUsync FWD+BWD+HVP": {
+          "mean": 0.029385849999925995,
+          "std": 0.0014699499997732346,
+          "speedup": 41.98170548079471,
+          "skipped": false,
+          "scaled_cpu_mean": 1.2336680999997043,
+          "scaled_cpu_std": 0.044115400000009686
+        }
+      }
+    },
+    {
+      "size": 75,
+      "mean_cpu": 1.1102570000002743,
+      "std_cpu": 0.00016229999891947955,
+      "variants": {
+        "GPUsync FWD+BWD+HVP": {
+          "mean": 0.01968464999936259,
+          "std": 0.00014524999915010994,
+          "speedup": 56.40217123678732,
+          "skipped": false,
+          "scaled_cpu_mean": 1.1102570000002743,
+          "scaled_cpu_std": 0.00016229999891947955
+        }
+      }
+    }
+  ]
+}

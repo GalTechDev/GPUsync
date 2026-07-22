@@ -1,15 +1,40 @@
 {
   "name": "KMeans",
-  "description": "K-Means Cluster Assignment Phase (N points, K=16, D=8)",
+  "description": "K-Means Cluster Assignment Phase (N points, K=16, D=8) using kmeans_engine",
   "num_runs": 2,
+  "variants": [
+    "GPUsync"
+  ],
   "results": [
     {
       "size": 50000,
-      "mean_cpu": 0.026890149998507695,
-      "std_cpu": 0.0004537499989964999,
-      "mean_gpusync": 0.0033038500005204696,
-      "std_gpusync": 0.0007483500012313016,
-      "speedup": 8.13903476074022
+      "mean_cpu": 0.030727449999176315,
+      "std_cpu": 0.002336650000870577,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.011909349998859398,
+          "std": 0.0004941500001223176,
+          "speedup": 2.580111425234727,
+          "skipped": false,
+          "scaled_cpu_mean": 0.030727449999176315,
+          "scaled_cpu_std": 0.002336650000870577
+        }
+      }
+    },
+    {
+      "size": 250000,
+      "mean_cpu": 0.15172664999954577,
+      "std_cpu": 0.003598450000936282,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.04402785000002041,
+          "std": 0.00028574999942065915,
+          "speedup": 3.4461516971524944,
+          "skipped": false,
+          "scaled_cpu_mean": 0.15172664999954577,
+          "scaled_cpu_std": 0.003598450000936282
+        }
+      }
     }
   ]
 }

@@ -1,0 +1,55 @@
+{
+  "name": "MMTS (Time Series X-Means)",
+  "description": "Clustering de s\u00e9ries temporelles avec X-Means et DTW contraint (W=5, K=3)",
+  "num_runs": 2,
+  "variants": [
+    "GPUsync"
+  ],
+  "results": [
+    {
+      "size": 50,
+      "mean_cpu": 0.0767687500010652,
+      "std_cpu": 0.0066346499988867436,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.011962050000875024,
+          "std": 0.0009102500007429626,
+          "speedup": 6.417691783218559,
+          "skipped": false,
+          "scaled_cpu_mean": 0.0767687500010652,
+          "scaled_cpu_std": 0.0066346499988867436
+        }
+      }
+    },
+    {
+      "size": 100,
+      "mean_cpu": 0.13138299999991432,
+      "std_cpu": 0.0006386999993992504,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.00960674999805633,
+          "std": 0.0005589499996858649,
+          "speedup": 13.676113152366426,
+          "skipped": false,
+          "scaled_cpu_mean": 0.13138299999991432,
+          "scaled_cpu_std": 0.0006386999993992504
+        }
+      }
+    },
+    {
+      "size": 150,
+      "mean_cpu": 0.21498444999997446,
+      "std_cpu": 0.006156850000479608,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.010084350000397535,
+          "std": 1.6549998690607026e-05,
+          "speedup": 21.318622419045308,
+          "skipped": false,
+          "scaled_cpu_mean": 0.21498444999997446,
+          "scaled_cpu_std": 0.006156850000479608
+        }
+      }
+    }
+  ]
+}

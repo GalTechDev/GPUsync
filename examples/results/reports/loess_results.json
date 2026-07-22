@@ -1,0 +1,40 @@
+{
+  "name": "LOESS",
+  "description": "Local Regression (LOWESS) Smoothing",
+  "num_runs": 2,
+  "variants": [
+    "GPUsync LOESS Fit"
+  ],
+  "results": [
+    {
+      "size": 10000,
+      "mean_cpu": 0.37528014999952575,
+      "std_cpu": 0.008751449999181204,
+      "variants": {
+        "GPUsync LOESS Fit": {
+          "mean": 0.009173000000373577,
+          "std": 0.001223799999934272,
+          "speedup": 40.91138667657715,
+          "skipped": false,
+          "scaled_cpu_mean": 0.37528014999952575,
+          "scaled_cpu_std": 0.008751449999181204
+        }
+      }
+    },
+    {
+      "size": 25000,
+      "mean_cpu": 0.8545278749988938,
+      "std_cpu": 0.03514687499773572,
+      "variants": {
+        "GPUsync LOESS Fit": {
+          "mean": 0.008001100000001315,
+          "std": 1.6999993022182025e-06,
+          "speedup": 106.80129919620468,
+          "skipped": false,
+          "scaled_cpu_mean": 0.8545278749988938,
+          "scaled_cpu_std": 0.03514687499773572
+        }
+      }
+    }
+  ]
+}

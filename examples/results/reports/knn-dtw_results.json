@@ -1,0 +1,57 @@
+{
+  "name": "KNN-DTW",
+  "description": "K-Nearest Neighbors Dynamic Time Warping window search",
+  "num_runs": 2,
+  "variants": [
+    "Single Query",
+    "Multi-Query (Q=4)"
+  ],
+  "results": [
+    {
+      "size": 10000,
+      "mean_cpu": 0.06923414999982924,
+      "std_cpu": 0.0016344499999831896,
+      "variants": {
+        "Single Query": {
+          "mean": 0.02343165000092995,
+          "std": 0.00017825000031734817,
+          "speedup": 2.954727899959307,
+          "skipped": false,
+          "scaled_cpu_mean": 0.06923414999982924,
+          "scaled_cpu_std": 0.0016344499999831896
+        },
+        "Multi-Query (Q=4)": {
+          "mean": 0.022800500000812463,
+          "std": 0.00022589999935007654,
+          "speedup": 3.0365189358725546,
+          "skipped": false,
+          "scaled_cpu_mean": 0.06923414999982924,
+          "scaled_cpu_std": 0.0016344499999831896
+        }
+      }
+    },
+    {
+      "size": 25000,
+      "mean_cpu": 0.1815275526886094,
+      "std_cpu": 0.000764102186170747,
+      "variants": {
+        "Single Query": {
+          "mean": 0.05358980000073643,
+          "std": 0.0005465000003823661,
+          "speedup": 3.387352680661522,
+          "skipped": false,
+          "scaled_cpu_mean": 0.1815275526886094,
+          "scaled_cpu_std": 0.000764102186170747
+        },
+        "Multi-Query (Q=4)": {
+          "mean": 0.04525389999980689,
+          "std": 0.0024843000010150718,
+          "speedup": 4.011312896554419,
+          "skipped": false,
+          "scaled_cpu_mean": 0.1815275526886094,
+          "scaled_cpu_std": 0.000764102186170747
+        }
+      }
+    }
+  ]
+}

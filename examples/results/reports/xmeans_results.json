@@ -1,0 +1,80 @@
+{
+  "name": "XMeans",
+  "description": "Standard X-Means Multidimensional Clustering (N points, D=8, K_min=2, K_max=16)",
+  "num_runs": 3,
+  "variants": [
+    "GPUsync",
+    "GPUsync-Genetic"
+  ],
+  "results": [
+    {
+      "size": 10000,
+      "mean_cpu": 0.018418566668212105,
+      "std_cpu": 0.0012221627851047836,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.03561743333557388,
+          "std": 0.010663459096662638,
+          "speedup": 0.5171222332243706,
+          "skipped": false,
+          "scaled_cpu_mean": 0.018418566668212105,
+          "scaled_cpu_std": 0.0012221627851047836
+        },
+        "GPUsync-Genetic": {
+          "mean": 0.11014403333319933,
+          "std": 0.017136344317666904,
+          "speedup": 0.16722255496576616,
+          "skipped": false,
+          "scaled_cpu_mean": 0.018418566668212105,
+          "scaled_cpu_std": 0.0012221627851047836
+        }
+      }
+    },
+    {
+      "size": 50000,
+      "mean_cpu": 0.11359200000151759,
+      "std_cpu": 0.002236208832913206,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.1354367333345484,
+          "std": 0.0033199453665124726,
+          "speedup": 0.8387089470101797,
+          "skipped": false,
+          "scaled_cpu_mean": 0.11359200000151759,
+          "scaled_cpu_std": 0.002236208832913206
+        },
+        "GPUsync-Genetic": {
+          "mean": 0.21465163333292972,
+          "std": 0.07659356360461293,
+          "speedup": 0.5291923394094734,
+          "skipped": false,
+          "scaled_cpu_mean": 0.11359200000151759,
+          "scaled_cpu_std": 0.002236208832913206
+        }
+      }
+    },
+    {
+      "size": 100000,
+      "mean_cpu": 0.23304503333323132,
+      "std_cpu": 0.0029754854570990313,
+      "variants": {
+        "GPUsync": {
+          "mean": 0.28836716666652745,
+          "std": 0.0607837208581357,
+          "speedup": 0.8081538409077218,
+          "skipped": false,
+          "scaled_cpu_mean": 0.23304503333323132,
+          "scaled_cpu_std": 0.0029754854570990313
+        },
+        "GPUsync-Genetic": {
+          "mean": 0.4806722666677767,
+          "std": 0.0871822423871793,
+          "speedup": 0.4848314527251551,
+          "skipped": false,
+          "scaled_cpu_mean": 0.23304503333323132,
+          "scaled_cpu_std": 0.0029754854570990313
+        }
+      }
+    }
+  ]
+}

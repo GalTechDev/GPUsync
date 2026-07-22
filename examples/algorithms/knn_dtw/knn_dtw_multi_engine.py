@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from gpusync.scheduler import Scheduler
 from gpusync.memory import AsyncBuffer
 
-from examples.dtw.dtw_gpu_engine import get_sliding_dtw_multi_kernel
+from examples.algorithms.dtw.dtw_gpu_engine import get_sliding_dtw_multi_kernel
 
 
 async def knn_dtw_multi_search(queries_matrix: np.ndarray, time_series: np.ndarray, K: int, scheduler: Scheduler, chunk_size: int = 1_000_000):

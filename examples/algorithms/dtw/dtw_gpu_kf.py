@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from gpusync.scheduler import Scheduler
 from gpusync.memory import AsyncBuffer
 
-from examples.dtw.dtw_gpu_engine import get_batch_dtw_kernel
+from examples.algorithms.dtw.dtw_gpu_engine import get_batch_dtw_kernel
 
 # Création du Kernel compilé (M=32, num_refs=100) pour préserver le setup exact
 batch_dtw_fused_constant = get_batch_dtw_kernel(32, 100)
