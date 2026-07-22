@@ -275,7 +275,7 @@ class XmeansTS:
 
     def getLastMat(self, tabEnviIndice, w):
         MatriceDist = pd.DataFrame()
-        if not self.centroids or not self.data:
+        if not self.centroids or self.data is None or len(self.data) == 0:
             MatriceDist[ID_COLUMN] = self.dfListID[ID_COLUMN]
             return MatriceDist
         keys_list = list(self.centroids.keys())

@@ -275,7 +275,7 @@ class XmeansTS:
 
     def getLastMat(self, tabEnviIndice, w):
         MatriceDist = pd.DataFrame()
-        if not self.centroids or not self.data:
+        if not self.centroids or self.data is None or len(self.data) == 0:
             MatriceDist[ID_COLUMN] = self.dfListID[ID_COLUMN]
             return MatriceDist
         keys_list = list(self.centroids.keys())
@@ -416,3 +416,138 @@ def defineCoeff(data, num_clust, num_iter, listDataFrame, LastnbClust, tabEnviIn
                     coeffTemp.append(stdTemp / entropy)
 
     return coeffTemp if coeffTemp else [1.0]
+
+
+if __name__ == "__main__":
+    print("=" * 80)
+    print(" EXECUTION COMPLET DU PIPELINE MMTS SUR DONNEES REELLES (GPU ONLY)")
+    print("=" * 80)
+
+    # Résolution dynamique des chemins
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = os.path.join(HERE, "data")
+    
+    ROMANE_DATA_PATH = os.path.join(DATA_DIR, "RomaneDataSet_")
+    
+    file_csv = os.path.join(DATA_DIR, "RomaneDataSet_TEMP.csv")
+    file_temp = os.path.join(DATA_DIR, "RomaneDataSet_TEMP.xlsx")
+    
+    if not os.path.exists(file_csv):
+        print(f"[!] Fichier CSV source introuvable : {file_csv}. Fin.")
+        sys.exit(1)
+        
+    print(f"[+] Conversion de {file_csv} en fichier Excel de production structuré par fenêtres glissantes...")
+    df_csv = pd.read_csv(file_csv)
+    raw = df_csv["value"].values.astype(np.float32)
+    WINDOW = 32
+    N_all = len(raw) - WINDOW + 1
+    
+    # Limiter le nombre de séries pour accélérer le test final
+    limit_n = 200
+    if N_all > limit_n:
+        N_all = limit_n
+        
+    data_list = [raw[i : i + WINDOW] for i in range(N_all)]
+    
+    # Création du DataFrame structuré
+    df_temp = pd.DataFrame(data_list)
+    df_temp.columns = [f"val_{i}" for i in range(WINDOW)]
+    df_temp.insert(0, ID_COLUMN, [f"TS_{i:04d}" for i in range(N_all)])
+    
+    # Enregistrer au format Excel
+    df_temp.to_excel(file_temp, index=False)
+    print(f"    - TEMP : {N_all} séries converties et écrites dans {file_temp}")
+    
+    # Extraction des données et préparation des listes d'IDs
+    data_temp = df_temp.drop([ID_COLUMN], axis=1).values.astype(np.float32)
+    listID_temp = pd.DataFrame({ID_COLUMN: df_temp[ID_COLUMN]})
+    
+    # 1. INITIALISATION DU SCHEDULER ET DU MOTEUR X-MEANS GPU
+    from gpusync import Scheduler, list_gpus
+    gpus = list_gpus()
+    if not gpus:
+        print("[!] Aucun GPU compatible OpenCL détecté. MMTS requiert un GPU pour fonctionner.")
+        sys.exit(1)
+        
+    scheduler = Scheduler(gpu=gpus[0])
+    scheduler.initialize()
+    print(f"[+] GPU initialisé : {gpus[0].name}")
+    
+    # 2. RUN PIPELINE MONO-VARIABLE SUR TEMP
+    print(f"\n[1/3] Démarrage du clustering X-means (mono-variable) sur TEMP (K=3, W=5)...")
+    t0 = time.perf_counter()
+    engine = XmeansTS(data_temp, numclust=3, file="TEMP", listID=listID_temp, coeffRap=1.0, scheduler=scheduler)
+    
+    dist_compare = {}
+    liste_ok = []
+    
+    # Exécuter le clustering récursif
+    mat_dist = engine.k_means_clust(
+        data=list(data_temp),
+        num_clust=3,
+        num_iter=1,
+        listDataFrame=listID_temp.copy(),
+        LastnbClust=0,
+        tabEnviIndice="Set_TEMP",
+        distCompare=dist_compare,
+        listeIDOk1=liste_ok,
+        nbInstanceMinim=2,
+        w=5
+    )
+    t_mono = time.perf_counter() - t0
+    print(f"    -> Clustering mono-variable terminé en {t_mono*1000:.2f} ms")
+    print(f"    -> Nombre de clusters identifiés : {len(engine.centroids)}")
+    print(f"    -> Dimensions de la matrice de distances : {mat_dist.shape}")
+    
+    # 3. CALCUL DES COEFFICIENTS D'ENTROPIE (defineCoeff)
+    print(f"\n[2/3] Calcul des coefficients d'entropie (defineCoeff) sur TEMP...")
+    t0 = time.perf_counter()
+    coeffs = defineCoeff(
+        data=list(data_temp),
+        num_clust=3,
+        num_iter=1,
+        listDataFrame=listID_temp,
+        LastnbClust=0,
+        tabEnviIndice="Set_TEMP",
+        assignmentsResult={},
+        centroidsCompare={},
+        distCompare={},
+        data22=None,
+        listeIDOk1=[],
+        nbInstanceMinim=2,
+        w=5,
+        scheduler=scheduler
+    )
+    t_coeff = time.perf_counter() - t0
+    print(f"    -> Coefficients calculés en {t_coeff*1000:.2f} ms : {coeffs}")
+
+    # 4. RUN PIPELINE MULTI-VARIABLES (MultiXmeansTS)
+    print(f"\n[3/3] Exécution du pipeline multi-variables (KmeanMutiShape) avec TEMP...")
+    t0 = time.perf_counter()
+    
+    multi = MultiXmeansTS(scheduler=scheduler)
+    multi.files = ["Set_TEMP"]
+    
+    dicoCoff = {"Set_TEMP": coeffs}
+    assignmentsOk = {}
+    cols_to_cluster = [c for c in mat_dist.columns if c != ID_COLUMN]
+    
+    multi.KmeanMutiShape(
+        nbClust=3,
+        columns=cols_to_cluster,
+        dft=mat_dist,
+        dicoCoff=dicoCoff,
+        assignmentsOk=assignmentsOk,
+        indiceSd=0,
+        w=5
+    )
+    t_multi = time.perf_counter() - t0
+    print(f"    -> Clustering multi-variable terminé en {t_multi*1000:.2f} ms")
+    print("    -> Répartition finale des séries dans les clusters de l'essaim :")
+    print("-" * 80)
+    for idx_sd, member_ids in assignmentsOk.items():
+        print(f"       Essaim Cluster {idx_sd} : {len(member_ids):>3d} séries (ex: {member_ids[:4]})")
+    print("-" * 80)
+    
+    print("\n[SUCCESS] Pipeline MMTS complet exécuté avec succès sur GPU via GPUsync !")
+    print("=" * 80)
