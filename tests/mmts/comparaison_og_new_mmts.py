@@ -2,7 +2,7 @@
 """
 comparaison_og_new_mmts.py
 ==========================
-Compare VERSION ORIGINALE (Pure Python) vs NOUVELLE VERSION (Numba JIT + GPU GPUsync)
+Compare VERSION ORIGINALE (Pure Python) vs NOUVELLE VERSION (GPU GPUsync)
 sur le MEME dataset reel — aucune extrapolation.
 
 Metriques :
@@ -112,7 +112,19 @@ def mat_mae(m_og, m_nw):
     if vo.shape != vn.shape: return None
     return float(np.mean(np.abs(vo - vn)))
 
-def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_coeff=False, multipop=False):
+def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_coeff=False, multipop=False, backend=None):
+    if backend:
+        from gpusync import Scheduler, list_gpus
+        print(f"Force l'utilisation du backend GPUsync : {backend}")
+        device_backend = "cuda" if backend == "llvm_cuda" else backend
+        target_gpus = [g for g in list_gpus() if g.backend == device_backend]
+        if not target_gpus:
+            raise RuntimeError(f"Aucun GPU compatible avec le backend '{backend}' n'a été trouvé.")
+        my_sched = Scheduler(backend=backend, gpu=target_gpus[0])
+        my_sched.initialize()
+        nw._gpusync_sched = my_sched
+        eng._gpusync_sched = my_sched
+
     hdr(f"COMPARAISON ORIGINALE vs NOUVELLE — {n_series} series reelles, k={num_clust}, w={w}")
 
     print(f"\n{GRAY}Chargement (fenetres glissantes {WINDOW} pts)...{RESET}")
@@ -121,7 +133,7 @@ def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_co
     n_pairs = num_clust * N
     print(f"  -> {N} series x {M} pts = {n_pairs:,} paires DTW / iteration")
 
-    print(f"\n{GRAY}Chauffe du GPU (OpenCL) et du CPU (Numba JIT) avec K={num_clust} et M={M}...{RESET}")
+    print(f"\n{GRAY}Chauffe du GPU avec K={num_clust} et M={M}...{RESET}")
     try:
         # Créer des données factices avec la bonne dimension M
         dummy_series = np.zeros(M, dtype=np.float32)
@@ -438,7 +450,7 @@ def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_co
           f" | {cc2(sp_val_nw,4,sp_col_nw)} | {cc2(sp_val_eng,5,sp_col_eng)} | {cc2('',6)}")
     print(f"{GRAY}{SEP}{RESET}")
     print(f"{GRAY}Dataset : {N} series x {M} pts  |  {n_pairs:,} paires DTW / iter  |  k={num_clust}  w={w}{RESET}")
-    print(f"{GRAY}Originale = Pure Python  |  Nouvelles GPU = Numba JIT + GPU GPUsync{RESET}\n")
+    print(f"{GRAY}Originale = Pure Python  |  Nouvelles GPU = GPU GPUsync{RESET}\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -450,6 +462,8 @@ if __name__ == "__main__":
     parser.add_argument("--rep", type=int, default=1)
     parser.add_argument("--skip-coeff", action="store_true", help="Passer l'etape defineCoeff")
     parser.add_argument("--multipop", action="store_true", help="Utiliser la V2 Multi-Population GPU")
+    parser.add_argument("--backend", type=str, default=None, choices=["cuda", "opencl", "llvm", "llvm_cuda"],
+                        help="Backend GPUsync à forcer (cuda, opencl, llvm, llvm_cuda)")
     args = parser.parse_args()
     n = args.n if args.n > 0 else None
-    run_comparison(n_series=n, num_clust=args.k, w=args.w, nb_min=args.min, n_repeat=args.rep, skip_coeff=args.skip_coeff, multipop=args.multipop)
+    run_comparison(n_series=n, num_clust=args.k, w=args.w, nb_min=args.min, n_repeat=args.rep, skip_coeff=args.skip_coeff, multipop=args.multipop, backend=args.backend)

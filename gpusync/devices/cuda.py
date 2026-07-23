@@ -74,8 +74,12 @@ class CUDADeviceManager:
         device_id = self.device.id
         
         if device_id not in task._compiled_programs:
-            code = getattr(task, 'kernel_code_ptx', None) or task.kernel_code_cuda
-            name = getattr(task, 'kernel_name_ptx', None) or task.kernel_name_cuda
+            if getattr(self, 'backend', 'cuda') == 'llvm_cuda':
+                code = getattr(task, 'kernel_code_ptx', None) or task.kernel_code_cuda
+                name = getattr(task, 'kernel_name_ptx', None) or task.kernel_name_cuda
+            else:
+                code = task.kernel_code_cuda
+                name = task.kernel_name_cuda
             module = cp.RawKernel(code, name)
             task._compiled_programs[device_id] = module
             
@@ -155,7 +159,11 @@ class CUDADeviceManager:
         """
         q = queue if queue is not None else self.get_queue()
         with self.device:
-            dest_buffer.set(host_data, stream=q)
+            if dest_buffer.shape != host_data.shape:
+                slices = tuple(slice(0, dim) for dim in host_data.shape)
+                dest_buffer[slices].set(host_data, stream=q)
+            else:
+                dest_buffer.set(host_data, stream=q)
         await await_event(q)
 
     async def read_buffer(self, src_buffer, shape, dtype, out=None, queue=None):
@@ -167,7 +175,11 @@ class CUDADeviceManager:
             if out is None:
                 host_data = src_buffer.get(stream=q)
             else:
-                src_buffer.get(out=out, stream=q)
+                if src_buffer.shape != out.shape:
+                    slices = tuple(slice(0, dim) for dim in out.shape)
+                    src_buffer[slices].get(out=out, stream=q)
+                else:
+                    src_buffer.get(out=out, stream=q)
                 host_data = out
         await await_event(q)
         return host_data

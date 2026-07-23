@@ -34,7 +34,8 @@ class Scheduler:
         Sinon, effectue une découverte automatique filtrée par `device_name_filter`.
         """
         from .devices import ALL_DEVICE_MANAGERS
-        manager_cls = next((c for c in ALL_DEVICE_MANAGERS if c.backend == self.backend), None)
+        lookup_backend = "cuda" if self.backend == "llvm_cuda" else self.backend
+        manager_cls = next((c for c in ALL_DEVICE_MANAGERS if c.backend == lookup_backend), None)
         
         if manager_cls is None:
             raise ValueError(f"Backend '{self.backend}' non supporté. Backends disponibles: {[c.backend for c in ALL_DEVICE_MANAGERS]}")
@@ -42,12 +43,13 @@ class Scheduler:
         if self.gpu is not None:
             # 1. Utilisation du GPU spécifié
             raw_device = getattr(self.gpu, 'raw_device', self.gpu)
-            if self.backend == "cuda" and isinstance(raw_device, int):
+            if lookup_backend == "cuda" and isinstance(raw_device, int):
                 # pyrefly: ignore [missing-import]
                 import cupy as cp
                 raw_device = cp.cuda.Device(raw_device)
             
             manager = manager_cls(raw_device, num_queues=self.num_queues_per_device)
+            manager.backend = self.backend
             self.devices_managers.append(manager)
             logger.info(f"Périphérique {self.backend.upper()} initialisé (spécifié) : {manager.name}")
         else:
@@ -56,6 +58,7 @@ class Scheduler:
             for dev in devs:
                 try:
                     manager = manager_cls(dev, num_queues=self.num_queues_per_device)
+                    manager.backend = self.backend
                     self.devices_managers.append(manager)
                     logger.info(f"Périphérique {self.backend.upper()} initialisé : {manager.name}")
                 except Exception as e:

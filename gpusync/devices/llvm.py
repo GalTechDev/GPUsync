@@ -74,19 +74,32 @@ class LLVMDeviceManager:
             else:
                 raw_args.append(arg)
 
+        # Calculer le nombre de retours et séparer les arguments d'entrée et de sortie
+        num_returns = getattr(task, 'num_returns', 0)
+        if num_returns > 0:
+            inputs = raw_args[:-num_returns]
+            outputs = raw_args[-num_returns:]
+        else:
+            inputs = raw_args
+            outputs = []
+
+        # Récupérer la fonction JIT compilée d'origine
+        func = getattr(task, 'func', None)
+        if func is None:
+            logger.warning("LLVM execute_kernel: task.func est None, exécution vide.")
+            return None
+
         # Execution parallèle découpée sur le CPU
         chunk_size = max(1, total_size // self.num_threads)
         
         def run_chunk(start_idx, end_idx):
-            # Transformation des tableaux pour l'exécution directe
-            arrays = [a if isinstance(a, np.ndarray) else None for a in raw_args]
-            scalars = [a if not isinstance(a, np.ndarray) else None for a in raw_args]
-            
             for ctx in range(start_idx, end_idx):
-                # Évaluation dynamique du kernel pour le benchmark CPU
-                for idx, arr in enumerate(arrays):
-                    if arr is not None:
-                        pass
+                res = func(ctx, *inputs)
+                if num_returns == 1:
+                    outputs[0][ctx] = res
+                elif num_returns > 1:
+                    for r in range(num_returns):
+                        outputs[r][ctx] = res[r]
 
         # Lance l'exécution multi-thread sur le pool LLVM
         futures = []
@@ -117,14 +130,22 @@ class LLVMDeviceManager:
         """
         Copie directe RAM à RAM.
         """
-        np.copyto(dest_buffer, host_data)
+        if dest_buffer.shape != host_data.shape:
+            slices = tuple(slice(0, dim) for dim in host_data.shape)
+            np.copyto(dest_buffer[slices], host_data)
+        else:
+            np.copyto(dest_buffer, host_data)
 
     async def read_buffer(self, src_buffer, shape, dtype, out=None, queue=None):
         """
         Lecture directe RAM à RAM.
         """
         if out is not None:
-            np.copyto(out, src_buffer)
+            if src_buffer.shape != out.shape:
+                slices = tuple(slice(0, dim) for dim in out.shape)
+                np.copyto(out, src_buffer[slices])
+            else:
+                np.copyto(out, src_buffer)
             return out
         return src_buffer.copy()
 

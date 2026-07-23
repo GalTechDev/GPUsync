@@ -41,6 +41,45 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
         kernel_code_cuda = compile_to_cuda(tree, kernel_name, num_returns, constants)
         kernel_name_cuda = kernel_name
         
+    # Compile la fonction Python originale avec substitution des constantes pour le fallback LLVM CPU
+    import copy
+    import math
+    py_tree = copy.deepcopy(tree)
+    class ConstantSubstituter(ast.NodeTransformer):
+        def __init__(self, consts):
+            self.consts = consts or {}
+        def visit_Name(self, node):
+            if node.id in self.consts:
+                return ast.Constant(value=self.consts[node.id])
+            return node
+            
+    py_tree = ConstantSubstituter(constants).visit(py_tree)
+    ast.fix_missing_locations(py_tree)
+    
+    local_vars = {}
+    global_vars = {
+        "range": range,
+        "unrolled_range": range,
+        "min": min,
+        "max": max,
+        "abs": abs,
+        "math": math,
+        "np": np,
+        "sqrt": math.sqrt,
+        "constant_list": list,
+        "local_memory": lambda shape, dtype=None: np.zeros(shape, dtype=dtype or np.float32),
+        "barrier": lambda flags=None: None,
+        "CLK_LOCAL_MEM_FENCE": None,
+        "CLK_GLOBAL_MEM_FENCE": None,
+    }
+    try:
+        code_obj = compile(py_tree, filename="<gpusync_jit>", mode="exec")
+        exec(code_obj, global_vars, local_vars)
+        py_func = local_vars[kernel_name]
+    except Exception as e:
+        print(f"Warning: Failed to compile python JIT fallback: {e}")
+        py_func = None
+
     # Imports dynamiques locaux pour éviter les cycles de dépendances de packages
     from ..task import AsyncTask
     from ..utils.bg_loop import auto_sync
@@ -52,6 +91,8 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
         kernel_code_llvm=kernel_code_llvm, kernel_name_llvm=kernel_name,
         kernel_code_ptx=kernel_code_ptx, kernel_name_ptx=kernel_name
     )
+    task.func = py_func
+    task.num_returns = num_returns
     
     @auto_sync
     async def wrapper(*args, global_size, scheduler, _pipeline_mode=False, local_size=None, stream=None, fire_and_forget=False, _out_buffers=None):
