@@ -121,7 +121,6 @@ def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_co
     n_pairs = num_clust * N
     print(f"  -> {N} series x {M} pts = {n_pairs:,} paires DTW / iteration")
 
-    # Warm-up (Chauffe du GPU et du JIT CPU avec les mêmes paramètres constants pour peupler le cache)
     print(f"\n{GRAY}Chauffe du GPU (OpenCL) et du CPU (Numba JIT) avec K={num_clust} et M={M}...{RESET}")
     try:
         # Créer des données factices avec la bonne dimension M
@@ -129,26 +128,46 @@ def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_co
         dummy_data = [dummy_series for _ in range(num_clust * 2)]
         dummy_df = pd.DataFrame({'elev_id': list(range(num_clust * 2))})
         
+        # 1. Chauffe spécifique du Batch DTW complet pour N réel
+        dummy_cents_np = np.zeros((num_clust, M), dtype=np.float32)
+        dummy_targets_np = np.zeros((N, M), dtype=np.float32)
+        
+        # Chauffe Batch DTW Test
+        from new_xmeants_module import _compute_dist_matrix
+        _ = _compute_dist_matrix(dummy_cents_np, dummy_targets_np, w)
+        
+        # Chauffe Batch DTW Moteur Officiel
+        from examples.algorithms.mmts.mmts_engine import _compute_dist_matrix as _compute_dist_matrix_eng
+        _ = _compute_dist_matrix_eng(dummy_cents_np, dummy_targets_np, w)
+        
+        # 2. Données réelles pour la chauffe du K-Means et getLastMat
+        real_dummy_data = [dummy_series for _ in range(N)]
+        real_dummy_df = pd.DataFrame({'elev_id': list(range(N))})
+        
         # Chauffe CPU
         x_dummy = og.XmeansTS(dummy_data, num_clust, "TEMP", dummy_df, 1.0)
         x_dummy.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
         
-        # Chauffe GPU Test
-        x_dummy2 = nw.XmeansTS(dummy_data, num_clust, "TEMP", dummy_df, 1.0)
-        x_dummy2.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        # Chauffe GPU Test aux dimensions réelles (N, K)
+        x_dummy2 = nw.XmeansTS(real_dummy_data, num_clust, "TEMP", real_dummy_df, 1.0)
+        x_dummy2.k_means_clust(real_dummy_data, num_clust, 1, real_dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        x_dummy2.getLastMat("Set_TEMP", w)
         
-        # Chauffe GPU Moteur Officiel
-        x_dummy3 = eng.XmeansTS(dummy_data, num_clust, "TEMP", dummy_df, 1.0)
-        x_dummy3.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        # Chauffe GPU Moteur Officiel aux dimensions réelles (N, K)
+        x_dummy3 = eng.XmeansTS(real_dummy_data, num_clust, "TEMP", real_dummy_df, 1.0)
+        x_dummy3.k_means_clust(real_dummy_data, num_clust, 1, real_dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        x_dummy3.getLastMat("Set_TEMP", w)
         
         if multipop:
             from new_xmeants_module import XmeansTS_MultiPopulation
-            x_dummy_mp = XmeansTS_MultiPopulation(dummy_data, num_clust, "TEMP", dummy_df, 1.0, P=5)
-            x_dummy_mp.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+            x_dummy_mp = XmeansTS_MultiPopulation(real_dummy_data, num_clust, "TEMP", real_dummy_df, 1.0, P=5)
+            x_dummy_mp.k_means_clust(real_dummy_data, num_clust, 1, real_dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+            x_dummy_mp.getLastMat("Set_TEMP", w)
             
             from examples.algorithms.mmts.mmts_engine import XmeansTS_MultiPopulation as XmeansTS_MultiPopulation_eng
-            x_dummy_mp_eng = XmeansTS_MultiPopulation_eng(dummy_data, num_clust, "TEMP", dummy_df, 1.0, P=5)
-            x_dummy_mp_eng.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+            x_dummy_mp_eng = XmeansTS_MultiPopulation_eng(real_dummy_data, num_clust, "TEMP", real_dummy_df, 1.0, P=5)
+            x_dummy_mp_eng.k_means_clust(real_dummy_data, num_clust, 1, real_dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+            x_dummy_mp_eng.getLastMat("Set_TEMP", w)
             
         print(f"  -> Chauffe terminee (Noyaux compiles en cache).\n")
     except Exception as e:

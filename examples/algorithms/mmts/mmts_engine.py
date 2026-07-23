@@ -125,7 +125,28 @@ def _batch_dtw_gpu(refs_np, targets_np, w, scheduler=None):
 
 
 def _compute_dist_matrix(centroids_np, targets_np, w, scheduler=None):
-    return _batch_dtw_gpu(centroids_np, targets_np, w, scheduler)
+    from examples.algorithms.dtw.dtw_gpu_engine import compute_dtw_matrix
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    coro = compute_dtw_matrix(targets_np, centroids_np, scheduler=scheduler, w=w)
+    
+    if loop.is_running():
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            def _run():
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                return new_loop.run_until_complete(coro)
+            return executor.submit(_run).result()
+    else:
+        return loop.run_until_complete(coro)
+
+
 
 
 def DTWDistance(s1, s2, w=DEFAULT_W, scheduler=None):
@@ -511,7 +532,7 @@ class XmeansTS:
         
         return json_path
     
-    def compute_distances_to_centroids_parallel(self, data, centroids, w, n_processes=None):
+    def compute_distances_to_centroids_parallel(self, data, centroids, w, n_processes=None, squared=False):
         """
         Calcule les distances de chaque série à chaque centroïde sur GPU avec GPUsync
         
@@ -520,6 +541,7 @@ class XmeansTS:
             centroids: Dictionnaire des centroïdes
             w: Paramètre de fenêtre pour DTW
             n_processes: Nombre de processus (ignoré, calculé sur GPU)
+            squared: Si True, retourne la distance au carré (évite np.sqrt)
             
         Returns:
             Matrice des distances (n_series x n_centroids)
@@ -543,8 +565,11 @@ class XmeansTS:
             
             # refs_pad: K x M_pad
             refs_pad = np.zeros((K, M_pad), dtype=np.float32)
-            for c_idx, c_key in enumerate(keys_list):
-                refs_pad[c_idx, :len(centroids[c_key])] = np.array(centroids[c_key], dtype=np.float32)
+            try:
+                refs_pad[:, :M_len] = np.array(list(centroids.values()), dtype=np.float32)
+            except Exception:
+                for c_idx, c_key in enumerate(keys_list):
+                    refs_pad[c_idx, :len(centroids[c_key])] = np.array(centroids[c_key], dtype=np.float32)
                 
             from gpusync import AsyncBuffer
             
@@ -568,8 +593,12 @@ class XmeansTS:
             # Lancement du noyau avec le buffer persistant self.gpu_data_buf !
             kernel(buf_ref, self.gpu_data_buf, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched)
             
-            # Rapatrier et transposer avec racine carrée
-            return np.sqrt(np.maximum(buf_out.to_host().reshape(K, N), 0.0)).T
+            # Rapatrier et transposer
+            res_flat = buf_out.to_host().reshape(K, N)
+            if squared:
+                return np.maximum(res_flat, 0.0).T
+            else:
+                return np.sqrt(np.maximum(res_flat, 0.0)).T
         else:
             # Repli classique s'il s'agit d'autres données
             # refs_np: K x M_len
@@ -581,7 +610,10 @@ class XmeansTS:
             targets_np = np.array(data, dtype=np.float32)
             
             dist_mat = _compute_dist_matrix(refs_np, targets_np, w, self.scheduler)
-            return dist_mat.T
+            if squared:
+                return (dist_mat ** 2).T
+            else:
+                return dist_mat.T
 
     def kmeansConverg(self, data, centroids, listID, w):
         """
@@ -856,6 +888,7 @@ class XmeansTS:
         # Si on a assez de données
         # NOTE: Correction par rapport à l'original qui n'avait pas LastnbClust != 0 ici
         if len(data) > num_clust * 2:
+            data_np = np.asarray(data, dtype=np.float32)
             centroids = {}
             distCompare[tabEnviIndice] = {}
             
@@ -890,19 +923,15 @@ class XmeansTS:
                 # Calculer les distances et assigner les points de manière parallélisée
                 try:
                     # distance_matrix a la forme (N, K)
-                    distance_matrix = self.compute_distances_to_centroids_parallel(data, centroids, w)
-                    precomputed_energy = 0.0
-                    for i in range(len(data)):
-                        min_dist = float('inf')
-                        closest_clust = None
-                        for c_idx, c_key in enumerate(centroids.keys()):
-                            dist = distance_matrix[i, c_idx]
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_clust = c_key
-                        if closest_clust is not None:
-                            assignments[closest_clust].append(i)
-                            precomputed_energy += min_dist
+                    distance_matrix = self.compute_distances_to_centroids_parallel(data, centroids, w, squared=True)
+                    closest_clusters_idx = np.argmin(distance_matrix, axis=1)
+                    min_distances = np.min(distance_matrix, axis=1)
+                    precomputed_energy = float(np.sum(np.sqrt(min_distances)))
+                    
+                    keys_list = list(centroids.keys())
+                    for c_idx, c_key in enumerate(keys_list):
+                        pt_indices = np.where(closest_clusters_idx == c_idx)[0]
+                        assignments[c_key] = pt_indices.tolist()
                 except Exception as e:
                     # Fallback séquentiel
                     precomputed_energy = 0.0
@@ -925,10 +954,13 @@ class XmeansTS:
                 # Mettre à jour les centroides
                 for c in assignments:
                     if len(assignments[c]) > 0:
-                        centroids[c] = self._cluster_representative(
-                            [data[i] for i in assignments[c] if len(data[i]) > 0],
-                            w
-                        )
+                        if (self.representative_mode or "euclidean").lower() == "euclidean":
+                            centroids[c] = np.mean(data_np[assignments[c]], axis=0)
+                        else:
+                            centroids[c] = self._cluster_representative(
+                                [data[i] for i in assignments[c] if len(data[i]) > 0],
+                                w
+                            )
                 
                 # Capturer l'itération de convergence avec l'énergie pré-calculée
                 self.capture_convergence_iteration(counter, centroids, assignments, precomputed_energy=precomputed_energy)
@@ -998,23 +1030,12 @@ class XmeansTS:
             return MatriceDist
             
         keys_list = list(self.centroids.keys())
-        K = len(keys_list)
-        M = len(self.data[0])
+        # Lancer le calcul de lot directement sur GPU via le buffer persistant (N x K)
+        dist_mat = self.compute_distances_to_centroids_parallel(self.data, self.centroids, w)
         
-        # refs_np: K x M
-        refs_np = np.zeros((K, M), dtype=np.float32)
+        # dist_mat a la forme (N, K). Remplir chaque colonne en vectorisé sans .tolist()
         for c_idx, c_key in enumerate(keys_list):
-            refs_np[c_idx] = np.array(self.centroids[c_key], dtype=np.float32)
-            
-        # targets_np: N x M
-        targets_np = np.array(self.data, dtype=np.float32)
-        
-        # Lancer le calcul de lot sur GPU
-        dist_mat = _compute_dist_matrix(refs_np, targets_np, w, self.scheduler)
-        
-        # dist_mat est (K x N). Remplir chaque colonne
-        for c_idx, c_key in enumerate(keys_list):
-            MatriceDist[str(c_key) + '_' + tabEnviIndice] = dist_mat[c_idx].tolist()
+            MatriceDist[f"{c_key}_{tabEnviIndice}"] = dist_mat[:, c_idx]
             
         MatriceDist[ID_COLUMN] = self.dfListID[ID_COLUMN]
         print(f"DEBUG getLastMat - Colonnes créées: {list(MatriceDist.columns)}")
@@ -1404,33 +1425,33 @@ class XmeansTS_MultiPopulation(XmeansTS):
                         global_idx += 1
                         
                 # Calculer toutes les distances de toutes les séries vers tous les centroïdes d'un seul coup
-                distance_matrix = self.compute_distances_to_centroids_parallel(data, total_cents_dict, w)
+                distance_matrix = self.compute_distances_to_centroids_parallel(data, total_cents_dict, w, squared=True)
                 
                 # Affecter les points aux clusters pour chaque population
                 for p in range(self.P):
                     p_col_indices = [idx for idx, (pop_id, _) in enumerate(total_cents_keys) if pop_id == p]
                     p_keys = [c_key for pop_id, c_key in total_cents_keys if pop_id == p]
                     
-                    for i in range(len(data)):
-                        min_dist = float('inf')
-                        closest_clust = None
-                        for col_idx, c_key in zip(p_col_indices, p_keys):
-                            dist = distance_matrix[i, col_idx]
-                            if dist < min_dist:
-                                min_dist = dist
-                                closest_clust = c_key
-                        if closest_clust is not None:
-                            pop_assignments[p][closest_clust].append(i)
-                            pop_energies[p] += min_dist
+                    sub_matrix = distance_matrix[:, p_col_indices]
+                    closest_clusters_idx = np.argmin(sub_matrix, axis=1)
+                    min_distances = np.min(sub_matrix, axis=1)
+                    pop_energies[p] = float(np.sum(np.sqrt(min_distances)))
+                    
+                    for col_sub_idx, c_key in enumerate(p_keys):
+                        pt_indices = np.where(closest_clusters_idx == col_sub_idx)[0]
+                        pop_assignments[p][c_key] = pt_indices.tolist()
                             
                 # Mettre à jour les centroïdes pour chaque population
                 for p in range(self.P):
                     for c in pop_assignments[p]:
                         if len(pop_assignments[p][c]) > 0:
-                            pop_centroids[p][c] = self._cluster_representative(
-                                [data[i] for i in pop_assignments[p][c] if len(data[i]) > 0],
-                                w
-                            )
+                            if (self.representative_mode or "euclidean").lower() == "euclidean":
+                                pop_centroids[p][c] = np.mean(data_np[pop_assignments[p][c]], axis=0)
+                            else:
+                                pop_centroids[p][c] = self._cluster_representative(
+                                    [data[i] for i in pop_assignments[p][c] if len(data[i]) > 0],
+                                    w
+                                )
                 counter += 1
                 
             # 2. Sélectionner la MEILLEURE population (celle qui a l'énergie/inertie la plus faible)

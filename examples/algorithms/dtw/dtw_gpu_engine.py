@@ -258,3 +258,223 @@ def get_batch_dtw_window_kernel(M, num_refs):
             outputs[int(r * chunk_size + ctx)] = dp[int(final_idx * M_CONST_PAD + M_CONST)]
 
     return batch_dtw_fused_window
+
+
+_dtw_kernel_cache = {}
+
+def create_dtw_auto_kernel_dynamic(M, K, w=None):
+    """
+    Génère dynamiquement la chaîne du code source JIT et la compile via GPUsync
+    pour un K arbitraire avec ou sans fenêtre w (Sakoe-Chiba).
+    """
+    key = (M, K, w)
+    if key in _dtw_kernel_cache:
+        return _dtw_kernel_cache[key]
+        
+    from gpusync.compiler.main import gpusync_kernel_from_source
+    import textwrap
+    
+    # 1. Générer la liste des arguments constants (ref0, ref1, ...)
+    ref_args_str = ", ".join(f"ref{i}: list" for i in range(K))
+    
+    # 2. Générer le corps du calcul unitaire DTW pour chaque référence
+    ref_computations = []
+    
+    if w is not None and w > 0:
+        # Version fenêtrée avec Sakoe-Chiba double-buffered
+        for r in range(K):
+            # Générer les écritures de réinitialisation de la ligne courante de façon déroulée
+            reset_lines = []
+            for j_init in range(M + 1):
+                reset_lines.append(f"dp_{r}[int(curr_offset_{r} + {j_init})] = 1e20")
+            reset_str = "\n                    ".join(reset_lines)
+            
+            # Initialisation complète de toutes les cellules à 1e20 pour éviter la mémoire non initialisée en C
+            init_lines = []
+            for idx in range(2 * (M + 1)):
+                init_lines.append(f"dp_{r}[{idx}] = 1e20")
+            init_str = "\n                ".join(init_lines)
+            
+            computation = textwrap.dedent(f"""
+                # --- CALCUL AVEC FENÊTRE POUR RÉFÉRENCE {r} ---
+                dp_{r} = [1e20] * M_CONST_PAD_2
+                {init_str}
+                dp_{r}[0] = 0.0
+                
+                for i in range(1, M_CONST_PAD):
+                    curr_idx_{r}: int = int(i % 2)
+                    prev_idx_{r}: int = int(1 - curr_idx_{r})
+                    
+                    curr_offset_{r}: int = int(curr_idx_{r} * M_CONST_PAD)
+                    prev_offset_{r}: int = int(prev_idx_{r} * M_CONST_PAD)
+                    
+                    # Réinitialiser entièrement la ligne courante à l'infini pour éviter les fuites du double-buffering
+                    {reset_str}
+                        
+                    j_start_{r}: int = int(i - W_CONST)
+                    if j_start_{r} < 1:
+                        j_start_{r} = 1
+                    j_end_{r}: int = int(i + W_CONST + 1)
+                    if j_end_{r} > M_CONST_PAD:
+                        j_end_{r} = M_CONST_PAD
+                        
+                    for j in range(j_start_{r}, j_end_{r}):
+                        d = ref{r}[i - 1] - tgt_local[j - 1]
+                        cost = d * d
+                        
+                        min_val_{r} = dp_{r}[int(prev_offset_{r} + j)]
+                        if dp_{r}[int(curr_offset_{r} + j - 1)] < min_val_{r}:
+                            min_val_{r} = dp_{r}[int(curr_offset_{r} + j - 1)]
+                        if dp_{r}[int(prev_offset_{r} + j - 1)] < min_val_{r}:
+                            min_val_{r} = dp_{r}[int(prev_offset_{r} + j - 1)]
+                            
+                        dp_{r}[int(curr_offset_{r} + j)] = cost + min_val_{r}
+                        
+                final_idx_{r}: int = int(M_CONST % 2)
+                dist_{r} = dp_{r}[int(final_idx_{r} * M_CONST_PAD + M_CONST)]
+            """)
+            computation_indented = "\n".join("    " + line if line.strip() else "" for line in computation.strip().split("\n"))
+            ref_computations.append(computation_indented)
+        
+        all_computations_str = "\n".join(ref_computations)
+        return_str = ", ".join(f"sqrt(dist_{i})" for i in range(K))
+        
+        # Déclarations de portée pour le compilateur C
+        declarations_list = ["d = 0.0", "cost = 0.0"]
+        for r in range(K):
+            declarations_list.append(f"min_val_{r} = 0.0")
+        declarations_str = "\n    ".join(declarations_list)
+        
+        code = f"""
+def dtw_auto_k{K}_w{w}_kernel(ctx: int, targets: list, {ref_args_str}) -> tuple:
+    target_start: int = ctx * M_CONST
+    
+    # Déclarations de portée pour le compilateur C
+    {declarations_str}
+    
+    # Charger la cible en registres locaux
+    tgt_local = [0.0] * M_CONST
+    for j in unrolled_range(0, M_CONST):
+        tgt_local[j] = targets[target_start + j]
+        
+    {all_computations_str}
+    
+    return {return_str}
+"""
+        kernel = gpusync_kernel_from_source(code, constants={
+            "M_CONST": M,
+            "M_CONST_PAD": M + 1,
+            "M_CONST_PAD_2": 2 * (M + 1),
+            "W_CONST": int(w)
+        })
+    else:
+        # Version complète classique sans fenêtre d'alignement
+        for r in range(K):
+            computation = textwrap.dedent(f"""
+                # --- CALCUL COMPLET POUR RÉFÉRENCE {r} ---
+                row{r} = [0.0] * M_CONST
+                ref_val = ref{r}[0]
+                d = ref_val - tgt_local[0]
+                row{r}[0] = d * d
+                for j in unrolled_range(1, M_CONST):
+                    d = ref_val - tgt_local[j]
+                    row{r}[j] = row{r}[j-1] + d * d
+                for i in unrolled_range(1, M_CONST):
+                    ref_val = ref{r}[i]
+                    d = ref_val - tgt_local[0]
+                    m3_{r} = row{r}[0]
+                    row{r}[0] = row{r}[0] + d * d
+                    m2_{r} = row{r}[0]
+                    for j in unrolled_range(1, M_CONST):
+                        d = ref_val - tgt_local[j]
+                        m1_{r} = row{r}[j]
+                        min_val_{r} = m1_{r}
+                        if m2_{r} < min_val_{r}: min_val_{r} = m2_{r}
+                        if m3_{r} < min_val_{r}: min_val_{r} = m3_{r}
+                        m3_{r} = row{r}[j]
+                        row{r}[j] = min_val_{r} + d * d
+                        m2_{r} = row{r}[j]
+            """)
+            computation_indented = "\n".join("    " + line if line.strip() else "" for line in computation.strip().split("\n"))
+            ref_computations.append(computation_indented)
+            
+        all_computations_str = "\n".join(ref_computations)
+        return_str = ", ".join(f"sqrt(row{i}[M_CONST - 1])" for i in range(K))
+        
+        code = f"""
+def dtw_auto_k{K}_full_kernel(ctx: int, targets: list, {ref_args_str}) -> tuple:
+    target_start: int = ctx * M_CONST
+    
+    # Charger la cible en registres locaux
+    tgt_local = [0.0] * M_CONST
+    for j in unrolled_range(0, M_CONST):
+        tgt_local[j] = targets[target_start + j]
+        
+    {all_computations_str}
+    
+    return {return_str}
+"""
+        kernel = gpusync_kernel_from_source(code, constants={"M_CONST": M})
+        
+    _dtw_kernel_cache[key] = kernel
+    return kernel
+
+
+async def _compute_dtw_matrix_ooc(targets_np, refs_np, scheduler=None, chunk_size=50000, concurrency=4, w=None):
+    """
+    Calcule la matrice de distances DTW complète de forme (K, N) sur GPU de façon optimale
+    et automatique via l'API Out-of-Core de GPUsync.
+    """
+    import numpy as np
+    
+    N = len(targets_np)
+    K = len(refs_np)
+    M = targets_np.shape[1]
+    
+    if scheduler is None:
+        from gpusync import Scheduler, list_gpus
+        gpus = list_gpus()
+        if not gpus:
+            raise RuntimeError("Aucun GPU OpenCL détecté.")
+        scheduler = Scheduler(gpu=gpus[0])
+        await scheduler.initialize()
+        
+    # 1. Générer le noyau JIT de calcul DTW unitaire optimal
+    dtw_kernel = create_dtw_auto_kernel_dynamic(M, K, w)
+    
+    # 2. Découper les K lignes de refs_np
+    ref_list = [refs_np[i] for i in range(K)]
+    
+    # 3. Lancer map_out_of_core de GPUsync
+    res_tuple = await dtw_kernel.map_out_of_core(
+        targets_np, scheduler, *ref_list,
+        chunk_size=chunk_size, concurrency=concurrency
+    )
+    
+    # 4. Re-former et retourner la matrice de distances (K, N)
+    if K == 1:
+        return res_tuple.reshape(1, -1)
+    return np.vstack(res_tuple)
+
+
+async def compute_dtw_matrix(targets_np, refs_np, scheduler=None, w=None):
+    """
+    Calcule la matrice de distances DTW de forme (K, N) sur GPU de façon transparente,
+    facile d'utilisation et entièrement optimisée en mode Out-Of-Core (OOC).
+    Sélectionne automatiquement la taille de chunk et le degré de concurrence optimaux
+    selon la taille du dataset targets_np.
+    """
+    N = len(targets_np)
+    
+    # Calibrage dynamique de la taille de chunk et de la concurrence pour l'OOC
+    if N >= 100000:
+        chunk_size = 50000
+        concurrency = 4
+    elif N >= 50000:
+        chunk_size = 20000
+        concurrency = 2
+    else:
+        chunk_size = 10000
+        concurrency = 2
+        
+    return await _compute_dtw_matrix_ooc(targets_np, refs_np, scheduler, chunk_size=chunk_size, concurrency=concurrency, w=w)

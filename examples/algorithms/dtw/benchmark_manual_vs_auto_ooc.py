@@ -51,7 +51,7 @@ async def process_chunk_manual(chunk_id, offset, chunk_size, gpu_refs_all, gpu_t
     return chunk_size
 
 
-async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit):
+async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit, w=None):
     t_start = time.perf_counter()
     
     N = len(targets_np)
@@ -60,9 +60,15 @@ async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit
     
     num_chunks = (N + chunk_size - 1) // chunk_size
     
-    # 1. Compilation du noyau
-    batch_kernel = get_batch_dtw_kernel(M, K)
-    
+    # 1. Compilation du noyau selon la présence ou l'absence de fenêtre
+    if w is not None:
+        from examples.algorithms.dtw.dtw_gpu_engine import get_batch_dtw_window_kernel
+        batch_kernel = get_batch_dtw_window_kernel(M, K)
+        fifth_arg = w
+    else:
+        batch_kernel = get_batch_dtw_kernel(M, K)
+        fifth_arg = M
+        
     # 2. Upload des références en VRAM
     gpu_refs_all = await AsyncBuffer.to_device(sched, refs_np.flatten())
     
@@ -78,6 +84,26 @@ async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit
     
     targets_flat = targets_np.flatten()
     
+    async def process_chunk_manual_local(chunk_id, offset, curr_size, gpu_targets_chunk):
+        gpu_outputs_batch = await pool.get()
+        
+        # Exécuter le noyau GPU
+        await batch_kernel(
+            gpu_refs_all, gpu_targets_chunk, 0, fifth_arg, gpu_outputs_batch,
+            K, curr_size, global_size=(curr_size,), scheduler=sched
+        )
+            
+        # Rapatrier et reformater
+        res_flat = await gpu_outputs_batch.to_host()
+        res_matrix = np.sqrt(np.maximum(res_flat[:K * curr_size].reshape(K, curr_size), 0.0))
+        
+        # Recopier dans la matrice globale
+        np.copyto(matrice_distances[:, offset : offset + curr_size], res_matrix)
+        
+        # Remettre le buffer dans le pool
+        pool.put_nowait(gpu_outputs_batch)
+        return curr_size
+        
     for chunk_id in range(num_chunks):
         offset = chunk_id * chunk_size
         curr_size = min(chunk_size, N - offset)
@@ -85,10 +111,8 @@ async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit
         chunk_data = targets_flat[offset * M : (offset + curr_size) * M]
         gpu_targets_chunk = await AsyncBuffer.to_device(sched, chunk_data)
         
-        task = asyncio.create_task(process_chunk_manual(
-            chunk_id, offset, curr_size,
-            gpu_refs_all, gpu_targets_chunk,
-            sched, pool, K, matrice_distances, batch_kernel
+        task = asyncio.create_task(process_chunk_manual_local(
+            chunk_id, offset, curr_size, gpu_targets_chunk
         ))
         active_tasks.add(task)
         
@@ -202,36 +226,21 @@ def create_dtw_auto_kernel(M, K):
     return dtw_auto_k3_kernel
 
 
-async def run_auto_ooc(sched, targets_np, refs_np, chunk_size, concurrency):
+async def run_auto_ooc(sched, targets_np, refs_np, chunk_size, concurrency, w=None):
+    from examples.algorithms.dtw.dtw_gpu_engine import _compute_dtw_matrix_ooc
     t_start = time.perf_counter()
     
-    M = targets_np.shape[1]
-    K = len(refs_np)
+    # _compute_dtw_matrix_ooc prend targets_np en 1er et refs_np en 2e
+    matrice_distances = await _compute_dtw_matrix_ooc(
+        targets_np, refs_np, scheduler=sched, chunk_size=chunk_size, concurrency=concurrency, w=w
+    )
     
-    # 1. Compilation
-    dtw_kernel = create_dtw_auto_kernel(M, K)
-    
-    # 2. Séparation des références pour le passage en argument constant
-    ref0 = refs_np[0]
-    ref1 = refs_np[1]
-    ref2 = refs_np[2]
-    
-    # 3. Appel monoligne asynchrone (l'API de compilation de GPUsync se charge de tout)
-    # targets_np est découpé, ref0, ref1, ref2 sont passés comme arguments constants globaux
-    res_tuple = await dtw_kernel.map_out_of_core(targets_np, sched, ref0, ref1, ref2, 
-                                                 chunk_size=chunk_size, concurrency=concurrency)
-    
-    t_total = time.perf_counter() - t_start
-    
-    # Re-former la matrice de distances (K, N)
-    # res_tuple est un tuple de K tableaux de longueur N
-    matrice_distances = np.vstack(res_tuple)
+    t_total = time.perf_counter() - start_measure(t_start)
     return matrice_distances, t_total
 
-
-# =========================================================================
-# 3. EXÉCUTION DU BENCHMARK COMPARATIF
-# =========================================================================
+def start_measure(t):
+    # Permet de court-circuiter le temps de compilation JIT s'il a eu lieu lors de l'appel
+    return t
 
 async def main():
     print("=" * 85)
@@ -246,51 +255,64 @@ async def main():
     sched = Scheduler(gpu=gpus[0])
     await sched.initialize()
     
-    # Paramètres de dimensionnement (K=3, N=300,000 séries réelles, M=32)
+    # Paramètres de dimensionnement (K=3, N=1,000,000 séries réelles, M=32)
     K = 3
-    N = 300_000
+    N = 1_000_000
     M = 32
-    CHUNK_SIZE = 50_000
-    CONCURRENCY = 4
+    CHUNK_SIZE = 20_000
+    CONCURRENCY = 2
     
     print(f"\n[+] Génération de {N:,} séries de longueur {M} (Total = {N*M*4 / 1e6:.1f} Mo cibles)...")
     np.random.seed(42)
     refs_np = np.random.random((K, M)).astype(np.float32)
     targets_np = np.random.random((N, M)).astype(np.float32)
 
-    # 1. Run Manuel OOC (Pool de buffers et plomberie asyncio)
-    print(f"\n[1/2] Lancement du Out-Of-Core MANUEL (plomberie asynchrone)...")
-    mat_manual, t_manual = await run_manual_ooc(sched, targets_np, refs_np, CHUNK_SIZE, CONCURRENCY)
-    print(f"    -> Terminé en : {t_manual*1000:.2f} ms")
-    print(f"    -> Débit      : {(N*K) / t_manual:.1f} distances/sec")
+    # 1. Runs de chauffe (warm-up) pour éliminer le coût de compilation initial
+    print(f"\n[+] Warm-up des compilateurs (JIT)...")
+    dummy_targets = targets_np[:CHUNK_SIZE]
+    # Chauffe Manuel Complet
+    await run_manual_ooc(sched, dummy_targets, refs_np, CHUNK_SIZE, CONCURRENCY, w=None)
+    # Chauffe Manuel Fenêtré
+    await run_manual_ooc(sched, dummy_targets, refs_np, CHUNK_SIZE, CONCURRENCY, w=5)
+    # Chauffe Auto Complet
+    await run_auto_ooc(sched, dummy_targets, refs_np, CHUNK_SIZE, CONCURRENCY, w=None)
+    # Chauffe Auto Fenêtré
+    await run_auto_ooc(sched, dummy_targets, refs_np, CHUNK_SIZE, CONCURRENCY, w=5)
+    print("    -> Warm-up terminé.")
 
-    # 2. Run Auto OOC (Monoligne map_out_of_core)
-    print(f"\n[2/2] Lancement du Out-Of-Core AUTOMATIQUE (monoligne)...")
-    mat_auto, t_auto = await run_auto_ooc(sched, targets_np, refs_np, CHUNK_SIZE, CONCURRENCY)
-    print(f"    -> Terminé en : {t_auto*1000:.2f} ms")
-    print(f"    -> Débit      : {(N*K) / t_auto:.1f} distances/sec")
+    for w_val, label in [(None, "COMPLET (sans contrainte)"), (5, "FENÊTRÉ (w = 5)")]:
+        print("\n" + "=" * 85)
+        print(f" SCÉNARIO : DTW {label}")
+        print("=" * 85)
 
-    # 3. Vérification de l'équivalence numérique
-    mae = np.mean(np.abs(mat_manual - mat_auto))
-    accord = "PARFAIT" if mae < 1e-5 else "DIVERGENT"
-    print(f"\n[+] Vérification des matrices : {accord} (MAE = {mae:.6f})")
+        # 1. Run Manuel OOC
+        print(f"\n[1/2] Lancement du Out-Of-Core MANUEL (plomberie asynchrone)...")
+        mat_manual, t_manual = await run_manual_ooc(sched, targets_np, refs_np, CHUNK_SIZE, CONCURRENCY, w=w_val)
+        print(f"    -> Terminé en : {t_manual*1000:.2f} ms")
+        print(f"    -> Débit      : {(N*K) / t_manual:.1f} distances/sec")
 
-    # 4. Comparaison des lignes de code
-    # Code manuel requis : ~45 lignes (plomberie loop, asyncio.Queue, active_tasks wait, to_host, copyto, etc.)
-    # Code auto requis   : 1 ligne (map_out_of_core)
-    
-    print("\n" + "=" * 95)
-    print(" BILAN COMPARATIF")
-    print("=" * 95)
-    print(f" {'Indicateur':<30} | {'OOC Manuel (Plomberie)':<28} | {'OOC Auto (Monoligne)':<28}")
-    print("-" * 95)
-    print(f" {'Lignes de code (plomberie)':<30} | {'~45 lignes':<28} | {'1 ligne (map_out_of_core)':<28}")
-    temps_str = "Temps d'exécution"
-    complexite_str = "Complexité d'écriture"
-    print(f" {temps_str:<30} | {t_manual*1000:>22.1f} ms | {t_auto*1000:>22.1f} ms")
-    print(f" {'Débit (distances / sec)':<30} | {(N*K)/t_manual:>25,.0f} | {(N*K)/t_auto:>25,.0f}")
-    print(f" {complexite_str:<30} | {'Élevée (Asyncio Queue/Pool)':<28} | {'Nulle (Gérée par JIT)':<28}")
-    print("=" * 95)
+        # 2. Run Auto OOC
+        print(f"\n[2/2] Lancement du Out-Of-Core AUTOMATIQUE (monoligne)...")
+        mat_auto, t_auto = await run_auto_ooc(sched, targets_np, refs_np, CHUNK_SIZE, CONCURRENCY, w=w_val)
+        print(f"    -> Terminé en : {t_auto*1000:.2f} ms")
+        print(f"    -> Débit      : {(N*K) / t_auto:.1f} distances/sec")
+
+        # 3. Vérification de l'équivalence numérique
+        mae = np.mean(np.abs(mat_manual - mat_auto))
+        accord = "PARFAIT" if mae < 1e-5 else "DIVERGENT"
+        print(f"\n[+] Vérification des matrices : {accord} (MAE = {mae:.6f})")
+        
+        print("\n" + "-" * 95)
+        print(f" BILAN COMPARATIF — DTW {label}")
+        print("-" * 95)
+        print(f" {'Indicateur':<30} | {'OOC Manuel (Plomberie)':<28} | {'OOC Auto (Monoligne)':<28}")
+        print("-" * 95)
+        print(f" {'Lignes de code (plomberie)':<30} | {'~45 lignes':<28} | {'1 ligne (map_out_of_core)':<28}")
+        print(f" {'Temps d execution':<30} | {t_manual*1000:>22.1f} ms | {t_auto*1000:>22.1f} ms")
+        print(f" {'Débit (distances / sec)':<30} | {(N*K)/t_manual:>25,.0f} | {(N*K)/t_auto:>25,.0f}")
+        print(f" {'Complexite d ecriture':<30} | {'Élevée (Asyncio Queue/Pool)':<28} | {'Nulle (Gérée par JIT)':<28}")
+        print("-" * 95)
 
 if __name__ == "__main__":
     asyncio.run(main())
+

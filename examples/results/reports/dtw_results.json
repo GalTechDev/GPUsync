@@ -1,68 +1,78 @@
 {
   "name": "DTW",
   "description": "Dynamic Time Warping 1-to-N distance computation using dtw_gpu_engine",
-  "num_runs": 2,
+  "num_runs": 5,
   "variants": [
-    "GPUsync"
+    "OOC Manuel",
+    "OOC Auto"
   ],
   "results": [
     {
-      "size": 10000,
-      "mean_cpu": 0.0027198000007047085,
-      "std_cpu": 0.0001905999997688923,
-      "variants": {
-        "GPUsync": {
-          "mean": 0.002838500000507338,
-          "std": 1.7000002117129043e-06,
-          "speedup": 0.9581821385304162,
-          "skipped": false,
-          "scaled_cpu_mean": 0.0027198000007047085,
-          "scaled_cpu_std": 0.0001905999997688923
-        }
-      }
-    },
-    {
       "size": 100000,
-      "mean_cpu": 0.02788299999974697,
-      "std_cpu": 0.0010630000006131013,
+      "mean_cpu": 0.028549640001438094,
+      "std_cpu": 0.0012636529729794454,
       "variants": {
-        "GPUsync": {
-          "mean": 0.004060700000081852,
-          "std": 0.00010550000024522888,
-          "speedup": 6.866550101998407,
+        "OOC Manuel": {
+          "mean": 0.00802765999978874,
+          "std": 0.00032375584386451733,
+          "speedup": 3.5564087171341865,
           "skipped": false,
-          "scaled_cpu_mean": 0.02788299999974697,
-          "scaled_cpu_std": 0.0010630000006131013
+          "scaled_cpu_mean": 0.028549640001438094,
+          "scaled_cpu_std": 0.0012636529729794454
+        },
+        "OOC Auto": {
+          "mean": 0.012864279999485006,
+          "std": 0.00046598277305341017,
+          "speedup": 2.2192956001098403,
+          "skipped": false,
+          "scaled_cpu_mean": 0.028549640001438094,
+          "scaled_cpu_std": 0.0012636529729794454
         }
       }
     },
     {
-      "size": 1000000,
-      "mean_cpu": 0.3195265000067593,
-      "std_cpu": 0.006860499997856095,
+      "size": 200000,
+      "mean_cpu": 0.06252971999929287,
+      "std_cpu": 0.0017068966481848305,
       "variants": {
-        "GPUsync": {
-          "mean": 0.0425763499997629,
-          "std": 0.0035206500006097485,
-          "speedup": 7.504788456702811,
+        "OOC Manuel": {
+          "mean": 0.03066228000097908,
+          "std": 0.010100870709995548,
+          "speedup": 2.0393043177903345,
           "skipped": false,
-          "scaled_cpu_mean": 0.3195265000067593,
-          "scaled_cpu_std": 0.006860499997856095
+          "scaled_cpu_mean": 0.06252971999929287,
+          "scaled_cpu_std": 0.0017068966481848305
+        },
+        "OOC Auto": {
+          "mean": 0.023448919998918426,
+          "std": 0.0009464900585148239,
+          "speedup": 2.66663539310881,
+          "skipped": false,
+          "scaled_cpu_mean": 0.06252971999929287,
+          "scaled_cpu_std": 0.0017068966481848305
         }
       }
     },
     {
-      "size": 2000000,
-      "mean_cpu": 0.6178580000050715,
-      "std_cpu": 0.008462000005238224,
+      "size": 300000,
+      "mean_cpu": 0.09746177999841166,
+      "std_cpu": 0.002272465882108227,
       "variants": {
-        "GPUsync": {
-          "mean": 0.07299370000055205,
-          "std": 0.0051250999995318125,
-          "speedup": 8.464538720470378,
+        "OOC Manuel": {
+          "mean": 0.034715999999025374,
+          "std": 0.004584033023939442,
+          "speedup": 2.807402350534273,
           "skipped": false,
-          "scaled_cpu_mean": 0.6178580000050715,
-          "scaled_cpu_std": 0.008462000005238224
+          "scaled_cpu_mean": 0.09746177999841166,
+          "scaled_cpu_std": 0.002272465882108227
+        },
+        "OOC Auto": {
+          "mean": 0.0237323400004243,
+          "std": 0.008040138210126656,
+          "speedup": 4.106707555878147,
+          "skipped": false,
+          "scaled_cpu_mean": 0.09746177999841166,
+          "scaled_cpu_std": 0.002272465882108227
         }
       }
     }
