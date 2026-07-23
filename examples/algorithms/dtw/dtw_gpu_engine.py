@@ -184,3 +184,77 @@ def get_sliding_dtw_multi_kernel(M, num_queries):
             distances[q * chunk_offset + ctx] = row[M_CONST - 1]
             
     return dtw_sliding_multi_kernel
+
+
+def get_batch_dtw_window_kernel(M, num_refs):
+    """
+    Génère un noyau GPU pour le calcul DTW en batch avec contrainte de fenêtre (Sakoe-Chiba band).
+    Optimisé via double-buffering de lignes pour éviter les copies et la réinitialisation complète des tableaux.
+    """
+    @gpusync_kernel(constants={"M_CONST": M, "M_CONST_PAD": M + 1, "M_CONST_PAD_2": 2 * (M + 1), "NUM_REFS_CONST": num_refs})
+    def batch_dtw_fused_window(ctx: int, references: constant_list, targets: list, targets_offset: int, w: int, outputs: list, num_refs_arg: int, chunk_size: int):
+        if ctx >= chunk_size:
+            return
+            
+        target_idx: int = targets_offset + ctx
+        target_start: int = target_idx * M_CONST
+        
+        tgt_local = [0.0] * M_CONST
+        for j in unrolled_range(0, M_CONST):
+            tgt_local[j] = targets[target_start + j]
+            
+        # Boucle sur les références
+        for r in range(NUM_REFS_CONST):
+            ref_start: int = r * M_CONST
+            
+            ref_local = [0.0] * M_CONST
+            for i in unrolled_range(0, M_CONST):
+                ref_local[i] = references[ref_start + i]
+                
+            # dp de taille 2 * M_CONST_PAD
+            dp = [0.0] * M_CONST_PAD_2
+            for j in unrolled_range(0, M_CONST_PAD_2):
+                dp[j] = 1e20
+                
+            dp[0] = 0.0 # dp[0][0] = 0.0
+            
+            for i in range(1, M_CONST_PAD):
+                curr_idx: int = int(i % 2)
+                prev_idx: int = int(1 - curr_idx)
+                
+                curr_offset: int = int(curr_idx * M_CONST_PAD)
+                prev_offset: int = int(prev_idx * M_CONST_PAD)
+                
+                # Réinitialiser la colonne de garde à l'infini
+                dp[curr_offset] = 1e20
+                
+                # Déterminer les bornes
+                j_start: int = int(i - w)
+                if j_start < 1:
+                    j_start = 1
+                j_end: int = int(i + w + 1)
+                if j_end > M_CONST_PAD:
+                    j_end = M_CONST_PAD
+                    
+                # Réinitialiser uniquement les cellules frontières à l'infini
+                if j_start > 1:
+                    dp[int(curr_offset + j_start - 1)] = 1e20
+                if j_end < M_CONST_PAD:
+                    dp[int(curr_offset + j_end)] = 1e20
+                    
+                for j in range(j_start, j_end):
+                    d = ref_local[i - 1] - tgt_local[j - 1]
+                    cost = d * d
+                    
+                    min_val = dp[int(prev_offset + j)]          # Insertion
+                    if dp[int(curr_offset + j - 1)] < min_val:  # Deletion
+                        min_val = dp[int(curr_offset + j - 1)]
+                    if dp[int(prev_offset + j - 1)] < min_val:  # Match
+                        min_val = dp[int(prev_offset + j - 1)]
+                        
+                    dp[int(curr_offset + j)] = cost + min_val
+                    
+            final_idx: int = int(M_CONST % 2)
+            outputs[int(r * chunk_size + ctx)] = dp[int(final_idx * M_CONST_PAD + M_CONST)]
+
+    return batch_dtw_fused_window

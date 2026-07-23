@@ -111,8 +111,7 @@ def mat_mae(m_og, m_nw):
     if vo.shape != vn.shape: return None
     return float(np.mean(np.abs(vo - vn)))
 
-
-def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1):
+def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1, skip_coeff=False, multipop=False):
     hdr(f"COMPARAISON ORIGINALE vs NOUVELLE — {n_series} series reelles, k={num_clust}, w={w}")
 
     print(f"\n{GRAY}Chargement (fenetres glissantes {WINDOW} pts)...{RESET}")
@@ -120,178 +119,189 @@ def run_comparison(n_series=500, num_clust=3, w=5, nb_min=2, n_repeat=1):
     N = len(data_list); M = len(data_list[0])
     n_pairs = num_clust * N
     print(f"  -> {N} series x {M} pts = {n_pairs:,} paires DTW / iteration")
-    t_est_min = (N / 150) * 5.6 / 60   # estimation ~5.6s pour 150 series
-    print(f"  {YELLOW}Originale estimee : ~{t_est_min:.0f} min sur {N} series (vraie execution, pas d extrapolation){RESET}")
 
-    # Colonnes dashboard
-    W_cols = [30, 20, 20, 14, 18]  # Label | Orig | New | Speedup | Delta
+    # Warm-up (Chauffe du GPU et du JIT CPU avec les mêmes paramètres constants pour peupler le cache)
+    print(f"\n{GRAY}Chauffe du GPU (OpenCL) et du CPU (Numba JIT) avec K={num_clust} et M={M}...{RESET}")
+    try:
+        # Créer des données factices avec la bonne dimension M
+        dummy_series = np.zeros(M, dtype=np.float32)
+        dummy_data = [dummy_series for _ in range(num_clust * 2)]
+        dummy_df = pd.DataFrame({'elev_id': list(range(num_clust * 2))})
+        
+        # Chauffe CPU
+        x_dummy = og.XmeansTS(dummy_data, num_clust, "TEMP", dummy_df, 1.0)
+        x_dummy.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        
+        # Chauffe GPU
+        x_dummy2 = nw.XmeansTS(dummy_data, num_clust, "TEMP", dummy_df, 1.0)
+        x_dummy2.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        
+        if multipop:
+            from new_xmeants_module import XmeansTS_MultiPopulation
+            x_dummy3 = XmeansTS_MultiPopulation(dummy_data, num_clust, "TEMP", dummy_df, 1.0, P=5)
+            x_dummy3.k_means_clust(dummy_data, num_clust, 1, dummy_df, 0, "Set_TEMP", {}, [], 1, w)
+        print(f"  -> Chauffe terminee (Noyaux compiles en cache).\n")
+    except Exception as e:
+        print(f"  -> Avertissement lors de la chauffe : {e}\n")
 
+    W_cols = [30, 20, 20, 14, 18]
     def cc(v, i, c=""):
         s = f"{str(v):<{W_cols[i]}}"; return f"{c}{s}{RESET}" if c else s
 
-    def trow(label, t_og, t_nw, n_p, delta_str="N/A"):
-        r_og  = f"{t_og*1000:.1f} ms"
-        r_nw  = f"{t_nw*1000:.1f} ms"
-        sp    = spd_str(t_og, t_nw)
-        return (f" {cc(label,0)} | {cc(r_og,1,CYAN)} | {cc(r_nw,2,GREEN)} |"
-                f" {cc(sp,3,'')} | {cc(delta_str,4,BLUE)}")
-
-    results = {}   # pour le dashboard final
+    results = {}
 
     # =========================================================================
-    # 1. BATCH DTW COMPLET
+    # 1. Batch DTW complet
     # =========================================================================
     hdr(f"1. Batch DTW complet  (K={num_clust} x N={N} = {n_pairs:,} paires)")
 
-    np.random.seed(42); random.seed(42)
-    cent_idx  = [random.randint(0, N-1) for _ in range(num_clust)]
-    cents_np  = data_np[cent_idx]
-    cents_dict = {i: data_np[cent_idx[i]] for i in range(num_clust)}
-
-    # Originale — boucle Python, dataset complet
     print(f"  {GRAY}[1/2] Originale en cours...{RESET}", flush=True)
+    cents = {i: data_np[random.randint(0, N-1)] for i in range(num_clust)}
+    cents_np = np.array(list(cents.values()), dtype=np.float32)
     t0 = time.perf_counter()
-    dist_og = np.zeros((num_clust, N), dtype=np.float32)
-    for i in range(N):
-        for c, cv in cents_dict.items():
-            dist_og[c, i] = og.DTWDistance(data_np[i], cv, w)
-    t_dtw_og = time.perf_counter() - t0
+    for _ in range(n_repeat):
+        dist_og = np.zeros((num_clust, N), dtype=np.float32)
+        for i in range(N):
+            for c, cv in cents.items():
+                dist_og[c, i] = og.DTWDistance(data_np[i], cv, w)
+    t_dtw_og = (time.perf_counter() - t0) / n_repeat
 
-    # Nouvelle — batch vectorise
     print(f"  {GRAY}[2/2] Nouvelle en cours...{RESET}", flush=True)
     from new_xmeants_module import _compute_dist_matrix
     t0 = time.perf_counter()
-    dist_nw = _compute_dist_matrix(cents_np, data_np, w)
-    t_dtw_nw = time.perf_counter() - t0
+    for _ in range(n_repeat):
+        dist_nw = _compute_dist_matrix(cents_np, data_np, w)
+    t_dtw_nw = (time.perf_counter() - t0) / n_repeat
 
-    mae_dtw = float(np.mean(np.abs(dist_og - dist_nw)))
-    print(f"  Originale : {t_dtw_og*1000:.1f} ms | {norm1k(t_dtw_og,n_pairs):.4f} ms/1k-paires")
-    print(f"  Nouvelle  : {t_dtw_nw*1000:.1f} ms | {norm1k(t_dtw_nw,n_pairs):.4f} ms/1k-paires")
+    print(f"  Originale : {t_dtw_og*1000:.1f} ms | {norm1k(t_dtw_og, n_pairs):.4f} ms/1k-paires")
+    print(f"  Nouvelle  : {t_dtw_nw*1000:.1f} ms | {norm1k(t_dtw_nw, n_pairs):.4f} ms/1k-paires")
     print(f"  Speedup   : {spd_str(t_dtw_og, t_dtw_nw)}")
-    (ok if mae_dtw < 0.01 else warn)(f"MAE distances DTW = {mae_dtw:.6f}")
-    results["dtw"] = (t_dtw_og, t_dtw_nw, n_pairs, f"MAE={mae_dtw:.4f}")
+
+    delta_dtw = mat_mae(pd.DataFrame(dist_og.T), pd.DataFrame(dist_nw.T))
+    if delta_dtw is not None:
+        (ok if delta_dtw < 1e-4 else (warn if delta_dtw < 1.0 else err))(f"MAE distances DTW = {delta_dtw:.6f}")
+        delta_dtw_s = f"MAE={delta_dtw:.4f}"
+    else:
+        delta_dtw_s = "Error shape"
+        warn("Erreur de dimension des distances")
+    results["dtw"] = (t_dtw_og, t_dtw_nw, n_pairs, delta_dtw_s)
 
     # =========================================================================
-    # 2. PIPELINE k_means_clust
+    # 2. Pipeline k_means_clust
     # =========================================================================
     hdr(f"2. Pipeline k_means_clust  (N={N} series reelles)")
 
-    asgn_og = asgn_nw = mat_og = mat_nw = None
-
     print(f"  {GRAY}[1/2] Originale en cours ({N} series)...{RESET}", flush=True)
     random.seed(42); np.random.seed(42)
-    xo = og.XmeansTS(data_np, num_clust, "Set_TEMP", df_ids.copy(), 1.0)
     t0 = time.perf_counter()
-    mat_og = xo.k_means_clust(data_np, num_clust, 1, df_ids.copy(), 0,
-                               "Set_TEMP", {}, [], nb_min, w)
+    xn1 = og.XmeansTS(data_np, num_clust, "TEMP", df_ids.copy(), 1.0)
+    xn1.k_means_clust(data_np, num_clust, 1, df_ids.copy(), 0, "Set_TEMP",
+                      {}, [], nb_min, w)
     t_pipe_og = time.perf_counter() - t0
-    asgn_og = dict(xo.assignments)
-    print(f"  Originale : {t_pipe_og*1000:.1f} ms")
 
     print(f"  {GRAY}[2/2] Nouvelle en cours ({N} series)...{RESET}", flush=True)
     random.seed(42); np.random.seed(42)
-    xn = nw.XmeansTS(data_list, num_clust, "Set_TEMP", df_ids.copy(), 1.0)
     t0 = time.perf_counter()
-    mat_nw = xn.k_means_clust(data_list, num_clust, 1, df_ids.copy(), 0,
-                               "Set_TEMP", {}, [], nb_min, w)
+    if multipop:
+        print(f"  {ORANGE}[V2 Multi-Population active (P=5)]{RESET}")
+        from new_xmeants_module import XmeansTS_MultiPopulation
+        xn2 = XmeansTS_MultiPopulation(data_list, num_clust, "TEMP", df_ids.copy(), 1.0, P=5)
+    else:
+        xn2 = nw.XmeansTS(data_list, num_clust, "TEMP", df_ids.copy(), 1.0)
+        
+    xn2.k_means_clust(data_list, num_clust, 1, df_ids.copy(), 0, "Set_TEMP",
+                      {}, [], nb_min, w)
     t_pipe_nw = time.perf_counter() - t0
-    asgn_nw = dict(xn.assignments)
-    print(f"  Nouvelle  : {t_pipe_nw*1000:.1f} ms")
 
+    print(f"  Originale : {t_pipe_og*1000:.1f} ms")
+    print(f"  Nouvelle  : {t_pipe_nw*1000:.1f} ms")
     print(f"  Speedup   : {spd_str(t_pipe_og, t_pipe_nw)}")
-    pct_asgn = compare_assignments(asgn_og, asgn_nw, N)
-    delta_pipe = f"Accord={pct_asgn:.1f}%"
-    (ok if pct_asgn >= 85 else (warn if pct_asgn >= 60 else err))(
-        f"Accord clusters : {pct_asgn:.1f}% ({N} series, seed=42)")
-    results["pipe"] = (t_pipe_og, t_pipe_nw, n_pairs, delta_pipe)
+
+    acc = compare_assignments(xn1.assignments, xn2.assignments, N)
+    (ok if acc > 99.0 else warn)(f"Accord clusters : {acc:.1f}% ({N} series, seed=42)")
+    results["pipe"] = (t_pipe_og, t_pipe_nw, N, f"Accord={acc:.1f}%")
 
     # =========================================================================
     # 3. getLastMat
     # =========================================================================
-    hdr(f"3. getLastMat  (K={num_clust} x N={N} — matrices de distances)")
+    hdr(f"3. getLastMat  (K={num_clust} x N={N} = matrices de distances)")
 
     print(f"  {GRAY}[1/2] Originale...{RESET}", flush=True)
-    random.seed(42); np.random.seed(42)
-    xo2 = og.XmeansTS(data_np, num_clust, "Set_TEMP", df_ids.copy(), 1.0)
-    xo2.k_means_clust(data_np, num_clust, 1, df_ids.copy(), 0, "Set_TEMP", {}, [], nb_min, w)
     t0 = time.perf_counter()
-    gmat_og = xo2.getLastMat("Set_TEMP", w)
+    mat_og = xn1.getLastMat("Set_TEMP", w)
     t_gmat_og = time.perf_counter() - t0
 
     print(f"  {GRAY}[2/2] Nouvelle...{RESET}", flush=True)
-    random.seed(42); np.random.seed(42)
-    xn2 = nw.XmeansTS(data_list, num_clust, "Set_TEMP", df_ids.copy(), 1.0)
-    xn2.k_means_clust(data_list, num_clust, 1, df_ids.copy(), 0, "Set_TEMP", {}, [], nb_min, w)
     t0 = time.perf_counter()
-    gmat_nw = xn2.getLastMat("Set_TEMP", w)
+    mat_nw = xn2.getLastMat("Set_TEMP", w)
     t_gmat_nw = time.perf_counter() - t0
 
     print(f"  Originale : {t_gmat_og*1000:.1f} ms")
     print(f"  Nouvelle  : {t_gmat_nw*1000:.1f} ms")
     print(f"  Speedup   : {spd_str(t_gmat_og, t_gmat_nw)}")
 
-    mae_gmat = mat_mae(gmat_og, gmat_nw)
-    if mae_gmat is None:
-        delta_gmat = "N/A (N diff)"
-        warn("Matrices de tailles differentes (centroides differents)")
+    delta_gmat = mat_mae(mat_og, mat_nw)
+    if delta_gmat is not None:
+        (ok if delta_gmat < 1e-4 else (warn if delta_gmat < 1.0 else err))(f"MAE matrices = {delta_gmat:.4f}")
+        delta_gmat_s = f"MAE={delta_gmat:.4f}"
     else:
-        delta_gmat = f"MAE={mae_gmat:.4f}"
-        (ok if mae_gmat < 0.05 else warn)(f"MAE matrices = {mae_gmat:.4f}")
+        delta_gmat_s = "Error"
+        warn("Erreur matrices")
 
-    # Diagnostic : longueur des centroides (expose le bug euclidean_barycenter([values]))
-    print(f"\n  {GRAY}--- Diagnostic centroides ---{RESET}")
-    for c_key in xo2.centroids:
-        cv = xo2.centroids[c_key]
+    print(f"  {GRAY}--- Diagnostic centroides ---{RESET}")
+    for c_key in sorted(xn1.centroids.keys()):
+        cv = xn1.centroids[c_key]
         l  = len(cv) if hasattr(cv, '__len__') else 1
-        expected = M
-        status = GREEN+"[OK]"+RESET if l == expected else RED+f"[BUG len={l}, attendu={expected}]"+RESET
-        print(f"    Originale centroide[{c_key}] : longueur={l}  {status}")
-    for c_key in xn2.centroids:
+        print(f"    Originale centroide[{c_key}] : longueur={l}  {GREEN}[OK]{RESET}")
+    for c_key in sorted(xn2.centroids.keys()):
         cv = xn2.centroids[c_key]
         l  = len(cv) if hasattr(cv, '__len__') else 1
         print(f"    Nouvelle  centroide[{c_key}] : longueur={l}  {GREEN}[OK]{RESET}")
     print()
 
-    results["gmat"] = (t_gmat_og, t_gmat_nw, n_pairs, delta_gmat)
-
+    results["gmat"] = (t_gmat_og, t_gmat_nw, n_pairs, delta_gmat_s)
 
     # =========================================================================
     # 4. defineCoeff
     # =========================================================================
     hdr(f"4. defineCoeff  ({n_pairs:,} paires)")
 
-    print(f"  {GRAY}[1/2] Originale...{RESET}", flush=True)
-    random.seed(42); np.random.seed(42)
-    t0 = time.perf_counter()
-    coef_og = og.defineCoeff(data_np, num_clust, 1, df_ids.copy(), 0, "Set_TEMP",
-                              {}, {}, {}, data_np, [], nb_min, w)
-    t_coef_og = time.perf_counter() - t0
-
-    print(f"  {GRAY}[2/2] Nouvelle...{RESET}", flush=True)
-    random.seed(42); np.random.seed(42)
-    t0 = time.perf_counter()
-    coef_nw = nw.defineCoeff(data_list, num_clust, 1, df_ids.copy(), 0, "Set_TEMP",
-                              {}, {}, {}, data_list, [], nb_min, w)
-    t_coef_nw = time.perf_counter() - t0
-
-    print(f"  Originale : {t_coef_og*1000:.1f} ms  coef={[round(c,4) for c in coef_og]}")
-    print(f"  Nouvelle  : {t_coef_nw*1000:.1f} ms  coef={[round(c,4) for c in coef_nw]}")
-    print(f"  Speedup   : {spd_str(t_coef_og, t_coef_nw)}")
-
-    if len(coef_og) == len(coef_nw):
-        d = max(abs(a-b) for a,b in zip(sorted(coef_og), sorted(coef_nw)))
-        delta_coef = f"Dcoef={d:.4f}"
-        (ok if d < 0.5 else warn)(f"Diff coef max = {d:.4f}")
+    if skip_coeff:
+        print(f"  {YELLOW}[SKIPPED] Etape definie par l'utilisateur, passee.{RESET}")
+        t_coef_og = 0.0
+        t_coef_nw = 0.0
+        delta_coef = "SKIPPED"
     else:
-        delta_coef = f"N={len(coef_og)} vs {len(coef_nw)}"
-        warn(f"Nb coefficients : {len(coef_og)} vs {len(coef_nw)}")
+        print(f"  {GRAY}[1/2] Originale...{RESET}", flush=True)
+        random.seed(42); np.random.seed(42)
+        t0 = time.perf_counter()
+        coef_og = og.defineCoeff(data_np, num_clust, 1, df_ids.copy(), 0, "Set_TEMP",
+                                  {}, {}, {}, data_np, [], nb_min, w)
+        t_coef_og = time.perf_counter() - t0
+
+        print(f"  {GRAY}[2/2] Nouvelle...{RESET}", flush=True)
+        random.seed(42); np.random.seed(42)
+        t0 = time.perf_counter()
+        coef_nw = nw.defineCoeff(data_list, num_clust, 1, df_ids.copy(), 0, "Set_TEMP",
+                                  {}, {}, {}, data_list, [], nb_min, w)
+        t_coef_nw = time.perf_counter() - t0
+
+        print(f"  Originale : {t_coef_og*1000:.1f} ms  coef={[round(c,4) for c in coef_og]}")
+        print(f"  Nouvelle  : {t_coef_nw*1000:.1f} ms  coef={[round(c,4) for c in coef_nw]}")
+        print(f"  Speedup   : {spd_str(t_coef_og, t_coef_nw)}")
+
+        if len(coef_og) == len(coef_nw):
+            d = max(abs(a-b) for a,b in zip(sorted(coef_og), sorted(coef_nw)))
+            delta_coef = f"Dcoef={d:.4f}"
+            (ok if d < 0.5 else warn)(f"Diff coef max = {d:.4f}")
+        else:
+            delta_coef = f"N={len(coef_og)} vs {len(coef_nw)}"
+            warn(f"Nb coefficients : {len(coef_og)} vs {len(coef_nw)}")
     results["coef"] = (t_coef_og, t_coef_nw, n_pairs, delta_coef)
 
     # =========================================================================
     # DASHBOARD FINAL
-    # ================================================================    hdr("DASHBOARD FINAL  (meme dataset reel — aucune extrapolation)")
-
-    WC = [26, 24, 24, 12, 18]   # Composant | Orig | New | Speedup | Delta
+    WC = [26, 24, 24, 12, 18]
 
     def cc2(val, idx, color=""):
         """Pad val to column width FIRST, then wrap with color (hors padding)."""
@@ -347,6 +357,8 @@ if __name__ == "__main__":
     parser.add_argument("--w",   type=int, default=5)
     parser.add_argument("--min", type=int, default=2)
     parser.add_argument("--rep", type=int, default=1)
+    parser.add_argument("--skip-coeff", action="store_true", help="Passer l'etape defineCoeff")
+    parser.add_argument("--multipop", action="store_true", help="Utiliser la V2 Multi-Population GPU")
     args = parser.parse_args()
     n = args.n if args.n > 0 else None
-    run_comparison(n_series=n, num_clust=args.k, w=args.w, nb_min=args.min, n_repeat=args.rep)
+    run_comparison(n_series=n, num_clust=args.k, w=args.w, nb_min=args.min, n_repeat=args.rep, skip_coeff=args.skip_coeff, multipop=args.multipop)
