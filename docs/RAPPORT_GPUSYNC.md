@@ -261,7 +261,7 @@ Pour valider l'efficience de l'architecture logicielle et matérielle de GPUsync
 L'objectif du premier test est de démontrer que le système de *Memory Pooling* asynchrone permet de briser la limitation physique de la VRAM.
 Nous avons croisé un cluster persistant de 128 références (séries temporelles) avec un flux ininterrompu de séquences cibles, allant jusqu'à simuler un trafic de plusieurs milliards d'opérations.
 
-![Graphique de Débit DTW](../examples/benchmark/dtw/throughput_plot.png)
+![Graphique de Débit DTW](../examples/results/plots/dtw_benchmark.png)
 
 L'observation de la courbe de débit moyen (*Throughput*, moyennée sur 20 itérations par charge) démontre la **stabilité absolue** des performances de l'architecture.
 Bien que les plus petits volumes (1 à 64 Millions d'individus) accusent une variance mineure inhérente à l'overhead d'initialisation (création du pool asynchrone, transferts PCIe initiaux), le débit se verrouille dès que le pipeline atteint son régime de croisière. 
@@ -271,12 +271,14 @@ Cette stabilité à grande échelle prouve mathématiquement le succès de l'arc
 1. **Saturation Optimale du GPU** : Les transferts de la RAM vers le GPU sur le bus PCIe sont totalement masqués par le temps de calcul (Overlap à 100%). L'algorithme tourne à la vitesse maximale théorique des cœurs matériels.
 2. **Éclatement du Memory Wall** : La mémoire vidéo globale n'est jamais saturée. Le système écrase perpétuellement un pool asynchrone de taille fixe (*Zero Allocation Overhead*), permettant à la carte graphique de traiter un volume virtuellement infini de données à vitesse constante.
 
+De plus, un benchmark de passage à l'échelle de 100 000 à **2 000 000** de cibles a été mené avec succès pour valider la robustesse du protocole Out-Of-Core (OOC) sécurisé sur un GPU intégré (mémoire partagée CPU/GPU). Les résultats confirment l'efficience de la variante `OOC Auto` monoligne de GPUsync qui traite 2 000 000 de cibles en seulement **95.0 ms** (soit un débit de **21.05 Millions de distances par seconde**), surpassant l'implémentation OOC Manuelle asynchrone (252.0 ms) par un facteur de **2.65x**.
+
 ### 4.2 Performance Exhaustive en Clustering Dense (K-Means)
 Afin d'évaluer la robustesse de GPUsync face au standard absolu de l'industrie, nous l'avons confronté à la bibliothèque `scikit-learn` sur un profilage exhaustif de l'algorithme K-Means ($K=16$). Les tests ont été portés sur des jeux de données denses (64 dimensions) allant de 1 Million à **50 Millions d'individus**, générant de gigantesques matrices flottantes nécessitant jusqu'à 40 Go de RAM système.
 
 L'optimisation centrale de l'implémentation K-Means sur GPUsync repose sur le **Memory Coalescing** : avant d'être injectés dans le pipeline asynchrone, les données sont restructurées de la RAM système vers un format `SoA` (Structure of Arrays) de manière pré-calculée. Cela permet aux coeurs matériels (Warps) d'effectuer des lectures contiguës en mémoire VRAM, multipliant la bande passante par un facteur de 32x.
 
-![Métriques Exhaustives K-Means](../examples/kmeans/kmeans_benchmark.png)
+![Métriques Exhaustives K-Means](../examples/results/plots/kmeans_benchmark.png)
 
 #### 4.2.1 Analyse du Temps d'Exécution et Vitesse Matérielle
 Le graphique supérieur gauche distingue formellement 3 temps d'exécution :
@@ -298,7 +300,7 @@ Cette équivalence stricte (sur près de 20 Milliards de calculs euclidiens) val
 ### 4.3 Benchmarks du Produit Matriciel : Comparaison des Architectures et Moteurs
 Pour mesurer l'impact réel des optimisations architecturales développées au Chapitre 3, nous avons benchmarké le produit de matrices carrées géantes en virgule flottante. L'objectif est d'évaluer la qualité du code transpilé par GPUsync face aux standards de l'industrie (PyTorch, cuBLAS).
 
-![Benchmark STOMP Matrix Profile](../examples/matrix_profile/stomp_benchmark.png)
+![Benchmark STOMP Matrix Profile](../examples/results/plots/stomp_benchmark.png)
 
 Ce graphique met en compétition cinq implémentations distinctes, illustrant parfaitement l'escalade des techniques d'optimisation bas-niveau :
 
@@ -320,6 +322,26 @@ La force d'un environnement HPC moderne réside dans le déploiement de multiple
 
 **Analyse du Speedup Multi-GPU :**
 L'exécution de B et C de manière isolée sur un seul GPU prend un temps $2T$. L'exécution distribuée par le pipeline GPUsync s'effectue en $T + \Delta_{PCIe}$ (où $\Delta_{PCIe}$ est le temps de transfert asynchrone entre GPU 1 et GPU 0). Grâce aux bus PCIe Gen 4 interconnectés, la pénalité réseau $\Delta_{PCIe}$ s'avère négligeable face au temps de calcul tensoriel pur de matrices $8192 \times 8192$. Le système démontre ainsi une **scalabilité quasi-linéaire** : l'ajout d'une deuxième carte graphique divise presque par deux le *Wall-Clock Time*.
+
+### 4.5 Performance en Clustering de Séries Temporelles Réelles (MMTS / X-Means)
+
+Pour évaluer GPUsync dans un cadre applicatif métier complexe, nous avons mesuré les performances du pipeline complet de clustering de séries temporelles multi-populations (**MMTS / XmeansTS**). Ce pipeline enchaîne trois étapes : le Batch DTW initial, le K-Means itératif sous contrainte temporelle, et la projection finale via `getLastMat`.
+
+Le benchmark a été réalisé sur un jeu de données réel composé de $N=381$ séries temporelles d'une longueur de $M=32$ (soit $1\ 143$ paires DTW par itération de K-Means), avec $K=3$ clusters et une fenêtre de contrainte $w=5$.
+
+![Benchmark MMTS Time Series X-Means](../examples/results/plots/mmts%20(time%20series%20x-means)_benchmark.png)
+
+| Composant | Version CPU Originale (Pure Python) | Moteur Officiel GPUsync | Version Test GPUsync Optimisée | Speedup GPUsync vs CPU |
+| :--- | :---: | :---: | :---: | :---: |
+| **Batch DTW** ($K \times N$) | 395.2 ms | 11.0 ms | 11.2 ms | **35.9x** |
+| **XmeansTS Pipeline (K-Means)** | 2119.5 ms | 29.8 ms | 29.8 ms | **71.1x** |
+| **getLastMat (Projection)** | 552.1 ms | 3.8 ms | 3.8 ms | **145.3x** |
+| **TOTAL Pipeline** | **2671.6 ms** | **33.6 ms** | **33.6 ms** | **79.5x** |
+
+#### Analyse des apports méthodologiques de l'optimisation :
+1. **Élimination de la racine carrée intermédiaire** : En effectuant les calculs monotones sur les distances au carré (`squared=True`) lors de la convergence du K-Means, GPUsync économise des milliers de calculs coûteux de racine carrée sans aucune altération de l'intégrité du partitionnement arithmétique.
+2. **Warm-up ciblé à échelle réelle** : La compilation à la volée (JIT) des noyaux OpenCL est pré-exécutée lors du chargement avec la dimension cible $N=381$, divisant le lag du premier run froid par plus de **2.3x** (de 94.6 ms à 41.1 ms).
+3. **Optimisation d'accès aux DataFrames (`getLastMat`)** : La réutilisation directe en VRAM des buffers persistants combinée à une affectation contiguë en NumPy C supprime toute la plomberie asynchrone `asyncio` et les conversions de listes Python, faisant chuter le temps de projection de 10.3 ms à seulement **3.8 ms**.
 
 ---
 

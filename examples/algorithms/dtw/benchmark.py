@@ -26,11 +26,6 @@ async def process_chunk_manual(chunk_id, offset, chunk_size, gpu_refs_all, gpu_t
     res_matrix = np.sqrt(np.maximum(res_flat[:num_refs * chunk_size].reshape(num_refs, chunk_size), 0.0))
     np.copyto(out_matrix[:, offset : offset + chunk_size], res_matrix)
     pool.put_nowait(gpu_outputs_batch)
-    
-    # Libération explicite immédiate du buffer OpenCL
-    if hasattr(gpu_targets_chunk.cl_buffer, "release"):
-        gpu_targets_chunk.cl_buffer.release()
-        
     return chunk_size
 
 async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit, batch_kernel):
@@ -65,16 +60,6 @@ async def run_manual_ooc(sched, targets_np, refs_np, chunk_size, in_flight_limit
         done, active_tasks = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
         for coro in done:
             coro.result()
-            
-    # Nettoyage explicite des buffers du pool d'outputs
-    while not pool.empty():
-        buf = pool.get_nowait()
-        if hasattr(buf.cl_buffer, "release"):
-            buf.cl_buffer.release()
-            
-    if hasattr(gpu_refs_all.cl_buffer, "release"):
-        gpu_refs_all.cl_buffer.release()
-        
     return matrice_distances
 
 # =========================================================================
@@ -172,9 +157,9 @@ class DTWBenchmark(BaseBenchmark):
             _ = loop.run_until_complete(compute_dtw_matrix(targets_pad_2d, ref_pad_2d, scheduler=scheduler))
             return N
         else:
-            # Calibrage dynamique pour l'OOC Manuel de la même façon
-            chunk_size = 50000 if N >= 100000 else 20000
-            concurrency = 4 if N >= 100000 else 2
+            # Calibrage sécurisé pour l'OOC Manuel (GPU Intel Graphics)
+            chunk_size = 20000
+            concurrency = 2
             _ = loop.run_until_complete(run_manual_ooc(scheduler, targets_pad_2d, ref_pad_2d, chunk_size, concurrency, self.kernel))
             return N
 
@@ -188,7 +173,7 @@ def main():
     sched.initialize()
 
     bm = DTWBenchmark(num_runs=5)
-    bm.execute(sizes=[100_000, 200_000, 300_000], scheduler=sched)
+    bm.execute(sizes=[100_000, 500_000, 1_000_000, 2_000_000], scheduler=sched)
 
 if __name__ == "__main__":
     main()
