@@ -43,6 +43,16 @@ class Scheduler:
         if self.gpu is not None:
             # 1. Utilisation du GPU spécifié
             raw_device = getattr(self.gpu, 'raw_device', self.gpu)
+            if hasattr(self.gpu, 'backend') and self.gpu.backend != lookup_backend:
+                logger.warning(f"GPU backend mismatch: specified {self.gpu.backend} but requested {self.backend}. Attempting to resolve.")
+                devs = manager_cls.discover_devices()
+                if self.gpu.index < len(devs):
+                    raw_device = devs[self.gpu.index]
+                elif len(devs) > 0:
+                    raw_device = devs[0]
+                else:
+                    raise ValueError(f"Specified GPU has backend '{self.gpu.backend}', but requested backend '{self.backend}' has no compatible devices.")
+            
             if lookup_backend == "cuda" and isinstance(raw_device, int):
                 # pyrefly: ignore [missing-import]
                 import cupy as cp
