@@ -8,6 +8,7 @@ et structurer les résultats sous forme de DataFrame.
 import sys
 import os
 import time
+# pyrefly: ignore [missing-import]
 import numpy as np
 import pandas as pd
 

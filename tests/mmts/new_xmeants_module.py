@@ -734,7 +734,13 @@ class XmeansTS:
             if len(assignments[i]) >= nbInstanceMinim:
                 ids = []
                 for item in assignments[i]:
-                    ids.append(int(id_array[item]))
+                    val = id_array[item]
+                    try:
+                        if isinstance(val, (int, float)) or (isinstance(val, str) and val.isdigit()):
+                            val = int(val)
+                    except Exception:
+                        pass
+                    ids.append(val)
                 assignmentsTemp[i] = ids
                 assignmentsTempBary[i] = []
                 assignmentsTempBaryDTW[i] = []
@@ -792,7 +798,13 @@ class XmeansTS:
                     dist_mat = _compute_dist_matrix(centroid_np, cluster_series_np, DEFAULT_W, self.scheduler)
                     dists_row = dist_mat[0]
                     for elId, LBVal in zip(valid_el_ids, dists_row):
-                        rows.append({ID_COLUMN: int(elId), 'MEAS': float(LBVal)})
+                        val_id = elId
+                        try:
+                            if isinstance(val_id, (int, float)) or (isinstance(val_id, str) and val_id.isdigit()):
+                                val_id = int(val_id)
+                        except Exception:
+                            pass
+                        rows.append({ID_COLUMN: val_id, 'MEAS': float(LBVal)})
                 
                 MatDist = pd.DataFrame(rows, columns=[ID_COLUMN, 'MEAS'])
                 
