@@ -54,7 +54,7 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
     )
     
     @auto_sync
-    async def wrapper(*args, global_size, scheduler, _pipeline_mode=False, local_size=None, stream=None, fire_and_forget=False):
+    async def wrapper(*args, global_size, scheduler, _pipeline_mode=False, local_size=None, stream=None, fire_and_forget=False, _out_buffers=None):
         """
         Enveloppe de kernel générée dynamiquement au moment de l'appel.
         Alloue les buffers de sortie VRAM, appelle AsyncTask pour exécuter le kernel
@@ -62,10 +62,13 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
         """
         out_buffers = []
         if num_returns > 0:
-            total_size = global_size if isinstance(global_size, int) else np.prod(global_size)
-            for _ in range(num_returns):
-                buf = AsyncBuffer.empty_like(scheduler, np.zeros(total_size, dtype=np.float32))
-                out_buffers.append(buf)
+            if _out_buffers is not None:
+                out_buffers = list(_out_buffers)
+            else:
+                total_size = global_size if isinstance(global_size, int) else np.prod(global_size)
+                for _ in range(num_returns):
+                    buf = AsyncBuffer.empty_like(scheduler, np.zeros(total_size, dtype=np.float32))
+                    out_buffers.append(buf)
                 
         new_args = list(args) + out_buffers
         await task.execute(scheduler, global_size, local_size, *new_args, stream=stream, fire_and_forget=fire_and_forget)
@@ -128,37 +131,95 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
                 chunk_size = max(50_000, min(N, 500_000))
 
             num_chunks = (N + chunk_size - 1) // chunk_size
-            results_host = [None] * num_chunks
             sem = asyncio.Semaphore(concurrency)
+
+            # 1. Identifier et pré-charger les arguments extras constants
+            gpu_extra_args = []
+            for extra in extra_args:
+                if isinstance(extra, np.ndarray):
+                    if len(extra) == N:
+                        # Dépend de la taille N (il sera découpé par chunk)
+                        gpu_extra_args.append(extra)
+                    else:
+                        # Argument constant global (ex: refs_np[0], etc.). On l'upload UNE fois en VRAM !
+                        gpu_extra_args.append(await AsyncBuffer.to_device(scheduler, extra))
+                else:
+                    gpu_extra_args.append(extra)
+
+            # 2. Pré-allouer le tableau de résultats final directement sur l'hôte pour éviter les copies et concatenations
+            if num_returns == 0:
+                final_result = None
+            elif num_returns == 1:
+                final_result = np.empty(N, dtype=np.float32)
+            else:
+                final_result = tuple(np.empty(N, dtype=np.float32) for _ in range(num_returns))
+
+            # 3. Créer un pool de buffers d'entrée et de sortie persistants (double-buffering / concurrency-buffering)
+            first_row = host_data[0]
+            row_shape = np.shape(first_row)
+            dtype = host_data.dtype if hasattr(host_data, 'dtype') else np.float32
+
+            in_pool = asyncio.Queue()
+            out_pool = asyncio.Queue()
+
+            for _ in range(concurrency):
+                # Buffer d'entrée persistant de taille maximum chunk_size
+                dummy_in = np.zeros((chunk_size,) + row_shape, dtype=dtype)
+                buf_in = await AsyncBuffer.to_device(scheduler, dummy_in)
+                in_pool.put_nowait(buf_in)
+
+                # Buffers de sortie persistants
+                chunk_outs = []
+                for _ in range(num_returns):
+                    dummy_out = np.zeros(chunk_size, dtype=np.float32)
+                    buf_out = AsyncBuffer.empty_like(scheduler, dummy_out)
+                    chunk_outs.append(buf_out)
+                out_pool.put_nowait(tuple(chunk_outs))
 
             async def process_chunk(idx):
                 async with sem:
-                    start_i = idx * chunk_size
-                    end_i = min(N, (idx + 1) * chunk_size)
-                    slice_data = host_data[start_i:end_i]
+                    # Prendre les buffers du pool
+                    buf_in = await in_pool.get()
+                    bufs_out = await out_pool.get()
 
-                    chunk_extra = []
-                    for extra in extra_args:
-                        if isinstance(extra, np.ndarray) and len(extra) == N:
-                            chunk_extra.append(extra[start_i:end_i])
-                        else:
-                            chunk_extra.append(extra)
+                    try:
+                        start_i = idx * chunk_size
+                        end_i = min(N, (idx + 1) * chunk_size)
+                        curr_chunk_size = end_i - start_i
+                        slice_data = host_data[start_i:end_i]
 
-                    buf_in = await AsyncBuffer.to_device(scheduler, slice_data)
-                    gpu_extra = []
-                    for ex in chunk_extra:
-                        if isinstance(ex, np.ndarray):
-                            gpu_extra.append(await AsyncBuffer.to_device(scheduler, ex))
-                        else:
-                            gpu_extra.append(ex)
+                        # A. Écrire les données d'entrée dans le buffer existant sans réallouer en VRAM
+                        await buf_in.overwrite(slice_data)
 
-                    res = await wrapper(buf_in, *gpu_extra, global_size=len(slice_data), scheduler=scheduler, _pipeline_mode=True)
+                        # B. Préparer les arguments additionnels
+                        chunk_extra = []
+                        for ex in gpu_extra_args:
+                            if isinstance(ex, np.ndarray) and len(ex) == N:
+                                # Chunk dépendant de la taille, on l'upload
+                                chunk_val = ex[start_i:end_i]
+                                chunk_extra.append(await AsyncBuffer.to_device(scheduler, chunk_val))
+                            elif isinstance(ex, AsyncBuffer):
+                                # Buffer déjà en VRAM constant global, on le passe tel quel !
+                                chunk_extra.append(ex)
+                            else:
+                                chunk_extra.append(ex)
 
-                    if isinstance(res, tuple):
-                        res_host = tuple([await b.to_host() for b in res])
-                    else:
-                        res_host = await res.to_host()
-                    results_host[idx] = res_host
+                        # C. Appeler le wrapper avec les buffers de sortie pré-alloués (_out_buffers)
+                        await wrapper(buf_in, *chunk_extra, global_size=curr_chunk_size, scheduler=scheduler, _pipeline_mode=True, _out_buffers=bufs_out)
+
+                        # D. Rapatrier les résultats directement dans le tableau final sans allocation temporaire
+                        if num_returns == 1:
+                            out_view = final_result[start_i:end_i]
+                            await bufs_out[0].to_host(out=out_view)
+                        elif num_returns > 1:
+                            for ret_idx in range(num_returns):
+                                out_view = final_result[ret_idx][start_i:end_i]
+                                await bufs_out[ret_idx].to_host(out=out_view)
+                            
+                    finally:
+                        # Remettre les buffers dans le pool pour la tâche suivante
+                        in_pool.put_nowait(buf_in)
+                        out_pool.put_nowait(bufs_out)
 
             tasks = [asyncio.create_task(process_chunk(i)) for i in range(num_chunks)]
             await asyncio.gather(*tasks)
@@ -166,12 +227,9 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
         if num_returns == 0:
             return None
         elif num_returns == 1:
-            return np.concatenate(results_host)
+            return final_result
         else:
-            return tuple(
-                np.concatenate([r[ret_idx] for r in results_host])
-                for ret_idx in range(num_returns)
-            )
+            return final_result
 
     wrapper.opencl_code = kernel_code_opencl 
     wrapper.cuda_code = kernel_code_cuda
