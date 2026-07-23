@@ -1191,10 +1191,20 @@ class MultiXmeansTS:
                 
                 for tabEnviIndice in self.files:
                     # Construire le chemin du fichier
-                    if hasattr(self, 'data_directory') and hasattr(self, 'file_prefix'):
-                        # Utiliser les chemins fournis par l'app Flask
-                        file_path = os.path.join(self.data_directory, f"{self.file_prefix}{tabEnviIndice}.xlsx")
-                        possible_paths = [file_path]
+                    if hasattr(self, 'data_directory') and hasattr(self, 'file_prefix') and self.data_directory is not None:
+                        file_name = tabEnviIndice
+                        if file_name.startswith("Set_"):
+                            file_name = file_name[4:]
+                        possible_paths = [
+                            os.path.join(self.data_directory, f"{self.file_prefix}{tabEnviIndice}.csv"),
+                            os.path.join(self.data_directory, f"{self.file_prefix}{file_name}.csv"),
+                            os.path.join(self.data_directory, f"{tabEnviIndice}.csv"),
+                            os.path.join(self.data_directory, f"{file_name}.csv"),
+                            os.path.join(self.data_directory, f"{self.file_prefix}{tabEnviIndice}.xlsx"),
+                            os.path.join(self.data_directory, f"{self.file_prefix}{file_name}.xlsx"),
+                            os.path.join(self.data_directory, f"{tabEnviIndice}.xlsx"),
+                            os.path.join(self.data_directory, f"{file_name}.xlsx")
+                        ]
                     else:
                         # Fallback pour compatibilité avec l'original
                         file_name = tabEnviIndice
@@ -1202,6 +1212,8 @@ class MultiXmeansTS:
                             file_name = file_name[4:]
                         
                         possible_paths = [
+                            os.path.join(os.path.dirname(os.getcwd()), f"RomaneDataSet_{file_name}.csv"),
+                            os.path.join(os.getcwd(), f"RomaneDataSet_{file_name}.csv"),
                             os.path.join(os.path.dirname(os.getcwd()), f"RomaneDataSet_{file_name}.xlsx"),
                             os.path.join(os.getcwd(), f"RomaneDataSet_{file_name}.xlsx"),
                             ROMANE_DATA_PATH + tabEnviIndice + '.xlsx',
@@ -1222,9 +1234,12 @@ class MultiXmeansTS:
                         raise FileNotFoundError(f"Impossible de trouver le fichier pour {tabEnviIndice}. Chemins essayés:\n{paths_str}")
                     
                     print(f"Chargement du fichier: {file_path}")
-                    xlsQualEnvi = pd.ExcelFile(file_path)
+                    if file_path.endswith('.csv'):
+                        dataTemp = pd.read_csv(file_path)
+                    else:
+                        xlsQualEnvi = pd.ExcelFile(file_path)
+                        dataTemp = xlsQualEnvi.parse(0)
                     
-                    dataTemp = xlsQualEnvi.parse(0)
                     dataTemp = dataTemp[dataTemp[ID_COLUMN].isin(IdTemp)]
                     dataTemp1 = dataTemp.drop([ID_COLUMN], axis=1)
                     
@@ -1462,51 +1477,64 @@ class XmeansTS_MultiPopulation(XmeansTS):
 
 if __name__ == "__main__":
     print("=" * 80)
-    print(" EXECUTION COMPLET DU PIPELINE MMTS SUR DONNEES REELLES (GPU ONLY)")
+    print(" EXECUTION COMPLETE DU PIPELINE MMTS SUR LE DOSSIER DATASET (GPU ONLY)")
     print("=" * 80)
 
     # Résolution dynamique des chemins
     HERE = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(HERE, "data")
+    DATA_DIR = os.path.join(HERE, "dataset")
     
-    ROMANE_DATA_PATH = os.path.join(DATA_DIR, "RomaneDataSet_")
-    
-    file_csv = os.path.join(DATA_DIR, "RomaneDataSet_TEMP.csv")
-    file_temp = os.path.join(DATA_DIR, "RomaneDataSet_TEMP.xlsx")
-    file_temp_set = os.path.join(DATA_DIR, "RomaneDataSet_Set_TEMP.xlsx")
-    
-    if not os.path.exists(file_csv):
-        print(f"[!] Fichier CSV source introuvable : {file_csv}. Fin.")
+    if not os.path.exists(DATA_DIR):
+        print(f"[!] Dossier dataset introuvable : {DATA_DIR}. Fin.")
         sys.exit(1)
         
-    print(f"[+] Conversion de {file_csv} en fichier Excel de production structuré par fenêtres glissantes...")
-    df_csv = pd.read_csv(file_csv)
-    raw = df_csv["value"].values.astype(np.float32)
-    WINDOW = 32
-    N_all = len(raw) - WINDOW + 1
+    # 0. NETTOYAGE ET CONVERSION AUTOMATIQUE DES FICHIERS EXCEL EN CSV PROPRES
+    CLEAN_DIR = os.path.join(HERE, "dataset_clean")
+    os.makedirs(CLEAN_DIR, exist_ok=True)
     
-    # Limiter le nombre de séries pour accélérer le test final
-    limit_n = 200
-    if N_all > limit_n:
-        N_all = limit_n
+    # Lister uniquement les variables de base principales (OXYGENE, PH, RENVLT, SALI, TEMP)
+    # pour garantir une intersection d'IDs de capteurs riche et cohérente
+    base_vars = ["OXYGENE", "PH", "RENVLT", "SALI", "TEMP"]
+    all_xlsx_files = sorted([
+        f for f in os.listdir(DATA_DIR) 
+        if f.endswith(".xlsx") and any(f"RomaneDataSet_{bv}.xlsx" == f for bv in base_vars)
+    ])
+    
+    files_to_process = []
+    for filename in all_xlsx_files:
+        xlsx_path = os.path.join(DATA_DIR, filename)
+        csv_filename = filename.replace(".xlsx", ".csv")
+        csv_path = os.path.join(CLEAN_DIR, csv_filename)
         
-    data_list = [raw[i : i + WINDOW] for i in range(N_all)]
+        # Régénérer le CSV s'il est manquant ou s'il a été mis à jour
+        need_regen = not os.path.exists(csv_path) or os.path.getmtime(xlsx_path) > os.path.getmtime(csv_path)
+        
+        if need_regen:
+            try:
+                if os.path.getsize(xlsx_path) > 1000:
+                    df_var = pd.read_excel(xlsx_path)
+                    if ID_COLUMN in df_var.columns:
+                        cols_data = [c for c in df_var.columns if c != ID_COLUMN and not str(c).startswith('Unnamed')]
+                        if cols_data:
+                            # Reconstruire un DataFrame propre avec elev_id en toute première colonne (A1)
+                            df_clean = df_var[[ID_COLUMN] + cols_data].copy()
+                            df_clean.columns = [ID_COLUMN] + [str(i) for i in range(len(cols_data))]
+                            # Enregistrer au format CSV
+                            df_clean.to_csv(csv_path, index=False)
+                            print(f"    - [REGEN] {filename} -> {csv_filename} (Nettoyé)")
+            except Exception as e:
+                print(f"    [!] Erreur sur {filename} : {e}")
+                
+        if os.path.exists(csv_path):
+            files_to_process.append(csv_filename)
+            
+    if not files_to_process:
+        print(f"[!] Aucun fichier CSV valide n'a pu être généré dans {CLEAN_DIR}.")
+        sys.exit(1)
+        
+    print(f"[+] {len(files_to_process)} fichiers CSV nettoyés prêts pour l'analyse.")
     
-    # Création du DataFrame structuré
-    df_temp = pd.DataFrame(data_list)
-    df_temp.columns = [f"val_{i}" for i in range(WINDOW)]
-    df_temp.insert(0, ID_COLUMN, list(range(N_all)))
-    
-    # Enregistrer aux deux formats Excel
-    df_temp.to_excel(file_temp, index=False)
-    df_temp.to_excel(file_temp_set, index=False)
-    print(f"    - TEMP : {N_all} séries converties et écrites dans {file_temp} et {file_temp_set}")
-    
-    # Extraction des données et préparation des listes d'IDs
-    data_temp = df_temp.drop([ID_COLUMN], axis=1).values.astype(np.float32)
-    listID_temp = pd.DataFrame({ID_COLUMN: df_temp[ID_COLUMN]})
-    
-    # 1. INITIALISATION DU SCHEDULER ET DU MOTEUR X-MEANS GPU
+    # 1. INITIALISATION DU SCHEDULER GPU
     from gpusync import Scheduler, list_gpus
     gpus = list_gpus()
     if not gpus:
@@ -1517,84 +1545,108 @@ if __name__ == "__main__":
     scheduler.initialize()
     print(f"[+] GPU initialisé : {gpus[0].name}")
     
-    # 2. RUN PIPELINE MONO-VARIABLE SUR TEMP
-    print(f"\n[1/3] Démarrage du clustering X-means (mono-variable) sur TEMP (K=3, W=5)...")
-    t0 = time.perf_counter()
-    engine = XmeansTS(data_temp, numclust=3, file="TEMP", listID=listID_temp, coeffRap=1.0, scheduler=scheduler)
+    # 2. RUN PIPELINE MONO-VARIABLE ET COEFFICIENTS POUR CHAQUE FICHIER CSV
+    results_dft = {}
+    dicoCoff = {}
     
-    dist_compare = {}
-    liste_ok = []
+    t_start = time.perf_counter()
     
-    # Exécuter le clustering récursif
-    mat_dist = engine.k_means_clust(
-        data=list(data_temp),
-        num_clust=3,
-        num_iter=1,
-        listDataFrame=listID_temp.copy(),
-        LastnbClust=0,
-        tabEnviIndice="Set_TEMP",
-        distCompare=dist_compare,
-        listeIDOk1=liste_ok,
-        nbInstanceMinim=2,
-        w=5
-    )
-    t_mono = time.perf_counter() - t0
-    print(f"    -> Clustering mono-variable terminé en {t_mono*1000:.2f} ms")
-    print(f"    -> Nombre de clusters identifiés : {len(engine.centroids)}")
-    print(f"    -> Dimensions de la matrice de distances : {mat_dist.shape}")
+    for filename in files_to_process:
+        var_name = filename.replace("RomaneDataSet_", "").replace(".csv", "")
+        file_path = os.path.join(CLEAN_DIR, filename)
+        
+        print(f"\n[+] Traitement de la variable {var_name} (Fichier CSV propre)...")
+        df_clean = pd.read_csv(file_path)
+        
+        # Limiter à 200 séries pour les besoins de la démo rapide
+        limit_n = 200
+        if len(df_clean) > limit_n:
+            df_clean = df_clean.head(limit_n)
+            
+        data_matrix = df_clean.drop([ID_COLUMN], axis=1).values.astype(np.float32)
+        listID_var = pd.DataFrame({ID_COLUMN: df_clean[ID_COLUMN]})
+        
+        # Calculer le coefficient d'entropie de cette variable
+        print(f"    - Calcul du coefficient d'entropie...")
+        coeffs = defineCoeff(
+            data=list(data_matrix),
+            num_clust=3,
+            num_iter=1,
+            listDataFrame=listID_var,
+            LastnbClust=0,
+            tabEnviIndice="Set_" + var_name,
+            assignmentsResult={},
+            centroidsCompare={},
+            distCompare={},
+            data22=None,
+            listeIDOk1=[],
+            nbInstanceMinim=2,
+            w=5,
+            scheduler=scheduler
+        )
+        coeffRap = np.max(coeffs) if coeffs else 1.0
+        dicoCoff["Set_" + var_name] = coeffs
+        print(f"      -> Coefficient d'entropie retenu : {coeffRap:.4f}")
+        
+        # Exécuter le clustering mono-variable
+        print(f"    - Exécution du clustering X-means GPU...")
+        engine = XmeansTS(data_matrix, numclust=3, file=var_name, listID=listID_var, coeffRap=coeffRap, scheduler=scheduler)
+        
+        dist_compare = {}
+        liste_ok = []
+        mat_dist = engine.k_means_clust(
+            data=list(data_matrix),
+            num_clust=3,
+            num_iter=1,
+            listDataFrame=listID_var.copy(),
+            LastnbClust=0,
+            tabEnviIndice="Set_" + var_name,
+            distCompare=dist_compare,
+            listeIDOk1=liste_ok,
+            nbInstanceMinim=2,
+            w=5
+        )
+        results_dft[var_name] = mat_dist
+        print(f"      -> Clusters identifiés : {len(engine.centroids)} | Distances : {mat_dist.shape}")
+        
+    # 3. FUSION DES RÉSULTATS PAR ID
+    print(f"\n[+] Fusion des distances de toutes les variables...")
+    merged_df = None
+    for var_name, mat_dist in results_dft.items():
+        if merged_df is None:
+            merged_df = mat_dist
+        else:
+            merged_df = pd.merge(merged_df, mat_dist, on=ID_COLUMN, how="inner")
+            
+    print(f"    -> Dimension du dataset fusionné : {merged_df.shape}")
     
-    # 3. CALCUL DES COEFFICIENTS D'ENTROPIE (defineCoeff)
-    print(f"\n[2/3] Calcul des coefficients d'entropie (defineCoeff) sur TEMP...")
-    t0 = time.perf_counter()
-    coeffs = defineCoeff(
-        data=list(data_temp),
-        num_clust=3,
-        num_iter=1,
-        listDataFrame=listID_temp,
-        LastnbClust=0,
-        tabEnviIndice="Set_TEMP",
-        assignmentsResult={},
-        centroidsCompare={},
-        distCompare={},
-        data22=None,
-        listeIDOk1=[],
-        nbInstanceMinim=2,
-        w=5,
-        scheduler=scheduler
-    )
-    t_coeff = time.perf_counter() - t0
-    print(f"    -> Coefficients calculés en {t_coeff*1000:.2f} ms : {coeffs}")
-
     # 4. RUN PIPELINE MULTI-VARIABLES (MultiXmeansTS)
-    print(f"\n[3/3] Exécution du pipeline multi-variables (KmeanMutiShape) avec TEMP...")
-    t0 = time.perf_counter()
-    
+    print(f"\n[+] Exécution du pipeline multi-variables (KmeanMutiShape)...")
     multi = MultiXmeansTS()
     multi.scheduler = scheduler
-    multi.files = ["Set_TEMP"]
-    multi.data_directory = DATA_DIR
+    multi.files = ["Set_" + v for v in results_dft.keys()]
+    multi.data_directory = CLEAN_DIR
     multi.file_prefix = "RomaneDataSet_"
     
-    dicoCoff = {"Set_TEMP": coeffs}
     assignmentsOk = {}
-    cols_to_cluster = [c for c in mat_dist.columns if c != ID_COLUMN]
+    cols_to_cluster = [c for c in merged_df.columns if c != ID_COLUMN]
     
     multi.KmeanMutiShape(
         nbClust=3,
         columns=cols_to_cluster,
-        dft=mat_dist,
+        dft=merged_df,
         dicoCoff=dicoCoff,
         assignmentsOk=assignmentsOk,
         indiceSd=0,
         w=5
     )
-    t_multi = time.perf_counter() - t0
-    print(f"    -> Clustering multi-variable terminé en {t_multi*1000:.2f} ms")
-    print("    -> Répartition finale des séries dans les clusters de l'essaim :")
-    print("-" * 80)
-    for idx_sd, member_ids in assignmentsOk.items():
-        print(f"       Essaim Cluster {idx_sd} : {len(member_ids):>3d} séries (ex: {member_ids[:4]})")
-    print("-" * 80)
     
-    print("\n[SUCCESS] Pipeline MMTS complet exécuté avec succès sur GPU via GPUsync !")
+    t_total = time.perf_counter() - t_start
+    print(f"\n" + "=" * 80)
+    print(f" RÉPARTITION FINALE DE L'ESSAIM (Pipeline complété en {t_total:.2f} s)")
+    print("=" * 80)
+    for idx_sd, member_ids in assignmentsOk.items():
+        print(f"   Essaim Cluster {idx_sd} : {len(member_ids):>3d} séries (ex: {member_ids[:4]})")
+    print("=" * 80)
+    print("\n[SUCCESS] Analyse complète exécutée avec succès sur tout le dossier dataset !")
     print("=" * 80)
