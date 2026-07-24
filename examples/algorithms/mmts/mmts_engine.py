@@ -34,25 +34,13 @@ import concurrent.futures
 _gpusync_io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 def _resolve_val(val):
-    import asyncio
     import inspect
+    import asyncio
     if inspect.iscoroutine(val):
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        if loop.is_running():
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                def _run():
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    return new_loop.run_until_complete(val)
-                return executor.submit(_run).result()
-        else:
-            return loop.run_until_complete(val)
+        from gpusync.utils.bg_loop import BackgroundLoop
+        loop = BackgroundLoop.get_loop()
+        future = asyncio.run_coroutine_threadsafe(val, loop)
+        return future.result()
     return val
 
 def _sync_to_host(buf):
@@ -145,7 +133,7 @@ def _batch_dtw_gpu(refs_np, targets_np, w, scheduler=None):
     w_val = int(w) if (w is not None and w > 0) else M_pad
     
     # kernel signature: (references, targets, targets_offset, w, outputs, num_refs_arg, chunk_size)
-    kernel(buf_ref, buf_tgt, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched)
+    _resolve_val(kernel(buf_ref, buf_tgt, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched))
     return np.sqrt(np.maximum(_sync_to_host(buf_out).reshape(K, N), 0.0))
 
 
@@ -214,7 +202,7 @@ def DTWDistance(s1, s2, w=DEFAULT_W, scheduler=None):
     
     w_val = int(w) if (w is not None and w > 0) else M_pad
     
-    kernel(buf_ref, buf_tgt, 0, w_val, buf_out, 1, 1, global_size=(1,), scheduler=sched)
+    _resolve_val(kernel(buf_ref, buf_tgt, 0, w_val, buf_out, 1, 1, global_size=(1,), scheduler=sched))
     return float(_sync_to_host(buf_out)[0])
 
 def centeroidnp(arr):
@@ -280,7 +268,7 @@ class XmeansTS:
             self.data_pad[:, :M_len] = data_np
             
             from gpusync import AsyncBuffer
-            self.gpu_data_buf = AsyncBuffer.to_device(self.scheduler, self.data_pad.flatten())
+            self.gpu_data_buf = _resolve_val(AsyncBuffer.to_device(self.scheduler, self.data_pad.flatten()))
         else:
             self.data_pad = None
             self.gpu_data_buf = None
@@ -616,10 +604,11 @@ class XmeansTS:
             w_val = int(w) if (w is not None and w > 0) else M_pad
             
             # Lancement du noyau avec le buffer persistant self.gpu_data_buf !
-            kernel(buf_ref, self.gpu_data_buf, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched)
+            _resolve_val(kernel(buf_ref, self.gpu_data_buf, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched))
             
             # Rapatrier et transposer
             res_flat = _sync_to_host(buf_out).reshape(K, N)
+            print(f"DEBUG Parallel DTW - N: {N}, K: {K}, w: {w_val}, res_flat mean: {np.mean(res_flat)}")
             if squared:
                 return np.maximum(res_flat, 0.0).T
             else:
@@ -990,7 +979,7 @@ class XmeansTS:
                 # Capturer l'itération de convergence avec l'énergie pré-calculée
                 self.capture_convergence_iteration(counter, centroids, assignments, precomputed_energy=precomputed_energy)
                 
-                testStop = precomputed_energy
+                testStop = self.kmeansConverg(data, centroids, listDataFrame, w)
                 counter += 1
             
             # Sélectionner les séries pour chaque cluster
@@ -1249,7 +1238,10 @@ class MultiXmeansTS:
                 
                 for tabEnviIndice in self.files:
                     # Construire le chemin du fichier
-                    if hasattr(self, 'data_directory') and hasattr(self, 'file_prefix') and self.data_directory is not None:
+                    if hasattr(self, 'file_paths') and self.file_paths and tabEnviIndice in self.file_paths:
+                        file_path = self.file_paths[tabEnviIndice]
+                        possible_paths = [file_path]
+                    elif hasattr(self, 'data_directory') and hasattr(self, 'file_prefix') and self.data_directory is not None:
                         file_name = tabEnviIndice
                         if file_name.startswith("Set_"):
                             file_name = file_name[4:]
