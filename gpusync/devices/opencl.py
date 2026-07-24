@@ -24,20 +24,21 @@ class OpenCLDeviceManager:
             # pyrefly: ignore [missing-import]
             import pyopencl as cl
             platforms = cl.get_platforms()
+            all_devs = []
             for platform in platforms:
                 try:
-                    devs = platform.get_devices(device_type=cl.device_type.GPU)
+                    all_devs.extend(platform.get_devices())
                 except Exception:
-                    devs = []
-                if not devs:
-                    try:
-                        devs = platform.get_devices()
-                    except Exception:
-                        devs = []
-                for dev in devs:
-                    if name_filter and name_filter.lower() not in dev.name.lower():
-                        continue
-                    devices.append(dev)
+                    pass
+            
+            # Filtrer pour privilégier uniquement les périphériques GPU
+            gpu_devs = [d for d in all_devs if d.type & cl.device_type.GPU]
+            devs_to_use = gpu_devs if gpu_devs else all_devs
+            
+            for dev in devs_to_use:
+                if name_filter and name_filter.lower() not in dev.name.lower():
+                    continue
+                devices.append(dev)
         except Exception:
             pass
         return devices

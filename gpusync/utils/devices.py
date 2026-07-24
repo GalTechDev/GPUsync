@@ -42,4 +42,8 @@ def list_gpus():
             backend_idx = len([g for g in gpus if g.backend == manager_cls.backend])
             gpus.append(GPUDeviceInfo(name=name, backend=manager_cls.backend, raw_device=dev, index=backend_idx))
 
+    # Si on détecte au moins un GPU physique (CUDA ou OpenCL non-CPU), on masque les émulations CPU/LLVM
+    real_gpus = [g for g in gpus if g.backend in ("cuda", "opencl") and "cpu" not in g.name.lower()]
+    if real_gpus:
+        return real_gpus
     return gpus

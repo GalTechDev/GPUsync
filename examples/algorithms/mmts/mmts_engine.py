@@ -33,6 +33,31 @@ _gpusync_buffers_cache = {}
 import concurrent.futures
 _gpusync_io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
+def _resolve_val(val):
+    import asyncio
+    import inspect
+    if inspect.iscoroutine(val):
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        if loop.is_running():
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                def _run():
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    return new_loop.run_until_complete(val)
+                return executor.submit(_run).result()
+        else:
+            return loop.run_until_complete(val)
+    return val
+
+def _sync_to_host(buf):
+    return _resolve_val(buf.to_host())
+
 def _async_write_file(path, data, is_json=False, is_df=False):
     import os
     try:
@@ -98,15 +123,15 @@ def _batch_dtw_gpu(refs_np, targets_np, w, scheduler=None):
     
     # 1. Gérer le buffer de référence
     if ref_key not in _gpusync_buffers_cache:
-        _gpusync_buffers_cache[ref_key] = AsyncBuffer.to_device(sched, refs_pad.flatten())
+        _gpusync_buffers_cache[ref_key] = _resolve_val(AsyncBuffer.to_device(sched, refs_pad.flatten()))
     else:
-        _gpusync_buffers_cache[ref_key].overwrite(refs_pad.flatten())
+        _resolve_val(_gpusync_buffers_cache[ref_key].overwrite(refs_pad.flatten()))
         
     # 2. Gérer le buffer des cibles
     if tgt_key not in _gpusync_buffers_cache:
-        _gpusync_buffers_cache[tgt_key] = AsyncBuffer.to_device(sched, tgts_pad.flatten())
+        _gpusync_buffers_cache[tgt_key] = _resolve_val(AsyncBuffer.to_device(sched, tgts_pad.flatten()))
     else:
-        _gpusync_buffers_cache[tgt_key].overwrite(tgts_pad.flatten())
+        _resolve_val(_gpusync_buffers_cache[tgt_key].overwrite(tgts_pad.flatten()))
         
     # 3. Gérer le buffer de sortie
     if out_key not in _gpusync_buffers_cache:
@@ -121,7 +146,7 @@ def _batch_dtw_gpu(refs_np, targets_np, w, scheduler=None):
     
     # kernel signature: (references, targets, targets_offset, w, outputs, num_refs_arg, chunk_size)
     kernel(buf_ref, buf_tgt, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched)
-    return np.sqrt(np.maximum(buf_out.to_host().reshape(K, N), 0.0))
+    return np.sqrt(np.maximum(_sync_to_host(buf_out).reshape(K, N), 0.0))
 
 
 def _compute_dist_matrix(centroids_np, targets_np, w, scheduler=None):
@@ -171,14 +196,14 @@ def DTWDistance(s1, s2, w=DEFAULT_W, scheduler=None):
     out_key = f"out_1_1"
     
     if ref_key not in _gpusync_buffers_cache:
-        _gpusync_buffers_cache[ref_key] = AsyncBuffer.to_device(sched, s1_pad)
+        _gpusync_buffers_cache[ref_key] = _resolve_val(AsyncBuffer.to_device(sched, s1_pad))
     else:
-        _gpusync_buffers_cache[ref_key].overwrite(s1_pad)
+        _resolve_val(_gpusync_buffers_cache[ref_key].overwrite(s1_pad))
         
     if tgt_key not in _gpusync_buffers_cache:
-        _gpusync_buffers_cache[tgt_key] = AsyncBuffer.to_device(sched, s2_pad)
+        _gpusync_buffers_cache[tgt_key] = _resolve_val(AsyncBuffer.to_device(sched, s2_pad))
     else:
-        _gpusync_buffers_cache[tgt_key].overwrite(s2_pad)
+        _resolve_val(_gpusync_buffers_cache[tgt_key].overwrite(s2_pad))
         
     if out_key not in _gpusync_buffers_cache:
         _gpusync_buffers_cache[out_key] = AsyncBuffer.empty_like(sched, np.zeros(1, dtype=np.float32))
@@ -190,7 +215,7 @@ def DTWDistance(s1, s2, w=DEFAULT_W, scheduler=None):
     w_val = int(w) if (w is not None and w > 0) else M_pad
     
     kernel(buf_ref, buf_tgt, 0, w_val, buf_out, 1, 1, global_size=(1,), scheduler=sched)
-    return float(buf_out.to_host()[0])
+    return float(_sync_to_host(buf_out)[0])
 
 def centeroidnp(arr):
     """
@@ -576,9 +601,9 @@ class XmeansTS:
             # Réutiliser un buffer de référence en cache si possible pour éviter clCreateBuffer
             ref_key = f"ref_{K}_{M_pad}"
             if ref_key not in _gpusync_buffers_cache:
-                _gpusync_buffers_cache[ref_key] = AsyncBuffer.to_device(sched, refs_pad.flatten())
+                _gpusync_buffers_cache[ref_key] = _resolve_val(AsyncBuffer.to_device(sched, refs_pad.flatten()))
             else:
-                _gpusync_buffers_cache[ref_key].overwrite(refs_pad.flatten())
+                _resolve_val(_gpusync_buffers_cache[ref_key].overwrite(refs_pad.flatten()))
                 
             # Réutiliser un buffer de sortie en cache
             out_key = f"out_{K}_{N}"
@@ -594,7 +619,7 @@ class XmeansTS:
             kernel(buf_ref, self.gpu_data_buf, 0, w_val, buf_out, K, N, global_size=(N,), scheduler=sched)
             
             # Rapatrier et transposer
-            res_flat = buf_out.to_host().reshape(K, N)
+            res_flat = _sync_to_host(buf_out).reshape(K, N)
             if squared:
                 return np.maximum(res_flat, 0.0).T
             else:
