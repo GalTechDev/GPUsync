@@ -853,8 +853,8 @@ class XmeansTS:
                         rows.append({ID_COLUMN: val_id, 'MEAS': float(LBVal)})
                 
                 MatDist = pd.DataFrame(rows, columns=[ID_COLUMN, 'MEAS'])
-                
-                nbClustTempp += 1
+            
+            nbClustTempp += 1
         return listeIDOk
     
     def updateVar(self, listFilterID, colID=ID_COLUMN, ranges=None):
