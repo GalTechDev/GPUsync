@@ -1,10 +1,13 @@
-import pytest
 import numpy as np
-from gpusync import gpusync_kernel, Scheduler, list_gpus
+import pytest
+
+from gpusync import Scheduler, gpusync_kernel, list_gpus
+
 
 @gpusync_kernel
 def add_five_kernel(ctx: int, data: list) -> tuple:
     return data[ctx] + 5.0
+
 
 def simulated_disk_generator(total_elements=100_000, chunk_size=20_000):
     """
@@ -13,6 +16,7 @@ def simulated_disk_generator(total_elements=100_000, chunk_size=20_000):
     for i in range(0, total_elements, chunk_size):
         chunk = np.arange(i, min(total_elements, i + chunk_size), dtype=np.float32)
         yield chunk
+
 
 def test_generator_stream_out_of_core():
     gpus = list_gpus()

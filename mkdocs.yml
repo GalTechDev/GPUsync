@@ -1,0 +1,42 @@
+site_name: GPUsync
+site_url: https://galtechdev.github.io/GPUsync/
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+
+nav:
+  - Accueil: index.md
+  - Guide d'Utilisation: guide.md
+  - Architecture Technique:
+      - 1. Compilateur AST: 1.-Architecture-du-Compilateur-AST.md
+      - 2. Gestion de la Mémoire: 2.-Gestion-de-la-Mémoire-et-Buffers.md
+      - 3. Périphériques & Schedulers: 3.-Sélection-des-Périphériques-et-Schedulers.md
+  - Guide Développeur: 4.-Guide-de-Démarrage-Développeur.md
+  - API Reference: api.md
+  - Rapports & Benchmarks: RAPPORT_GPUSYNC.md

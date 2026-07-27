@@ -1,9 +1,9 @@
-import pytest
-import numpy as np
+import ast
+
 from gpusync.compiler import gpusync_kernel
 from gpusync.compiler.llvm import compile_to_llvm
 from gpusync.devices.llvm import LLVMDeviceManager
-import ast
+
 
 def test_llvm_transpilation():
     source = """
@@ -13,11 +13,12 @@ def add_kernel(ctx: int, a: list, b: list) -> tuple:
     tree = ast.parse(source)
     func_def = tree.body[0]
     code = compile_to_llvm(func_def, "add_kernel", num_returns=1)
-    
+
     assert "void add_kernel(" in code
     assert "float* a" in code
     assert "float* b" in code
     assert "float* __out_0" in code
+
 
 def test_llvm_device_manager_discovery():
     devices = LLVMDeviceManager.discover_devices()
@@ -27,10 +28,11 @@ def test_llvm_device_manager_discovery():
     manager = LLVMDeviceManager(devices[0])
     assert manager.backend == "llvm"
 
+
 def test_llvm_wrapper_attribute():
     @gpusync_kernel
     def my_kernel(ctx: int, a: list) -> tuple:
         return a[ctx] * 2.0
 
-    assert hasattr(my_kernel, 'llvm_code')
+    assert hasattr(my_kernel, "llvm_code")
     assert "my_kernel" in my_kernel.llvm_code

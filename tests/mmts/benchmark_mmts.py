@@ -4,12 +4,13 @@ Script de Benchmark pour comparer les performances de la version originale (Pure
 avec les versions optimisées (CPU JIT Numba et GPU GPUsync) et générer un rapport HTML stylisé.
 """
 
+import math
 import os
+import random
 import sys
 import time
-import math
-import random
 import warnings
+
 warnings.filterwarnings("ignore")
 
 import numpy as np
@@ -21,11 +22,14 @@ from tslearn.barycenters import euclidean_barycenter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import *
 import mmts_module as xm
 from numba import njit, prange
+
+from config import *
+
 try:
     from numba import cuda as numba_cuda
+
     NUMBA_CUDA_OK = numba_cuda.is_available()
 except Exception:
     NUMBA_CUDA_OK = False
@@ -39,6 +43,7 @@ if not NUMBA_CUDA_OK:
 # =====================================================================
 # NOYAUX NUMBA (CPU parallèle + GPU CUDA)
 # =====================================================================
+
 
 @njit(fastmath=True, cache=True)
 def _dtw_single_numba(ref, tgt, w):
@@ -74,6 +79,7 @@ def batch_dtw_numba_cpu(refs: np.ndarray, targets: np.ndarray, w: int) -> np.nda
 
 
 if NUMBA_CUDA_OK:
+
     @numba_cuda.jit
     def _cuda_batch_dtw_kernel(refs, targets, out, w, M):
         """Noyau CUDA Numba : chaque thread traite une paire (k, i)."""
@@ -116,6 +122,7 @@ if NUMBA_CUDA_OK:
         _cuda_batch_dtw_kernel[blocks, threads](refs_d, targets_d, out_d, w, M)
         return out_d.copy_to_host()
 else:
+
     def batch_dtw_numba_cuda(refs, targets, w):
         raise RuntimeError("Numba CUDA non disponible.")
 
@@ -123,28 +130,29 @@ else:
 # 1. IMPLÉMENTATION DES VERSIONS PURES PYTHON (ORIGINALES)
 # =====================================================================
 
+
 def py_dtw_original(s1, s2, w):
     """Calcule la distance DTW en Python pur (implémentation originale)"""
     DTW = {}
     w = max(w, abs(len(s1) - len(s2)))
     for i in range(-1, len(s1)):
         for j in range(-1, len(s2)):
-            DTW[(i, j)] = float('inf')
+            DTW[(i, j)] = float("inf")
     DTW[(-1, -1)] = 0
     for i in range(len(s1)):
-        for j in range(max(0, i-w), min(len(s2), i+w+1)):
-            dist = (s1[i] - s2[j])**2
-            DTW[(i, j)] = dist + min(DTW[(i-1, j)], DTW[(i, j-1)], DTW[(i-1, j-1)])
-    return np.sqrt(DTW[len(s1)-1, len(s2)-1])
+        for j in range(max(0, i - w), min(len(s2), i + w + 1)):
+            dist = (s1[i] - s2[j]) ** 2
+            DTW[(i, j)] = dist + min(DTW[(i - 1, j)], DTW[(i, j - 1)], DTW[(i - 1, j - 1)])
+    return np.sqrt(DTW[len(s1) - 1, len(s2) - 1])
 
 
 def py_compute_dist_original(data, centroids, assignments, w):
     """Calcule les distances et fait les assignations en Python pur"""
     for c in assignments:
         assignments[c] = []
-    
+
     for i in range(len(data)):
-        min_dist = float('inf')
+        min_dist = float("inf")
         closest_clust = None
         for c in centroids:
             if len(data[i]) > 0:
@@ -152,7 +160,7 @@ def py_compute_dist_original(data, centroids, assignments, w):
                     dist = py_dtw_original(data[i], centroids[c], w)
                 else:
                     dist = np.linalg.norm(data[i] - centroids[c])
-                
+
                 if dist < min_dist:
                     min_dist = dist
                     closest_clust = c
@@ -168,106 +176,133 @@ def py_get_last_mat_original(data, centroids, df_ids, tabEnviIndice, w):
         listTem = []
         for ine in range(len(data)):
             listTem.append(py_dtw_original(centroids[uit], data[ine], w))
-        MatriceDist[str(uit) + '_' + tabEnviIndice] = listTem
-    
+        MatriceDist[str(uit) + "_" + tabEnviIndice] = listTem
+
     MatriceDist[ID_COLUMN] = df_ids[ID_COLUMN]
     return MatriceDist
 
 
-def py_define_coeff_original(data, num_clust, num_iter, listDataFrame, LastnbClust, tabEnviIndice, assignmentsResult, centroidsCompare, distCompare, data22, listeIDOk1, nbInstanceMinim, w=1):
+def py_define_coeff_original(
+    data,
+    num_clust,
+    num_iter,
+    listDataFrame,
+    LastnbClust,
+    tabEnviIndice,
+    assignmentsResult,
+    centroidsCompare,
+    distCompare,
+    data22,
+    listeIDOk1,
+    nbInstanceMinim,
+    w=1,
+):
     """Calcule les coefficients en Python pur (version globale originale)"""
     coeffTemp = []
     centroids = {}
     for i in range(num_clust):
         idx = random.randint(0, len(data) - 1)
         centroids[i] = data[idx]
-        
+
     assignments = {}
     for i in range(num_clust):
         assignments[i] = []
-        
+
     # Calcul des assignations initiales
     assignments = py_compute_dist_original(data, centroids, assignments, w)
-    
+
     # Calcul des coefficients
     for i in assignments:
         if len(assignments[i]) >= nbInstanceMinim:
             values = []
             for item in assignments[i]:
                 values.append(data[item])
-                
+
             if values:
                 # Version originale avec la dimension corrompue [values]
                 bar = euclidean_barycenter([values])
                 flat_list = [item for sublist in bar for item in sublist]
-                
+
                 distances = []
                 for item in assignments[i]:
                     distances.append(py_dtw_original(data[item], flat_list, w))
-                    
+
                 stdTemp = np.std(distances)
                 entropy = stats.entropy(distances) if any(d > 0 for d in distances) else 1.0
-                
+
                 if entropy > 0:
                     coeffTemp.append(stdTemp / entropy)
-                    
+
     return coeffTemp if coeffTemp else [1.0]
 
 
 class PurePythonXmeansTS:
     """Classe reproduisant le pipeline X-means original 100% Pure Python"""
+
     def __init__(self, data, numclust, file, listID, coeffRap):
         self.data = data
         self.dfListID = listID
         self.assignments = {}
         self.centroids = {}
-        
+
     def updateAssignment(self, assignmentsTemp, listeIDOk, nbClustTempp, w):
         for key in assignmentsTemp:
             self.assignments[nbClustTempp] = assignmentsTemp[key]
             flat_list = []
             for elem in self.assignments[nbClustTempp]:
                 listeIDOk.append(elem)
-                
+
             if len(self.assignments[nbClustTempp]) > 0:
                 values = []
                 for elId in self.assignments[nbClustTempp]:
                     idTS = np.asarray(self.data)[(self.dfListID[ID_COLUMN] == elId).values]
                     if len(idTS) > 0:
                         values.append(idTS[0])
-                
+
                 if values:
                     # Version originale avec la dimension corrompue [values]
                     bar = euclidean_barycenter([values])
                     flat_list = [item for sublist in bar for item in sublist]
-                
+
                 self.centroids[nbClustTempp] = flat_list
-                MatDist = pd.DataFrame(columns=[ID_COLUMN, 'MEAS'])
-       
+                MatDist = pd.DataFrame(columns=[ID_COLUMN, "MEAS"])
+
                 for elId in self.assignments[nbClustTempp]:
                     idTS = np.asarray(self.data)[(self.dfListID[ID_COLUMN] == elId).values]
                     if len(idTS) > 0:
                         LBVal = py_dtw_original(idTS[0], flat_list, w)
-                        
-                        new_row = pd.DataFrame({ID_COLUMN: [int(elId)], 'MEAS': [LBVal]})
+
+                        new_row = pd.DataFrame({ID_COLUMN: [int(elId)], "MEAS": [LBVal]})
                         MatDist = pd.concat([MatDist, new_row], ignore_index=True)
-                
+
                 nbClustTempp += 1
         return listeIDOk
 
-    def k_means_clust(self, data, num_clust, num_iter, listDataFrame, LastnbClust, tabEnviIndice, distCompare, listeIDOk1, nbInstanceMinim, w):
+    def k_means_clust(
+        self,
+        data,
+        num_clust,
+        num_iter,
+        listDataFrame,
+        LastnbClust,
+        tabEnviIndice,
+        distCompare,
+        listeIDOk1,
+        nbInstanceMinim,
+        w,
+    ):
         if num_clust == 0:
             return pd.DataFrame(listDataFrame)
-            
+
         if len(data) > num_clust * 2:
             centroids = {}
             for i in range(num_clust):
                 idx = random.randint(0, len(data) - 1)
                 centroids[i] = data[idx]
-                
+
             assignments = {i: [] for i in range(num_clust)}
             assignments = py_compute_dist_original(data, centroids, assignments, w)
-            
+
             # Mise à jour centroides
             for c in assignments:
                 if len(assignments[c]) > 0:
@@ -276,38 +311,46 @@ class PurePythonXmeansTS:
                         if len(data[i]) > 0:
                             new_centroid += data[i]
                     centroids[c] = new_centroid / len(assignments[c])
-            
+
             assignmentsTemp = {}
             for i in assignments:
                 if len(assignments[i]) >= nbInstanceMinim:
                     ids = [int(listDataFrame.iloc[item][ID_COLUMN]) for item in assignments[i]]
                     assignmentsTemp[i] = ids
-            
+
             nbClustLow = LastnbClust
             listeIDOk = []
-            
+
             listeIDOk = self.updateAssignment(assignmentsTemp, listeIDOk, LastnbClust, w)
             listeIDOk1 = listeIDOk1 + listeIDOk
-            
+
             # updateVar
             dfListIDTemp = listDataFrame[~listDataFrame[ID_COLUMN].isin(listeIDOk1)]
             updateVar_data = []
             for i in range(len(dfListIDTemp)):
                 updateVar_data.append(self.data[i])
-                
+
             # Récursion pure Python
             if len(updateVar_data) > 0 and len(updateVar_data) < len(data):
                 self.k_means_clust(
-                    updateVar_data, num_clust, num_iter, dfListIDTemp,
-                    LastnbClust + len(assignmentsTemp), tabEnviIndice, distCompare, listeIDOk1, nbInstanceMinim, w
+                    updateVar_data,
+                    num_clust,
+                    num_iter,
+                    dfListIDTemp,
+                    LastnbClust + len(assignmentsTemp),
+                    tabEnviIndice,
+                    distCompare,
+                    listeIDOk1,
+                    nbInstanceMinim,
+                    w,
                 )
-                
+
             if nbClustLow == 0:
                 return py_get_last_mat_original(self.data, self.centroids, listDataFrame, tabEnviIndice, w)
-                
+
         elif LastnbClust == 0:
             return py_get_last_mat_original(self.data, self.centroids, listDataFrame, tabEnviIndice, w)
-            
+
         dfListIDTemp = pd.DataFrame(listDataFrame)
         dfListIDTemp["cluster"] = -1
         for ctr in range(len(self.assignments)):
@@ -315,22 +358,24 @@ class PurePythonXmeansTS:
                 dfListIDTemp.loc[dfListIDTemp[ID_COLUMN] == elemid, "cluster"] = ctr
         return dfListIDTemp
 
+
 # =====================================================================
 # 2. RUN BENCHMARKS
 # =====================================================================
+
 
 def run_benchmarks():
     print("=" * 80)
     print("             BENCHMARK DES PERFORMANCES DU PIPELINE DTW & X-MEANS")
     print("=" * 80)
-    
+
     w = 5
     nb_instance_min = 5
-    
+
     # Chargement du vrai jeu de données ou fallback sur les données générées
     csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "RomaneDataSet_TEMP.csv")
     use_real_data = False
-    
+
     if os.path.exists(csv_path):
         try:
             df_real = pd.read_csv(csv_path)
@@ -342,9 +387,7 @@ def run_benchmarks():
                 data = []
                 for i in range(N_all):
                     data.append(data_values[i : i + M])
-                df_ids = pd.DataFrame({
-                    ID_COLUMN: [i for i in range(N_all)]
-                })
+                df_ids = pd.DataFrame({ID_COLUMN: [i for i in range(N_all)]})
                 use_real_data = True
                 print(f"[+] Jeu de données réel chargé : {N_all} séries de longueur {M}.")
         except Exception as e:
@@ -355,14 +398,12 @@ def run_benchmarks():
         M = 32
         data = []
         for i in range(N):
-            phase = random.choice([0, np.pi/4, np.pi/2, 3*np.pi/4])
+            phase = random.choice([0, np.pi / 4, np.pi / 2, 3 * np.pi / 4])
             t_seq = np.arange(M)
             sig = 20.0 + 5.0 * np.sin(t_seq * (2 * np.pi / 16) + phase) + np.random.randn(M) * 0.3
             data.append(sig.astype(np.float32))
-            
-        df_ids = pd.DataFrame({
-            ID_COLUMN: [i for i in range(N)]
-        })
+
+        df_ids = pd.DataFrame({ID_COLUMN: [i for i in range(N)]})
         print(f"[+] Données simulées générées : {len(data)} séries de longueur {M}.")
 
     # Sous-ensemble Python pur (Benchmarks 2 & 3)
@@ -380,11 +421,11 @@ def run_benchmarks():
     np.random.seed(42)
     bench_centroid_idx = np.random.choice(N_full, size=K_bench, replace=False)
     bench_centroids = np.array([data[i] for i in bench_centroid_idx], dtype=np.float32)  # (K, M)
-    bench_targets   = np.array(data, dtype=np.float32)                                    # (N, M)
+    bench_targets = np.array(data, dtype=np.float32)  # (N, M)
     N_pairs_full = K_bench * N_full  # nombre total de paires calculées
 
     print(f"\n[+] BENCHMARK 1: Batch DTW réel — K={K_bench} centroides × N={N_full} séries = {N_pairs_full:,} paires")
-    print(f"    (Résultats normalisés en équivalent-1000-paires pour comparaison)")
+    print("    (Résultats normalisés en équivalent-1000-paires pour comparaison)")
 
     # 1.1 Python Pur (sur sous-ensemble limité, extrapolé)
     PY_SUBSET = min(150, N_full)
@@ -395,10 +436,10 @@ def run_benchmarks():
             py_dtw_original(bench_centroids[k_idx], bench_targets_py[i], w)
     t_py_raw = time.perf_counter() - t0
     pairs_py = K_bench * PY_SUBSET
-    t_dtw_py = t_py_raw / pairs_py * 1000   # coût pour 1000 paires (extrapolé)
+    t_dtw_py = t_py_raw / pairs_py * 1000  # coût pour 1000 paires (extrapolé)
 
     # 1.2 CPU JIT Numba séquentiel (warmup + mesure sur dataset complet)
-    _ = xm.batch_dtw_cpu(bench_centroids[:1], bench_targets[:2], w)   # warmup JIT
+    _ = xm.batch_dtw_cpu(bench_centroids[:1], bench_targets[:2], w)  # warmup JIT
     t0 = time.perf_counter()
     _ = xm.batch_dtw_cpu(bench_centroids, bench_targets, w)
     t_jit_raw = time.perf_counter() - t0
@@ -430,6 +471,7 @@ def run_benchmarks():
     if BENCHMARK_GPU:
         try:
             from gpusync import AsyncBuffer
+
             M_pad = int(2 ** math.ceil(math.log2(M_len)))
             M_pad = max(32, M_pad)
             sched, kernel_batch = xm.get_gpusync_resources(M_pad, K_bench)
@@ -444,13 +486,11 @@ def run_benchmarks():
             buf_out = AsyncBuffer.empty_like(sched, np.zeros(K_bench * N_full, dtype=np.float32))
 
             # Warmup
-            kernel_batch(buf_ref, buf_tgt, 0, M_pad, buf_out, K_bench, N_full,
-                         global_size=(N_full,), scheduler=sched)
+            kernel_batch(buf_ref, buf_tgt, 0, M_pad, buf_out, K_bench, N_full, global_size=(N_full,), scheduler=sched)
             _ = buf_out.to_host()
 
             t0 = time.perf_counter()
-            kernel_batch(buf_ref, buf_tgt, 0, M_pad, buf_out, K_bench, N_full,
-                         global_size=(N_full,), scheduler=sched)
+            kernel_batch(buf_ref, buf_tgt, 0, M_pad, buf_out, K_bench, N_full, global_size=(N_full,), scheduler=sched)
             _ = buf_out.to_host()
             t_gpu_raw = time.perf_counter() - t0
             t_dtw_gpu = t_gpu_raw / N_pairs_full * 1000
@@ -468,45 +508,65 @@ def run_benchmarks():
     if t_dtw_numba_cuda > 0:
         print(f"    - Numba CUDA GPU (batch {N_full})     : {fmt(t_cuda_raw, t_dtw_numba_cuda, t_dtw_py)}")
     else:
-        print(f"    - Numba CUDA GPU                : Non disponible (pas de driver CUDA).")
+        print("    - Numba CUDA GPU                : Non disponible (pas de driver CUDA).")
     if t_dtw_gpu > 0:
         print(f"    - GPU GPUsync (batch {N_full})        : {fmt(t_gpu_raw, t_dtw_gpu, t_dtw_py)}")
     else:
-        print(f"    - GPU GPUsync                   : Non disponible.")
+        print("    - GPU GPUsync                   : Non disponible.")
 
     # -----------------------------------------------------------------
     # BENCHMARK 2 : CALCUL DES COEFFICIENTS (defineCoeff)
     # -----------------------------------------------------------------
     print("\n[+] BENCHMARK 2: Calcul des coefficients (defineCoeff)")
-    
+
     # 2.1 Python Pur Original (sur sous-ensemble de 150 séries)
     assignmentsResult_py = {}
     centroidsCompare_py = {}
     distCompare_py = {}
     listeIDOk1_py = []
-    
+
     t0 = time.perf_counter()
     _ = py_define_coeff_original(
-        data_py, 3, 1, df_ids_py, 0, "Set_TEMP", 
-        assignmentsResult_py, centroidsCompare_py, distCompare_py, 
-        data_py, listeIDOk1_py, nb_instance_min, w
+        data_py,
+        3,
+        1,
+        df_ids_py,
+        0,
+        "Set_TEMP",
+        assignmentsResult_py,
+        centroidsCompare_py,
+        distCompare_py,
+        data_py,
+        listeIDOk1_py,
+        nb_instance_min,
+        w,
     )
     t_coeff_py = time.perf_counter() - t0
-    
+
     # 2.2 CPU JIT (Numba)
     assignmentsResult_cpu = {}
     centroidsCompare_cpu = {}
     distCompare_cpu = {}
     listeIDOk1_cpu = []
-    
+
     t0 = time.perf_counter()
     _ = xm.defineCoeff(
-        data, 3, 1, df_ids, 0, "Set_TEMP", 
-        assignmentsResult_cpu, centroidsCompare_cpu, distCompare_cpu, 
-        data, listeIDOk1_cpu, nb_instance_min, w
+        data,
+        3,
+        1,
+        df_ids,
+        0,
+        "Set_TEMP",
+        assignmentsResult_cpu,
+        centroidsCompare_cpu,
+        distCompare_cpu,
+        data,
+        listeIDOk1_cpu,
+        nb_instance_min,
+        w,
     )
     t_coeff_cpu = time.perf_counter() - t0
-    
+
     # 2.3 GPU GPUsync (si activé)
     t_coeff_gpu = -1.0
     if BENCHMARK_GPU:
@@ -518,41 +578,53 @@ def run_benchmarks():
             listeIDOk1_gpu = []
             t0 = time.perf_counter()
             _ = xm.defineCoeff(
-                data, 3, 1, df_ids, 0, "Set_TEMP", 
-                assignmentsResult_gpu, centroidsCompare_gpu, distCompare_gpu, 
-                data, listeIDOk1_gpu, nb_instance_min, w
+                data,
+                3,
+                1,
+                df_ids,
+                0,
+                "Set_TEMP",
+                assignmentsResult_gpu,
+                centroidsCompare_gpu,
+                distCompare_gpu,
+                data,
+                listeIDOk1_gpu,
+                nb_instance_min,
+                w,
             )
             t_coeff_gpu = time.perf_counter() - t0
         except Exception:
             pass
         xm.USE_GPU = False
-    
+
     print(f"    - Version Python Pur   : {t_coeff_py * 1000:.2f} ms")
     print(f"    - Version CPU JIT      : {t_coeff_cpu * 1000:.2f} ms (Accélération: {t_coeff_py / t_coeff_cpu:.1f}x)")
     if t_coeff_gpu > 0:
-        print(f"    - Version GPU GPUsync  : {t_coeff_gpu * 1000:.2f} ms (Accélération: {t_coeff_py / t_coeff_gpu:.1f}x)")
+        print(
+            f"    - Version GPU GPUsync  : {t_coeff_gpu * 1000:.2f} ms (Accélération: {t_coeff_py / t_coeff_gpu:.1f}x)"
+        )
 
     # -----------------------------------------------------------------
     # BENCHMARK 3 : CLUSTERING X-MEANS COMPLET & PIPELINE
     # -----------------------------------------------------------------
     print("\n[+] BENCHMARK 3: Pipeline complet du clustering X-means (1 iteration)")
-    
+
     # 3.1 Python Pur Original (sur sous-ensemble de 150 séries)
     py_xmeans = PurePythonXmeansTS(data_py, 3, "dummy.xlsx", df_ids_py, 1.0)
     t0 = time.perf_counter()
     _ = py_xmeans.k_means_clust(data_py, 3, 1, df_ids_py, 0, "Set_TEMP", {}, [], nb_instance_min, w)
     t_pipe_py = time.perf_counter() - t0
-    
+
     # 3.2 CPU JIT (Numba)
     # On force l'initialisation du cache JIT Numba sur une première exécution
     opt_xmeans_warm = xm.XmeansTS(data, 3, "dummy.xlsx", df_ids, 1.0)
     _ = opt_xmeans_warm.k_means_clust(data, 3, 1, df_ids, 0, "Set_TEMP", {}, [], nb_instance_min, w)
-    
+
     opt_xmeans = xm.XmeansTS(data, 3, "dummy.xlsx", df_ids, 1.0)
     t0 = time.perf_counter()
     _ = opt_xmeans.k_means_clust(data, 3, 1, df_ids, 0, "Set_TEMP", {}, [], nb_instance_min, w)
     t_pipe_cpu = time.perf_counter() - t0
-    
+
     # 3.3 GPU GPUsync (si activé)
     t_pipe_gpu = -1.0
     if BENCHMARK_GPU:
@@ -565,7 +637,7 @@ def run_benchmarks():
         except Exception:
             pass
         xm.USE_GPU = False
-    
+
     print(f"    - Version Python Pur (150 s.): {t_pipe_py * 1000:.2f} ms")
     print(f"    - Version CPU JIT (Complète) : {t_pipe_cpu * 1000:.2f} ms")
     if t_pipe_gpu > 0:
@@ -605,19 +677,40 @@ def run_benchmarks():
     # -----------------------------------------------------------------
     # TABLEAU COMPARATIF FINAL DES PERFORMANCES (Console Dashboard)
     # -----------------------------------------------------------------
-    print_dashboard(t_dtw_py, t_dtw_cpu, t_dtw_numba_par, t_dtw_numba_cuda, t_dtw_gpu,
-                    t_coeff_py, t_coeff_cpu, t_coeff_gpu,
-                    t_pipe_py, t_pipe_cpu, t_pipe_gpu,
-                    t_true_cpu, t_true_gpu,
-                    len(data))
+    print_dashboard(
+        t_dtw_py,
+        t_dtw_cpu,
+        t_dtw_numba_par,
+        t_dtw_numba_cuda,
+        t_dtw_gpu,
+        t_coeff_py,
+        t_coeff_cpu,
+        t_coeff_gpu,
+        t_pipe_py,
+        t_pipe_cpu,
+        t_pipe_gpu,
+        t_true_cpu,
+        t_true_gpu,
+        len(data),
+    )
 
 
-def print_dashboard(t_dtw_py, t_dtw_cpu, t_dtw_numba_par, t_dtw_numba_cuda, t_dtw_gpu,
-                    t_coeff_py, t_coeff_cpu, t_coeff_gpu,
-                    t_pipe_py, t_pipe_cpu, t_pipe_gpu,
-                    t_true_cpu, t_true_gpu,
-                    n_dataset):
-
+def print_dashboard(
+    t_dtw_py,
+    t_dtw_cpu,
+    t_dtw_numba_par,
+    t_dtw_numba_cuda,
+    t_dtw_gpu,
+    t_coeff_py,
+    t_coeff_cpu,
+    t_coeff_gpu,
+    t_pipe_py,
+    t_pipe_cpu,
+    t_pipe_gpu,
+    t_true_cpu,
+    t_true_gpu,
+    n_dataset,
+):
     # ANSI color codes
     GRAY = "\033[90m"
     WHITE = "\033[1;37m"
@@ -629,9 +722,9 @@ def print_dashboard(t_dtw_py, t_dtw_cpu, t_dtw_numba_par, t_dtw_numba_cuda, t_dt
     BLUE = "\033[34m"
     RESET = "\033[0m"
 
-    has_gpu = (t_dtw_gpu > 0)
-    has_numba_cuda = (t_dtw_numba_cuda > 0)
-    has_true_gpu = (t_true_gpu > 0)
+    has_gpu = t_dtw_gpu > 0
+    has_numba_cuda = t_dtw_numba_cuda > 0
+    has_true_gpu = t_true_gpu > 0
     gpu_val_dtw = f"{t_dtw_gpu:.4f} s" if has_gpu else "N/A"
     cuda_val_dtw = f"{t_dtw_numba_cuda:.4f} s" if has_numba_cuda else "N/A"
     gpu_val_coeff = f"{t_coeff_gpu:.4f} s" if has_gpu else "N/A"
@@ -651,18 +744,35 @@ def print_dashboard(t_dtw_py, t_dtw_cpu, t_dtw_numba_par, t_dtw_numba_cuda, t_dt
         padded = f"{str(val):<{W[col_idx]}}"
         return f"{color}{padded}{RESET}" if color else padded
 
-    def row(label, py, jit, npar, cuda, gpu, speedup,
-            c_py=CYAN, c_jit=GREEN, c_npar=GREEN, c_cuda=BLUE, c_gpu=YELLOW, c_spd=ORANGE):
-        return (f" {cc(label,0)} | {cc(py,1,c_py)} | {cc(jit,2,c_jit)} | "
-                f"{cc(npar,3,c_npar)} | {cc(cuda,4,c_cuda)} | {cc(gpu,5,c_gpu)} | {cc(speedup,6,c_spd)}")
+    def row(
+        label,
+        py,
+        jit,
+        npar,
+        cuda,
+        gpu,
+        speedup,
+        c_py=CYAN,
+        c_jit=GREEN,
+        c_npar=GREEN,
+        c_cuda=BLUE,
+        c_gpu=YELLOW,
+        c_spd=ORANGE,
+    ):
+        return (
+            f" {cc(label,0)} | {cc(py,1,c_py)} | {cc(jit,2,c_jit)} | "
+            f"{cc(npar,3,c_npar)} | {cc(cuda,4,c_cuda)} | {cc(gpu,5,c_gpu)} | {cc(speedup,6,c_spd)}"
+        )
 
     def sp(ref, t):
         return f"{ref/t:.1f}x" if t > 0 else "N/A"
 
     SEP = "=" * (sum(W) + len(W) * 3 + 2)
-    HDR = (f" {cc('Composant',0,WHITE)} | {cc('Python Pur',1,WHITE)} | {cc('CPU JIT',2,WHITE)} | "
-           f"{cc('Numba || CPU',3,WHITE)} | {cc('Numba CUDA',4,WHITE)} | {cc('GPU GPUsync',5,WHITE)} | "
-           f"{cc('Best Speedup',6,WHITE)}")
+    HDR = (
+        f" {cc('Composant',0,WHITE)} | {cc('Python Pur',1,WHITE)} | {cc('CPU JIT',2,WHITE)} | "
+        f"{cc('Numba || CPU',3,WHITE)} | {cc('Numba CUDA',4,WHITE)} | {cc('GPU GPUsync',5,WHITE)} | "
+        f"{cc('Best Speedup',6,WHITE)}"
+    )
 
     print(f"\n{GRAY}{SEP}{RESET}")
     print(f"{'DASHBOARD DE PERFORMANCE COMPARATIVE MULTI-BACKEND':^{len(SEP)}}")
@@ -672,39 +782,81 @@ def print_dashboard(t_dtw_py, t_dtw_cpu, t_dtw_numba_par, t_dtw_numba_cuda, t_dt
 
     # Ligne 1 : DTW batch réel
     best_dtw = min(t for t in [t_dtw_cpu, t_dtw_numba_par, t_dtw_numba_cuda, t_dtw_gpu] if t > 0)
-    print(row("1k DTW — batch réel",
-              f"{t_dtw_py:.4f} s", f"{t_dtw_cpu:.4f} s", f"{t_dtw_numba_par:.4f} s",
-              cuda_val_dtw, gpu_val_dtw, sp(t_dtw_py, best_dtw)))
+    print(
+        row(
+            "1k DTW — batch réel",
+            f"{t_dtw_py:.4f} s",
+            f"{t_dtw_cpu:.4f} s",
+            f"{t_dtw_numba_par:.4f} s",
+            cuda_val_dtw,
+            gpu_val_dtw,
+            sp(t_dtw_py, best_dtw),
+        )
+    )
 
     # Ligne 2 : XmeansTS Glouton
     best_pipe = min(t for t in [t_pipe_cpu, t_pipe_gpu] if t > 0)
-    print(row("XmeansTS Glouton (k=3)",
-              f"{t_pipe_py:.4f} s", f"{t_pipe_cpu:.4f} s", "N/A",
-              "N/A", gpu_val_pipe, sp(t_pipe_py, best_pipe)))
+    print(
+        row(
+            "XmeansTS Glouton (k=3)",
+            f"{t_pipe_py:.4f} s",
+            f"{t_pipe_cpu:.4f} s",
+            "N/A",
+            "N/A",
+            gpu_val_pipe,
+            sp(t_pipe_py, best_pipe),
+        )
+    )
 
     # Ligne 3 : defineCoeff
     best_coeff = min(t for t in [t_coeff_cpu, t_coeff_gpu] if t > 0)
-    print(row("Calcul Coefficients",
-              f"{t_coeff_py:.4f} s", f"{t_coeff_cpu:.4f} s", "N/A",
-              "N/A", gpu_val_coeff, sp(t_coeff_py, best_coeff)))
+    print(
+        row(
+            "Calcul Coefficients",
+            f"{t_coeff_py:.4f} s",
+            f"{t_coeff_cpu:.4f} s",
+            "N/A",
+            "N/A",
+            gpu_val_coeff,
+            sp(t_coeff_py, best_coeff),
+        )
+    )
 
     # Ligne 4 : TrueXmeansTS
     best_true = min(t for t in [t_true_cpu, t_true_gpu] if t > 0) if (t_true_cpu > 0 or t_true_gpu > 0) else -1.0
-    print(row("TrueXmeansTS BIC (k2-6, P=4)",
-              "N/A", f"{t_true_cpu:.4f} s", "N/A",
-              "N/A", gpu_val_true,
-              sp(t_true_cpu, best_true) if best_true > 0 else "N/A",
-              c_py=GRAY, c_jit=PURPLE))
+    print(
+        row(
+            "TrueXmeansTS BIC (k2-6, P=4)",
+            "N/A",
+            f"{t_true_cpu:.4f} s",
+            "N/A",
+            "N/A",
+            gpu_val_true,
+            sp(t_true_cpu, best_true) if best_true > 0 else "N/A",
+            c_py=GRAY,
+            c_jit=PURPLE,
+        )
+    )
 
     # Ligne 5 : Pipeline complet
     best_tot = min(t for t in [t_tot_cpu, t_tot_gpu] if t > 0)
-    print(row("Pipeline MMTS Complet",
-              f"{t_tot_py:.4f} s", f"{t_tot_cpu:.4f} s", "N/A",
-              "N/A", gpu_val_tot, sp(t_tot_py, best_tot)))
+    print(
+        row(
+            "Pipeline MMTS Complet",
+            f"{t_tot_py:.4f} s",
+            f"{t_tot_cpu:.4f} s",
+            "N/A",
+            "N/A",
+            gpu_val_tot,
+            sp(t_tot_py, best_tot),
+        )
+    )
 
     print(f"{GRAY}{SEP}{RESET}")
     print(f"{GRAY}Note 1 : Python Pur = 150 séries (extrap.). CPU JIT / GPU = {n_dataset} séries complètes.{RESET}")
-    print(f"{GRAY}Note 2 : 'Numba || CPU' = Numba prange multi-cœur. 'Numba CUDA' = noyau CUDA (requiert driver NVIDIA).{RESET}")
+    print(
+        f"{GRAY}Note 2 : 'Numba || CPU' = Numba prange multi-cœur. 'Numba CUDA' = noyau CUDA (requiert driver NVIDIA).{RESET}"
+    )
     print(f"{GRAY}Note 3 : TrueXmeansTS = vrai X-Means BIC + DTW + Génétique Multi-Pop P=4, k_max=6.{RESET}")
     print(f"{GRAY}{SEP}{RESET}")
 

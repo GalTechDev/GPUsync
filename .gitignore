@@ -2,5 +2,16 @@
 __pycache__/
 scratch/*
 .pytest_cache/
-data/
 .gpusync_debug/
+.ruff_cache/
+.mypy_cache/
+data/
+
+# Tests & Coverage
+.coverage
+htmlcov/
+
+# Build & packaging
+build/
+dist/
+*.egg-info/

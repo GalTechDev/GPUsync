@@ -1,10 +1,12 @@
 # pyrefly: ignore [missing-import]
-import pytest
 # pyrefly: ignore [missing-import]
 import numpy as np
+import pytest
+
 from gpusync.memory import AsyncBuffer
 from gpusync.scheduler import Scheduler
 from gpusync.utils.devices import list_gpus
+
 
 def test_dlpack_device_and_protocol():
     gpus = list_gpus()
@@ -29,6 +31,7 @@ def test_dlpack_device_and_protocol():
     except NotImplementedError:
         pass
 
+
 def test_dlpack_import():
     gpus = list_gpus()
     if not gpus:
@@ -41,7 +44,7 @@ def test_dlpack_import():
     buf = AsyncBuffer.to_device(sched, data)
 
     # Re-création via from_dlpack
-    if hasattr(buf.cl_buffer, '__dlpack__'):
+    if hasattr(buf.cl_buffer, "__dlpack__"):
         buf_from_dl = AsyncBuffer.from_dlpack(buf, scheduler=sched)
         assert buf_from_dl.shape == (3,)
         assert buf_from_dl.dtype == np.float32

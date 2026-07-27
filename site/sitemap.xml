@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/1.-Architecture-du-Compilateur-AST/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/2.-Gestion-de-la-M%C3%A9moire-et-Buffers/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/3.-S%C3%A9lection-des-P%C3%A9riph%C3%A9riques-et-Schedulers/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/4.-Guide-de-D%C3%A9marrage-D%C3%A9veloppeur/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/RAPPORT_GPUSYNC/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/api/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+    <url>
+         <loc>https://galtechdev.github.io/GPUsync/guide/</loc>
+         <lastmod>2026-07-27</lastmod>
+    </url>
+</urlset>

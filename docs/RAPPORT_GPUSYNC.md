@@ -261,7 +261,7 @@ Pour valider l'efficience de l'architecture logicielle et matérielle de GPUsync
 L'objectif du premier test est de démontrer que le système de *Memory Pooling* asynchrone permet de briser la limitation physique de la VRAM.
 Nous avons croisé un cluster persistant de 128 références (séries temporelles) avec un flux ininterrompu de séquences cibles, allant jusqu'à simuler un trafic de plusieurs milliards d'opérations.
 
-![Graphique de Débit DTW](../examples/results/plots/dtw_benchmark.png)
+![Graphique de Débit DTW](images/dtw_benchmark.png)
 
 L'observation de la courbe de débit moyen (*Throughput*, moyennée sur 20 itérations par charge) démontre la **stabilité absolue** des performances de l'architecture.
 Bien que les plus petits volumes (1 à 64 Millions d'individus) accusent une variance mineure inhérente à l'overhead d'initialisation (création du pool asynchrone, transferts PCIe initiaux), le débit se verrouille dès que le pipeline atteint son régime de croisière. 
@@ -278,7 +278,7 @@ Afin d'évaluer la robustesse de GPUsync face au standard absolu de l'industrie,
 
 L'optimisation centrale de l'implémentation K-Means sur GPUsync repose sur le **Memory Coalescing** : avant d'être injectés dans le pipeline asynchrone, les données sont restructurées de la RAM système vers un format `SoA` (Structure of Arrays) de manière pré-calculée. Cela permet aux coeurs matériels (Warps) d'effectuer des lectures contiguës en mémoire VRAM, multipliant la bande passante par un facteur de 32x.
 
-![Métriques Exhaustives K-Means](../examples/results/plots/kmeans_benchmark.png)
+![Métriques Exhaustives K-Means](images/kmeans_benchmark.png)
 
 #### 4.2.1 Analyse du Temps d'Exécution et Vitesse Matérielle
 Le graphique supérieur gauche distingue formellement 3 temps d'exécution :
@@ -300,7 +300,7 @@ Cette équivalence stricte (sur près de 20 Milliards de calculs euclidiens) val
 ### 4.3 Benchmarks du Produit Matriciel : Comparaison des Architectures et Moteurs
 Pour mesurer l'impact réel des optimisations architecturales développées au Chapitre 3, nous avons benchmarké le produit de matrices carrées géantes en virgule flottante. L'objectif est d'évaluer la qualité du code transpilé par GPUsync face aux standards de l'industrie (PyTorch, cuBLAS).
 
-![Benchmark STOMP Matrix Profile](../examples/results/plots/stomp_benchmark.png)
+![Benchmark STOMP Matrix Profile](images/stomp_benchmark.png)
 
 Ce graphique met en compétition cinq implémentations distinctes, illustrant parfaitement l'escalade des techniques d'optimisation bas-niveau :
 
@@ -329,7 +329,7 @@ Pour évaluer GPUsync dans un cadre applicatif métier complexe, nous avons mesu
 
 Le benchmark a été réalisé sur un jeu de données réel composé de $N=381$ séries temporelles d'une longueur de $M=32$ (soit $1\ 143$ paires DTW par itération de K-Means), avec $K=3$ clusters et une fenêtre de contrainte $w=5$.
 
-![Benchmark MMTS Time Series X-Means](../examples/results/plots/mmts%20(time%20series%20x-means)_benchmark.png)
+![Benchmark MMTS Time Series X-Means](images/mmts%20(time%20series%20x-means)_benchmark.png)
 
 | Composant | Version CPU Originale (Pure Python) | Moteur Officiel GPUsync | Version Test GPUsync Optimisée | Speedup GPUsync vs CPU |
 | :--- | :---: | :---: | :---: | :---: |

@@ -1,2 +1,12 @@
 pyopencl>=2024.1
 numpy>=1.26.0
+cupy-cuda12x>=12.0.0
+
+# Outils de Developpement & Qualite
+pytest>=7.0.0
+pytest-cov>=4.0.0
+ruff>=0.1.0
+mypy>=1.0.0
+sympy>=1.13.0
+mkdocs-material>=9.0.0
+mkdocstrings[python]>=0.20.0

@@ -1,10 +1,10 @@
-import sys
 import os
-import ast
+import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from gpusync.compiler import gpusync_kernel
+
 
 def test_compiler_transpilation():
     @gpusync_kernel
@@ -23,20 +23,21 @@ def test_compiler_transpilation():
     assert "blockIdx.x * blockDim.x + threadIdx.x" in cuda_src
     assert "a[ctx] + b[ctx]" in cuda_src
 
+
 def test_compiler_dimension_mapping():
     # Test our new dynamic dimension mapping in CUDA
     @gpusync_kernel
     def custom_dim_kernel(a: list):
-        idx_0 = get_global_id(0)
-        idx_1 = get_global_id(1)
-        idx_2 = get_global_id(2)
-        local_0 = get_local_id(0)
-        local_1 = get_local_id(1)
-        group_0 = get_group_id(0)
-        group_1 = get_group_id(1)
+        get_global_id(0)
+        get_global_id(1)
+        get_global_id(2)
+        get_local_id(0)
+        get_local_id(1)
+        get_group_id(0)
+        get_group_id(1)
 
     cuda_src = custom_dim_kernel.cuda_code
-    
+
     # get_global_id(0) -> x, (1) -> y, (2) -> z
     assert "blockIdx.x * blockDim.x + threadIdx.x" in cuda_src
     assert "blockIdx.y * blockDim.y + threadIdx.y" in cuda_src
@@ -49,6 +50,7 @@ def test_compiler_dimension_mapping():
     # get_group_id(0) -> x, (1) -> y
     assert "blockIdx.x" in cuda_src
     assert "blockIdx.y" in cuda_src
+
 
 def test_compiler_math_functions():
     @gpusync_kernel

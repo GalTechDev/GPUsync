@@ -1,10 +1,13 @@
-import pytest
 import numpy as np
-from gpusync import gpusync_kernel, Scheduler, list_gpus
+import pytest
+
+from gpusync import Scheduler, gpusync_kernel, list_gpus
+
 
 @gpusync_kernel
 def scale_kernel(ctx: int, a: list, b: list) -> tuple:
     return a[ctx] * 3.0 + b[ctx]
+
 
 def test_map_out_of_core_single_return():
     gpus = list_gpus()
