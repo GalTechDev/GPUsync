@@ -1,6 +1,9 @@
 import ast
 import inspect
 import textwrap
+import logging
+
+logger = logging.getLogger(__name__)
 # pyrefly: ignore [missing-import]
 import numpy as np
 
@@ -9,7 +12,7 @@ from .cuda import compile_to_cuda
 from .llvm import compile_to_llvm
 from .llvm_cuda import compile_to_llvm_cuda
 
-def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
+def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, compile_spirv=False):
     """
     Fonction helper interne partagée (DRY).
     1. Analyse l'AST pour calculer le nombre de valeurs de retour (returns).
@@ -30,7 +33,16 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
             num_returns = 1
             
     # Compilation
-    kernel_code_opencl = compile_to_opencl(tree, kernel_name, num_returns, constants)
+    opencl_source_text = compile_to_opencl(tree, kernel_name, num_returns, constants)
+    kernel_code_opencl = opencl_source_text
+    
+    if compile_spirv:
+        try:
+            from .spirv import compile_opencl_to_spirv
+            kernel_code_opencl = compile_opencl_to_spirv(opencl_source_text, kernel_name)
+        except Exception as e:
+            logger.warning(f"Impossible de compiler en SPIR-V : {e}. Fallback vers le code source OpenCL textuel.")
+
     kernel_code_llvm = compile_to_llvm(tree, kernel_name, num_returns, constants)
     kernel_code_ptx = compile_to_llvm_cuda(tree, kernel_name, num_returns, constants)
     
@@ -46,7 +58,7 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
         from ..utils.diagnostics import analyze_symbolic_bounds, write_structured_debug_code
         sympy_report = analyze_symbolic_bounds(tree, kernel_name)
         write_structured_debug_code(
-            kernel_name, kernel_code_opencl, kernel_code_cuda,
+            kernel_name, opencl_source_text, kernel_code_cuda,
             kernel_code_llvm, kernel_code_ptx, sympy_report
         )
     except Exception:
@@ -308,7 +320,7 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
     wrapper.map_out_of_core = map_out_of_core
     return wrapper
 
-def gpusync_kernel(func=None, raw_cuda=None, constants=None):
+def gpusync_kernel(func=None, raw_cuda=None, constants=None, compile_spirv=False):
     """
     Décorateur JIT multi-backend principal.
     Traduit la fonction Python en kernels OpenCL et CUDA C++.
@@ -322,10 +334,11 @@ def gpusync_kernel(func=None, raw_cuda=None, constants=None):
         func (function, optional): La fonction Python à décorer.
         raw_cuda (str, optional): Code CUDA brut pour bypasser la transpilation automatique.
         constants (dict, optional): Constantes de configuration pour l'AST (ex: tailles de blocs).
+        compile_spirv (bool, optional): Compiler en SPIR-V à l'aide de clspv si disponible.
     """
     if func is None:
         def wrapper(f):
-            return gpusync_kernel(f, raw_cuda=raw_cuda, constants=constants)
+            return gpusync_kernel(f, raw_cuda=raw_cuda, constants=constants, compile_spirv=compile_spirv)
         return wrapper
 
     # Extraction et nettoyage du code source Python
@@ -339,9 +352,9 @@ def gpusync_kernel(func=None, raw_cuda=None, constants=None):
     func_def = tree.body[0]
     kernel_name = func_def.name
     
-    return _compile_and_wrap_kernel(tree, kernel_name, raw_cuda, constants)
+    return _compile_and_wrap_kernel(tree, kernel_name, raw_cuda, constants, compile_spirv)
 
-def gpusync_kernel_from_source(source: str, raw_cuda=None, constants=None):
+def gpusync_kernel_from_source(source: str, raw_cuda=None, constants=None, compile_spirv=False):
     """
     Variante JIT de `gpusync_kernel` pour les codes sources générés dynamiquement (factories).
     Évite l'utilisation d'inspect.getsource() sur les objets de fonction temporaires.
@@ -350,6 +363,7 @@ def gpusync_kernel_from_source(source: str, raw_cuda=None, constants=None):
         source (str): Chaîne de caractères contenant le code de la fonction Python.
         raw_cuda (str, optional): Code CUDA brut pour bypasser la transpilation.
         constants (dict, optional): Constantes de configuration AST.
+        compile_spirv (bool, optional): Compiler en SPIR-V à l'aide de clspv si disponible.
     """
     lines = source.split('\n')
     lines = [l for l in lines if not l.strip().startswith('@')]
@@ -359,4 +373,4 @@ def gpusync_kernel_from_source(source: str, raw_cuda=None, constants=None):
     func_def = tree.body[0]
     kernel_name = func_def.name
 
-    return _compile_and_wrap_kernel(tree, kernel_name, raw_cuda, constants)
+    return _compile_and_wrap_kernel(tree, kernel_name, raw_cuda, constants, compile_spirv)

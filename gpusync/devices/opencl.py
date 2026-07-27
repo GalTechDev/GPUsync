@@ -77,8 +77,13 @@ class OpenCLDeviceManager:
         queue = stream if stream is not None else self.get_queue()
         
         if self.context not in task._compiled_programs:
-            build_opts = ["-cl-fast-relaxed-math", "-cl-mad-enable"]
-            prg = cl.Program(self.context, task.kernel_code_opencl).build(options=build_opts)
+            if isinstance(task.kernel_code_opencl, bytes):
+                # Chargement transparent du bytecode SPIR-V
+                prg = cl.Program(self.context, task.kernel_code_opencl).build()
+            else:
+                # Compilation du code source OpenCL C textuel standard
+                build_opts = ["-cl-fast-relaxed-math", "-cl-mad-enable"]
+                prg = cl.Program(self.context, task.kernel_code_opencl).build(options=build_opts)
             task._compiled_programs[self.context] = getattr(prg, task.kernel_name_opencl)
             
         kernel = task._compiled_programs[self.context]

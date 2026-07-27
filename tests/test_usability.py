@@ -105,3 +105,25 @@ def test_structured_debug_and_symbolic_bounds():
     assert "ANALYSE SYMBOLIQUE DES DIMENSIONS" in content
     assert "vector_a" in content
     assert "vector_b" in content
+
+def test_spirv_fallback_and_compilation():
+    """
+    Vérifie le comportement de la compilation SPIR-V.
+    Si clspv est absent sur la machine, la compilation doit faire un fallback
+    transparent vers le code source OpenCL C textuel standard sans bloquer l'exécution.
+    """
+    data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    
+    # Compilation avec compile_spirv=True
+    @gpusync_kernel(compile_spirv=True)
+    def spirv_test_kernel(ctx: int, d: list) -> tuple:
+        return d[ctx] + 10.0
+        
+    res = spirv_test_kernel(data, global_size=len(data))
+    
+    expected = data + 10.0
+    assert np.allclose(res, expected)
+    
+    # Si clspv a pu compiler, task.kernel_code_opencl doit être de type bytes (SPIR-V)
+    # Sinon, il doit être de type str (fallback textuel)
+    assert isinstance(spirv_test_kernel.task.kernel_code_opencl, (str, bytes))
