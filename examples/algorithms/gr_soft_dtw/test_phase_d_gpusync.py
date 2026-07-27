@@ -5,7 +5,9 @@ import time
 import numpy as np
 
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, root_dir)
+sys.path.insert(0, os.path.join(root_dir, 'src'))
 
 from gpusync.scheduler import Scheduler
 from gpusync.memory import AsyncBuffer
@@ -22,7 +24,7 @@ async def run_test_8_gpusync_benchmark():
     
     # Initialize Scheduler
     scheduler = Scheduler(backend="opencl")
-    await scheduler.initialize()
+    scheduler.initialize()
     print("Scheduler Initialized")
     
     for N in N_values:

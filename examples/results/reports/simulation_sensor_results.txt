@@ -1,0 +1,9 @@
+=== RÉSULTATS DE SIMULATION D'ALIGNEMENT GR-S-DTW ===
+Erreur totale Independent Soft-DTW : 48.9674
+Erreur totale GR-S-DTW (lambda=5.0) : 51.8527
+Réduction globale de l'erreur d'alignement : -5.89%
+
+Détails des erreurs par capteur :
+  Capteur 0 : Indep=13.1143 | Graph=17.7780 | Imp=-35.56%
+  Capteur 1 : Indep=24.5427 | Graph=20.3604 | Imp=17.04%
+  Capteur 2 : Indep=11.3104 | Graph=13.7144 | Imp=-21.25%

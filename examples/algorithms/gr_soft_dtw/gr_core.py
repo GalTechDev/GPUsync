@@ -12,23 +12,18 @@ def compute_cost_matrix(X_v, Y_v):
 def soft_dtw_forward(C, gamma):
     """
     Computes the Soft-DTW distance using DP.
-    Uses a dictionary to store tensors and avoid inplace modifications,
-    ensuring compatibility with PyTorch autograd for double differentiation.
+    Uses a list of lists to store tensors, avoiding dictionary lookups
+    while preserving double differentiation compatibility.
     """
     N, M = C.shape
-    R = {}
-    R[(-1, -1)] = C.new_tensor(0.0)
+    R = [[C.new_tensor(float('inf')) for _ in range(M + 1)] for _ in range(N + 1)]
+    R[0][0] = C.new_tensor(0.0)
     
-    for i in range(N):
-        R[(i, -1)] = C.new_tensor(float('inf'))
-    for j in range(M):
-        R[(-1, j)] = C.new_tensor(float('inf'))
-        
-    for i in range(N):
-        for j in range(M):
-            a = R[(i-1, j-1)]
-            b = R[(i-1, j)]
-            c = R[(i, j-1)]
+    for i in range(1, N + 1):
+        for j in range(1, M + 1):
+            a = R[i-1][j-1]
+            b = R[i-1][j]
+            c = R[i][j-1]
             
             # Handle inf explicitly to avoid nan in logsumexp
             if torch.isinf(a) and torch.isinf(b) and torch.isinf(c):
@@ -37,9 +32,9 @@ def soft_dtw_forward(C, gamma):
                 stacked = torch.stack([-a/gamma, -b/gamma, -c/gamma])
                 sm = -gamma * torch.logsumexp(stacked, dim=0)
                 
-            R[(i, j)] = C[i, j] + sm
+            R[i][j] = C[i-1, j-1] + sm
             
-    return R[(N-1, M-1)]
+    return R[N][M]
 
 def get_alignment_matrix_connected(C, gamma):
     """

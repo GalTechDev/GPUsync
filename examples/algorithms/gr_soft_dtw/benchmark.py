@@ -4,7 +4,9 @@ import time
 import asyncio
 import numpy as np
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, root_dir)
+sys.path.insert(0, os.path.join(root_dir, 'src'))
 
 from examples.common.benchmark_base import BaseBenchmark
 from examples.algorithms.gr_soft_dtw.gr_soft_dtw_engine import get_sdtw_fwd_bwd_kernel, get_sdtw_double_bwd_kernel
@@ -25,6 +27,7 @@ class GRSoftDTWBenchmark(BaseBenchmark):
             num_runs=num_runs,
             variants=["GPUsync FWD+BWD+HVP"]
         )
+        self.kernel_cache = {}
 
     def get_plot_metadata(self):
         return {
@@ -105,8 +108,13 @@ class GRSoftDTWBenchmark(BaseBenchmark):
         gpu_B = AsyncBuffer.empty_like(scheduler, np.zeros(total_size, dtype=np.float32))
         gpu_E = AsyncBuffer.empty_like(scheduler, np.zeros(D * N * M, dtype=np.float32))
         
-        kernel_fwd = get_sdtw_fwd_bwd_kernel(N, M)
-        kernel_bwd = get_sdtw_double_bwd_kernel(N, M)
+        cache_key = (N, M)
+        if cache_key not in self.kernel_cache:
+            self.kernel_cache[cache_key] = (
+                get_sdtw_fwd_bwd_kernel(N, M),
+                get_sdtw_double_bwd_kernel(N, M)
+            )
+        kernel_fwd, kernel_bwd = self.kernel_cache[cache_key]
         
         kernel_fwd(gpu_M_mat, gpu_Z, gpu_Q1, gpu_Q2, gpu_Q3, gpu_A, gamma, global_size=(D,), local_size=(1,), scheduler=scheduler)
         kernel_bwd(gpu_A, gpu_Q1, gpu_Q2, gpu_Q3, gpu_V, gpu_H, gpu_B, gpu_E, gamma, global_size=(D,), local_size=(1,), scheduler=scheduler)
