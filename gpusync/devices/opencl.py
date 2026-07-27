@@ -97,13 +97,42 @@ class OpenCLDeviceManager:
         if local_size is None:
             if isinstance(global_size, int):
                 global_size = (global_size,)
-                local_size = (256,)
-            elif len(global_size) == 1:
-                local_size = (256,)
-            elif len(global_size) == 2:
-                local_size = (16, 16)
-            elif len(global_size) == 3:
-                local_size = (8, 8, 8)
+                
+            # Auto-tuning dynamique basé sur les caractéristiques réelles du GPU et du Kernel
+            try:
+                max_group_size = kernel.get_work_group_info(cl.kernel_work_group_info.WORK_GROUP_SIZE, self.device)
+                pref_multiple = kernel.get_work_group_info(cl.kernel_work_group_info.PREFERRED_WORK_GROUP_SIZE_MULTIPLE, self.device)
+            except Exception:
+                max_group_size = 256
+                pref_multiple = 32
+
+            dims = len(global_size)
+            if dims == 1:
+                g_size = global_size[0]
+                if g_size < pref_multiple:
+                    local_size = (max(1, g_size),)
+                else:
+                    # Cible par défaut à 256 si possible, ajustée selon la limite matérielle
+                    candidate = 256
+                    while candidate > max_group_size:
+                        candidate //= 2
+                    local_size = (candidate,)
+            elif dims == 2:
+                candidate_dim = 16
+                while (candidate_dim * candidate_dim) > max_group_size:
+                    candidate_dim //= 2
+                local_size = (candidate_dim, candidate_dim)
+            elif dims == 3:
+                candidate_dim = 8
+                while (candidate_dim * candidate_dim * candidate_dim) > max_group_size:
+                    candidate_dim //= 2
+                local_size = (candidate_dim, candidate_dim, candidate_dim)
+                
+            logger.debug(f"[Auto-Tuning] Kernel '{task.kernel_name_opencl}' -> local_size: {local_size} (Max: {max_group_size}, Multiple préféré: {pref_multiple})")
+                
+        else:
+            if isinstance(global_size, int):
+                global_size = (global_size,)
                 
         if local_size:
             global_size = tuple(((g + l - 1) // l) * l for g, l in zip(global_size, local_size))
