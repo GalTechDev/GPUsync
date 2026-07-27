@@ -51,6 +51,7 @@ class LLVMDeviceManager:
         self.num_threads = num_queues
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_queues)
         self.next_queue_idx = 0
+        self._buffer_pool = {}
         logger.info(f"LLVMDeviceManager initialisé : {self.name} avec {num_queues} threads.")
 
     def get_queue(self):
@@ -154,3 +155,9 @@ class LLVMDeviceManager:
         Lecture directe Zero-Copy.
         """
         return src_buffer.copy()
+
+    def free_buffer(self, buffer_obj, shape, dtype):
+        """
+        Libère un buffer CPU (LLVM CPU JIT).
+        """
+        pass

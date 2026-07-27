@@ -40,6 +40,17 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
     else:
         kernel_code_cuda = compile_to_cuda(tree, kernel_name, num_returns, constants)
         kernel_name_cuda = kernel_name
+
+    # Diagnostic & Génération de code structurée de débug/cache (non bloquant)
+    try:
+        from ..utils.diagnostics import analyze_symbolic_bounds, write_structured_debug_code
+        sympy_report = analyze_symbolic_bounds(tree, kernel_name)
+        write_structured_debug_code(
+            kernel_name, kernel_code_opencl, kernel_code_cuda,
+            kernel_code_llvm, kernel_code_ptx, sympy_report
+        )
+    except Exception:
+        pass
         
     # Compile la fonction Python originale avec substitution des constantes pour le fallback LLVM CPU
     import copy
@@ -95,12 +106,24 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
     task.num_returns = num_returns
     
     @auto_sync
-    async def wrapper(*args, global_size, scheduler, _pipeline_mode=False, local_size=None, stream=None, fire_and_forget=False, _out_buffers=None):
+    async def wrapper(*args, global_size, scheduler=None, _pipeline_mode=False, local_size=None, stream=None, fire_and_forget=False, _out_buffers=None):
         """
         Enveloppe de kernel générée dynamiquement au moment de l'appel.
         Alloue les buffers de sortie VRAM, appelle AsyncTask pour exécuter le kernel
         sur la queue, le stream GPU ou le moteur JIT CPU LLVM.
         """
+        if scheduler is None:
+            from ..scheduler import get_default_scheduler
+            scheduler = get_default_scheduler()
+            
+        # Coercion automatique des arguments numpy d'entrée vers des AsyncBuffer GPU
+        gpu_args = []
+        for arg in args:
+            if isinstance(arg, np.ndarray):
+                gpu_args.append(await AsyncBuffer.to_device(scheduler, arg))
+            else:
+                gpu_args.append(arg)
+
         out_buffers = []
         if num_returns > 0:
             if _out_buffers is not None:
@@ -111,7 +134,7 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
                     buf = AsyncBuffer.empty_like(scheduler, np.zeros(total_size, dtype=np.float32))
                     out_buffers.append(buf)
                 
-        new_args = list(args) + out_buffers
+        new_args = gpu_args + out_buffers
         await task.execute(scheduler, global_size, local_size, *new_args, stream=stream, fire_and_forget=fire_and_forget)
         
         # Gestion intelligente des retours (Auto-rapatriement sur le CPU)
@@ -127,11 +150,14 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
             return tuple([await buf.to_host() for buf in out_buffers])
             
     @auto_sync
-    async def map_out_of_core(host_data, scheduler, *extra_args, chunk_size=None, concurrency=2):
+    async def map_out_of_core(host_data, scheduler=None, *extra_args, chunk_size=None, concurrency=2):
         """
         Traitement Out-of-Core 100% automatique et monoligne.
         Accepte aussi bien un tableau NumPy qu'un Générateur / Itérable (ex: flux de lecture disque NVMe).
         """
+        if scheduler is None:
+            from ..scheduler import get_default_scheduler
+            scheduler = get_default_scheduler()
         import asyncio
         import inspect
 
@@ -268,8 +294,10 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None):
         if num_returns == 0:
             return None
         elif num_returns == 1:
-            return final_result
+            return np.concatenate(results_host) if is_gen else final_result
         else:
+            if is_gen:
+                return tuple(np.concatenate([r[i] for r in results_host]) for i in range(num_returns))
             return final_result
 
     wrapper.opencl_code = kernel_code_opencl 

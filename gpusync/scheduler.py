@@ -26,8 +26,7 @@ class Scheduler:
         self.num_queues_per_device = num_queues_per_device
         self._next_device_idx = 0
 
-    @auto_sync
-    async def initialize(self, device_name_filter: str = None):
+    def initialize(self, device_name_filter: str = None):
         """
         Initialise le(s) périphérique(s) de calcul.
         Si un `gpu` spécifique a été passé dans le constructeur, il est configuré directement.
@@ -111,8 +110,7 @@ class SwarmScheduler:
         self.devices_managers = []
         self._next_device_idx = 0
 
-    @auto_sync
-    async def initialize(self):
+    def initialize(self):
         from .devices import ALL_DEVICE_MANAGERS
         
         # 1. Si une liste spécifique de périphériques est fournie
@@ -202,3 +200,58 @@ class SwarmScheduler:
         # Fallback si non trouvé
         logger.warning(f"[Swarm] Périphérique '{identifier}' non trouvé, fallback sur Round-Robin.")
         return self.get_best_device()
+
+
+from contextlib import contextmanager
+
+_default_scheduler = None
+
+def get_default_scheduler() -> Scheduler:
+    """
+    Récupère ou initialise un scheduler par défaut avec le premier GPU disponible.
+    """
+    global _default_scheduler
+    if _default_scheduler is None:
+        from .utils.devices import list_gpus
+        gpus = list_gpus()
+        if not gpus:
+            raise RuntimeError("Aucun GPU disponible pour initialiser le Scheduler par défaut.")
+        _default_scheduler = Scheduler(gpu=gpus[0])
+        _default_scheduler.initialize()
+    return _default_scheduler
+
+@contextmanager
+def use_gpu(backend: str = "opencl", gpu_idx: int = 0):
+    """
+    Context manager pour initialiser et utiliser un Scheduler GPUsync proprement.
+    
+    Exemple :
+        with use_gpu(backend="opencl") as sched:
+            res = mon_kernel(data)
+    """
+    from .utils.devices import list_gpus
+    gpus = list_gpus()
+    if not gpus:
+        raise RuntimeError("Aucun GPU disponible.")
+    
+    # Sélectionner le GPU par rapport à l'index et au backend demandé
+    selected_gpu = None
+    if gpu_idx < len(gpus):
+        selected_gpu = gpus[gpu_idx]
+    else:
+        selected_gpu = gpus[0]
+        
+    sched = Scheduler(gpu=selected_gpu, backend=backend)
+    sched.initialize()
+    
+    global _default_scheduler
+    old_default = _default_scheduler
+    _default_scheduler = sched
+    
+    try:
+        yield sched
+    finally:
+        _default_scheduler = old_default
+        for manager in getattr(sched, 'devices_managers', []):
+            if hasattr(manager, '_buffer_pool'):
+                manager._buffer_pool.clear()

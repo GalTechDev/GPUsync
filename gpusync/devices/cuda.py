@@ -50,6 +50,7 @@ class CUDADeviceManager:
         ]
         
         self.next_queue_idx = 0
+        self._buffer_pool = {}
         
         # Récupération du nom de la carte pour les logs
         props = cp.cuda.runtime.getDeviceProperties(device.id)
@@ -198,3 +199,9 @@ class CUDADeviceManager:
             src_buffer.data.copy_to_host_async(host_data.ctypes.data, src_buffer.nbytes, stream=read_stream)
         await await_event(read_stream)
         return host_data
+
+    def free_buffer(self, buffer_obj, shape, dtype):
+        """
+        Libère un buffer CUDA (CuPy gère son propre MemoryPool en interne).
+        """
+        pass

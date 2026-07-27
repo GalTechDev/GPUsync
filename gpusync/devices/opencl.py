@@ -59,6 +59,7 @@ class OpenCLDeviceManager:
         ]
         
         self.next_queue_idx = 0
+        self._buffer_pool = {}
         logger.info(f"OpenCLDeviceManager initialisé : {self.name} avec {num_queues} Command Queues.")
 
     def get_queue(self) -> cl.CommandQueue:
@@ -116,23 +117,35 @@ class OpenCLDeviceManager:
 
     async def allocate_buffer_from_host(self, host_data, queue=None):
         """
-        Alloue un buffer OpenCL en VRAM et y copie les données de l'hôte.
+        Alloue un buffer OpenCL en VRAM (ou réutilise un buffer disponible du pool)
+        et y copie les données de l'hôte.
         """
         q = queue if queue is not None else self.get_queue()
-        flags = cl.mem_flags.READ_WRITE
-        cl_buffer = cl.Buffer(self.context, flags, size=host_data.nbytes)
+        cl_buffer = self.allocate_empty_buffer(host_data.shape, host_data.dtype)
         event = cl.enqueue_copy(q, cl_buffer, host_data, is_blocking=False)
         await await_event(event)
         return cl_buffer
 
     def allocate_empty_buffer(self, shape, dtype):
         """
-        Alloue un buffer OpenCL vide en VRAM.
+        Alloue un buffer OpenCL vide en VRAM (ou le récupère du pool).
         """
-        flags = cl.mem_flags.READ_WRITE
         nbytes = int(np.prod(shape) * np.dtype(dtype).itemsize)
+        if nbytes in self._buffer_pool and self._buffer_pool[nbytes]:
+            return self._buffer_pool[nbytes].pop()
+            
+        flags = cl.mem_flags.READ_WRITE
         cl_buffer = cl.Buffer(self.context, flags, size=nbytes)
         return cl_buffer
+
+    def free_buffer(self, buffer_obj, shape, dtype):
+        """
+        Remet le buffer dans le pool pour une réutilisation ultérieure.
+        """
+        nbytes = int(np.prod(shape) * np.dtype(dtype).itemsize)
+        if nbytes not in self._buffer_pool:
+            self._buffer_pool[nbytes] = []
+        self._buffer_pool[nbytes].append(buffer_obj)
 
     async def write_buffer(self, dest_buffer, host_data, queue=None):
         """

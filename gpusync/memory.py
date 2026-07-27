@@ -15,12 +15,32 @@ class AsyncBuffer:
         self.dtype = dtype
         self.backend = backend
 
+    def __del__(self):
+        """
+        Retourne automatiquement le buffer physique au pool du manager de périphérique.
+        """
+        if hasattr(self, 'device_manager') and self.device_manager is not None:
+            if hasattr(self.device_manager, 'free_buffer'):
+                try:
+                    self.device_manager.free_buffer(self.cl_buffer, self.shape, self.dtype)
+                except Exception:
+                    pass
+
     @classmethod
     @auto_sync
-    async def to_device(cls, scheduler, host_data: np.ndarray):
+    async def to_device(cls, scheduler=None, host_data: np.ndarray = None):
         """
         Copie asynchrone et non-bloquante de la RAM de l'hôte vers la VRAM du GPU.
         """
+        if host_data is None and isinstance(scheduler, np.ndarray):
+            # Signature backward-compatibility: si l'appel était to_device(host_data)
+            host_data = scheduler
+            scheduler = None
+
+        if scheduler is None:
+            from .scheduler import get_default_scheduler
+            scheduler = get_default_scheduler()
+
         if hasattr(scheduler, 'get_queue'):
             device_manager = scheduler
         else:
@@ -37,10 +57,18 @@ class AsyncBuffer:
         await self.device_manager.write_buffer(self.cl_buffer, host_data)
 
     @classmethod
-    def empty_like(cls, scheduler, host_data: np.ndarray):
+    def empty_like(cls, scheduler=None, host_data: np.ndarray = None):
         """
         Alloue un buffer vide en VRAM de même taille et type que host_data.
         """
+        if host_data is None and isinstance(scheduler, np.ndarray):
+            host_data = scheduler
+            scheduler = None
+
+        if scheduler is None:
+            from .scheduler import get_default_scheduler
+            scheduler = get_default_scheduler()
+
         if hasattr(scheduler, 'get_queue'):
             device_manager = scheduler
         else:
