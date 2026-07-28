@@ -61,6 +61,16 @@ class LLVMTranspiler(BaseTranspiler):
             self.declared_vars.add(f"__out_{i}")
 
         args_str = ", ".join(args_c)
+        
+        # En-têtes C standards
+        self.c_code.append("#include <math.h>")
+        self.c_code.append("#ifdef _WIN32")
+        self.c_code.append("#define EXPORT __declspec(dllexport)")
+        self.c_code.append("#else")
+        self.c_code.append("#define EXPORT")
+        self.c_code.append("#endif")
+        self.c_code.append("")
+        
         self.c_code.append(f"void {self.kernel_name}({args_str}) {{")
 
         # Visite des instructions à l'intérieur du corps du kernel
@@ -68,6 +78,29 @@ class LLVMTranspiler(BaseTranspiler):
             self.visit(stmt)
 
         self.c_code.append("}")
+        
+        # --- GENERATION DU WRAPPER D'EXECUTION CPU NATIVE ---
+        # Remplace le ctx par 'int total_size' pour la boucle for
+        wrapper_args_c = ["int total_size"] + args_c[1:]
+        
+        # Paramètres d'appel de la fonction interne
+        call_args = ["ctx"]
+        for arg in node.args.args:
+            if arg.arg != "ctx":
+                call_args.append(arg.arg)
+        for i in range(self.num_returns):
+            call_args.append(f"__out_{i}")
+            
+        wrapper_args_str = ", ".join(wrapper_args_c)
+        call_args_str = ", ".join(call_args)
+        
+        self.c_code.append("")
+        self.c_code.append(f"EXPORT void launch_{self.kernel_name}({wrapper_args_str}) {{")
+        # TODO: Ajouter un #pragma omp parallel for si OpenMP est détecté à la compilation
+        self.c_code.append(f"    for(int ctx = 0; ctx < total_size; ctx++) {{")
+        self.c_code.append(f"        {self.kernel_name}({call_args_str});")
+        self.c_code.append(f"    }}")
+        self.c_code.append(f"}}")
 
 
 def compile_to_llvm(tree, kernel_name, num_returns=0, constants=None):
