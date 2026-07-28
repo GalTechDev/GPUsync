@@ -1,21 +1,16 @@
 import concurrent.futures
 import logging
+import ctypes
+import math
+import numpy as np
 
 # pyrefly: ignore [missing-import]
 import llvmlite.binding as llvm
-import numpy as np
-
-import tempfile
-import os
-import ctypes
-import sys
-import distutils.ccompiler
 
 logger = logging.getLogger(__name__)
 
 # Initialisation unique du sous-système LLVM JIT
 _llvm_initialized = False
-
 
 def _init_llvm():
     global _llvm_initialized
@@ -26,7 +21,7 @@ def _init_llvm():
 
 
 class LLVMDeviceDummy:
-    def __init__(self, name="CPU (LLVM JIT)", index=0):
+    def __init__(self, name="CPU (LLVM MCJIT)", index=0):
         self.name = name
         self.index = index
 
@@ -34,7 +29,7 @@ class LLVMDeviceDummy:
 class LLVMDeviceManager:
     """
     Gère la compilation JIT native LLVM et l'exécution optimisée SIMD multi-cœurs
-    sur le processeur hôte (CPU).
+    sur le processeur hôte (CPU) via llvmlite.binding.
     """
 
     backend = "llvm"
@@ -60,14 +55,15 @@ class LLVMDeviceManager:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_queues)
         self.next_queue_idx = 0
         self._buffer_pool: dict = {}
-        logger.info(f"LLVMDeviceManager initialisé : {self.name} avec {num_queues} threads.")
+        logger.info(f"LLVMDeviceManager initialisé : {self.name} avec {num_queues} threads (MCJIT).")
 
     def get_queue(self):
         return self.executor
 
     async def execute_kernel(self, task, global_size, local_size, *args, stream=None, fire_and_forget=False):
         """
-        Exécute le kernel LLVM sur le CPU en parallélisant sur le global_size.
+        Exécute le kernel LLVM sur le CPU en parallélisant sur le global_size
+        via ThreadPoolExecutor et la boucle interne du wrapper JIT.
         """
         total_size = global_size if isinstance(global_size, int) else int(np.prod(global_size))
 
@@ -94,67 +90,54 @@ class LLVMDeviceManager:
 
         name = getattr(task, "kernel_name_llvm", getattr(task, "name", "unknown_kernel"))
         
-        # 1. Compilation JIT du wrapper C
+        # 1. Compilation JIT LLVM
         if name not in getattr(task, "_compiled_programs", {}):
-            code = getattr(task, "kernel_code_llvm", None)
-            if not code:
-                logger.error("LLVM execute_kernel: kernel_code_llvm est manquant.")
+            code_ir = getattr(task, "kernel_code_llvm", None)
+            if not code_ir:
+                logger.error("LLVM execute_kernel: kernel_code_llvm (LLVM IR) est manquant.")
                 return None
                 
-            cache_dir = os.path.join(tempfile.gettempdir(), "gpusync_cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            
-            c_path = os.path.join(cache_dir, f"{name}.c")
-            with open(c_path, "w", encoding="utf-8") as f:
-                f.write(code)
-                
-            compiler = distutils.ccompiler.new_compiler()
             try:
-                # Ajout du flag OpenMP si MSVC, ou -fopenmp si GCC
-                # distutils gère les flags additionnels via extra_postargs
-                is_msvc = compiler.compiler_type == "msvc"
-                cflags = ["/openmp"] if is_msvc else ["-fopenmp"]
-                ldflags = ["/openmp"] if is_msvc else ["-fopenmp"]
+                mod = llvm.parse_assembly(code_ir)
+                mod.verify()
                 
-                try:
-                    objs = compiler.compile([c_path], output_dir=cache_dir, extra_postargs=cflags)
-                    out_path = os.path.join(cache_dir, f"{name}_lib")
-                    compiler.link_shared_object(objs, out_path, extra_postargs=ldflags)
-                except Exception as comp_e:
-                    logger.warning(f"Compilation avec OpenMP a échoué ({comp_e}), tentative sans OpenMP...")
-                    # Fallback sans multi-threading matériel
-                    objs = compiler.compile([c_path], output_dir=cache_dir)
-                    out_path = os.path.join(cache_dir, f"{name}_lib")
-                    compiler.link_shared_object(objs, out_path)
+                target = llvm.Target.from_default_triple()
+                target_machine = target.create_target_machine(opt=3)
                 
-                # Charger la DLL
-                ext = ".dll" if sys.platform == "win32" else ".so"
-                dll_path = out_path + ext
-                if not os.path.exists(dll_path):
-                     for f in os.listdir(cache_dir):
-                         if f.startswith(f"{name}_lib") and (f.endswith(".dll") or f.endswith(".so") or f.endswith(".pyd")):
-                             dll_path = os.path.join(cache_dir, f)
-                             break
-                             
-                lib = ctypes.CDLL(dll_path)
-                c_func = getattr(lib, f"launch_{name}")
+                # Optimisation native par le target machine
+                engine = llvm.create_mcjit_compiler(mod, target_machine)
+                engine.finalize_object()
+                engine.run_static_constructors()
+                
+                func_ptr = engine.get_function_address(f"launch_{name}")
+                
+                # Signature CTypes dynamique
+                # args: start(int), end(int), *inputs(float/int/ptr), *outputs(ptr)
+                argtypes = [ctypes.c_int32, ctypes.c_int32]
+                for arg in inputs:
+                    if isinstance(arg, int): argtypes.append(ctypes.c_int32)
+                    elif isinstance(arg, float): argtypes.append(ctypes.c_float)
+                    else: argtypes.append(ctypes.POINTER(ctypes.c_float))
+                for _ in outputs:
+                    argtypes.append(ctypes.POINTER(ctypes.c_float))
+                    
+                cfunc = ctypes.CFUNCTYPE(None, *argtypes)(func_ptr)
                 
                 if not hasattr(task, "_compiled_programs"):
                     task._compiled_programs = {}
-                task._compiled_programs[name] = c_func
+                task._compiled_programs[name] = (engine, cfunc)
                 
             except Exception as e:
-                logger.error(f"Erreur de compilation JIT LLVM/C++ : {e}")
+                logger.error(f"Erreur de compilation JIT LLVM : {e}")
                 return None
                 
-        c_func = task._compiled_programs[name]
+        engine, cfunc = task._compiled_programs[name]
         
-        # 2. Préparation des arguments CTypes
-        ctypes_args = [ctypes.c_int(total_size)]
-        
+        # 2. Préparation des arguments CTypes (hors start/end)
+        ctypes_args = []
         for arg in inputs:
             if isinstance(arg, int):
-                ctypes_args.append(ctypes.c_int(arg))
+                ctypes_args.append(ctypes.c_int32(arg))
             elif isinstance(arg, float):
                 ctypes_args.append(ctypes.c_float(arg))
             elif isinstance(arg, np.ndarray):
@@ -163,27 +146,29 @@ class LLVMDeviceManager:
         for out_buf in outputs:
             ctypes_args.append(out_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
             
-        # 3. Exécution native (zéro-copy)
-        c_func(*ctypes_args)
-
+        # 3. Exécution native (zéro-copy) en multi-threading
+        chunk_size = math.ceil(total_size / self.num_threads)
+        
+        def run_chunk(start):
+            end = min(start + chunk_size, total_size)
+            if start < end:
+                cfunc(start, end, *ctypes_args)
+                
+        futures = []
+        for i in range(self.num_threads):
+            start = i * chunk_size
+            futures.append(self.executor.submit(run_chunk, start))
+            
+        concurrent.futures.wait(futures)
         return None
 
     async def allocate_buffer_from_host(self, host_data, queue=None):
-        """
-        Alloue un buffer CPU Zero-Copy (NumPy ndarray en RAM).
-        """
         return np.array(host_data, copy=True)
 
     def allocate_empty_buffer(self, shape, dtype):
-        """
-        Alloue un buffer CPU vide Zero-Copy en RAM.
-        """
         return np.empty(shape, dtype=dtype)
 
     async def write_buffer(self, dest_buffer, host_data, queue=None):
-        """
-        Copie directe RAM à RAM.
-        """
         if dest_buffer.shape != host_data.shape:
             slices = tuple(slice(0, dim) for dim in host_data.shape)
             np.copyto(dest_buffer[slices], host_data)
@@ -191,9 +176,6 @@ class LLVMDeviceManager:
             np.copyto(dest_buffer, host_data)
 
     async def read_buffer(self, src_buffer, shape, dtype, out=None, queue=None):
-        """
-        Lecture directe RAM à RAM.
-        """
         if out is not None:
             if src_buffer.shape != out.shape:
                 slices = tuple(slice(0, dim) for dim in out.shape)
@@ -204,13 +186,7 @@ class LLVMDeviceManager:
         return src_buffer.copy()
 
     async def dirty_read_buffer(self, src_buffer, shape, dtype, stream=None):
-        """
-        Lecture directe Zero-Copy.
-        """
         return src_buffer.copy()
 
     def free_buffer(self, buffer_obj, shape, dtype):
-        """
-        Libère un buffer CPU (LLVM CPU JIT).
-        """
         pass

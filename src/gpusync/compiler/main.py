@@ -8,7 +8,6 @@ import numpy as np
 
 from .cuda import compile_to_cuda
 from .llvm import compile_to_llvm
-from .llvm_cuda import compile_to_llvm_cuda
 from .opencl import compile_to_opencl
 from .spirv import compile_opencl_to_spirv
 from ..utils.diagnostics import analyze_symbolic_bounds, write_structured_debug_code
@@ -54,7 +53,7 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
             logger.warning(f"Impossible de compiler en SPIR-V : {e}. Fallback vers le code source OpenCL textuel.")
 
     kernel_code_llvm = compile_to_llvm(tree, kernel_name, num_returns, constants)
-    kernel_code_ptx = compile_to_llvm_cuda(tree, kernel_name, num_returns, constants)
+    kernel_code_ptx = None
 
     if raw_cuda:
         kernel_code_cuda = raw_cuda

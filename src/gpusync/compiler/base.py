@@ -260,7 +260,12 @@ class BaseTranspiler(ast.NodeVisitor):
             self.add_line("return;")
             return
 
-        idx_expr = "get_global_id(0)" if self.backend == "opencl" else "(blockIdx.x * blockDim.x + threadIdx.x)"
+        if self.backend == "opencl":
+            idx_expr = "get_global_id(0)"
+        elif self.backend == "llvm":
+            idx_expr = "ctx"
+        else:
+            idx_expr = "(blockIdx.x * blockDim.x + threadIdx.x)"
 
         if isinstance(node.value, ast.Tuple):
             for i, elt in enumerate(node.value.elts):

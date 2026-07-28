@@ -73,12 +73,8 @@ class CUDADeviceManager:
         device_id = self.device.id
 
         if device_id not in task._compiled_programs:
-            if getattr(self, "backend", "cuda") == "llvm_cuda":
-                code = getattr(task, "kernel_code_ptx", None) or task.kernel_code_cuda
-                name = getattr(task, "kernel_name_ptx", None) or task.kernel_name_cuda
-            else:
-                code = task.kernel_code_cuda
-                name = task.kernel_name_cuda
+            code = task.kernel_code_cuda
+            name = task.kernel_name_cuda
             try:
                 module = cp.RawKernel(code, name)
             except Exception as e:

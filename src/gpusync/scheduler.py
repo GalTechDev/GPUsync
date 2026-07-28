@@ -35,7 +35,7 @@ class Scheduler:
         Si un `gpu` spécifique a été passé dans le constructeur, il est configuré directement.
         Sinon, effectue une découverte automatique filtrée par `device_name_filter`.
         """
-        lookup_backend = "cuda" if self.backend == "llvm_cuda" else self.backend
+        lookup_backend = self.backend
         manager_cls: Any = next((c for c in ALL_DEVICE_MANAGERS if getattr(c, "backend", None) == lookup_backend), None)
 
         if manager_cls is None:

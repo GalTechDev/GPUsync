@@ -14,10 +14,10 @@ def add_kernel(ctx: int, a: list, b: list) -> tuple:
     func_def = tree.body[0]
     code = compile_to_llvm(func_def, "add_kernel", num_returns=1)
 
-    assert "void add_kernel(" in code
-    assert "float* a" in code
-    assert "float* b" in code
-    assert "float* __out_0" in code
+    assert 'define void @"add_kernel"(' in code
+    assert 'float* %"a"' in code
+    assert 'float* %"b"' in code
+    assert 'float* %"__out_0"' in code
 
 
 def test_llvm_device_manager_discovery():
