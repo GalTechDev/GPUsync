@@ -85,7 +85,14 @@ class CUDADeviceManager:
             else:
                 code = task.kernel_code_cuda
                 name = task.kernel_name_cuda
-            module = cp.RawKernel(code, name)
+            try:
+                module = cp.RawKernel(code, name)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Erreur fatale lors de la compilation CUDA du kernel '{name}' !\n"
+                    f"Message d'erreur NVCC :\n{e}\n\n"
+                    f"--- CODE CUDA GENERE ---\n{code}\n--------------------------"
+                ) from e
             task._compiled_programs[device_id] = module
 
         kernel = task._compiled_programs[device_id]

@@ -79,13 +79,22 @@ class OpenCLDeviceManager:
         queue = stream if stream is not None else self.get_queue()
 
         if self.context not in task._compiled_programs:
-            if isinstance(task.kernel_code_opencl, bytes):
-                # Chargement transparent du bytecode SPIR-V
-                prg = cl.Program(self.context, task.kernel_code_opencl).build()
-            else:
-                # Compilation du code source OpenCL C textuel standard
-                build_opts = ["-cl-fast-relaxed-math", "-cl-mad-enable"]
-                prg = cl.Program(self.context, task.kernel_code_opencl).build(options=build_opts)
+            try:
+                if isinstance(task.kernel_code_opencl, bytes):
+                    # Chargement transparent du bytecode SPIR-V
+                    prg = cl.Program(self.context, task.kernel_code_opencl).build()
+                else:
+                    # Compilation du code source OpenCL C textuel standard
+                    build_opts = ["-cl-fast-relaxed-math", "-cl-mad-enable"]
+                    prg = cl.Program(self.context, task.kernel_code_opencl).build(options=build_opts)
+            except Exception as e:
+                code_str = task.kernel_code_opencl if not isinstance(task.kernel_code_opencl, bytes) else "<Binary SPIR-V>"
+                raise RuntimeError(
+                    f"Erreur fatale lors de la compilation OpenCL du kernel '{task.kernel_name_opencl}' !\n"
+                    f"Message d'erreur du driver :\n{e}\n\n"
+                    f"--- CODE OPENCL GENERE ---\n{code_str}\n--------------------------"
+                ) from e
+                
             task._compiled_programs[self.context] = getattr(prg, task.kernel_name_opencl)
 
         kernel = task._compiled_programs[self.context]
