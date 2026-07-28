@@ -342,6 +342,10 @@ class BaseTranspiler(ast.NodeVisitor):
         """Méthode abstraite interne devant être définie par les classes dérivées pour le produit matriciel."""
         raise NotImplementedError("Les sous-classes doivent implémenter _handle_matmult")
 
+    def visit_Module(self, node):
+        for stmt in node.body:
+            self.visit(stmt)
+
     def generic_visit(self, node):
         """
         Surchargé pour lever une erreur explicite si le développeur utilise une syntaxe Python
