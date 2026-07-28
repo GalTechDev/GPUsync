@@ -341,3 +341,22 @@ class BaseTranspiler(ast.NodeVisitor):
     def _handle_matmult(self, target, left, right):
         """Méthode abstraite interne devant être définie par les classes dérivées pour le produit matriciel."""
         raise NotImplementedError("Les sous-classes doivent implémenter _handle_matmult")
+
+    def generic_visit(self, node):
+        """
+        Surchargé pour lever une erreur explicite si le développeur utilise une syntaxe Python
+        non supportée par le backend GPU. Affiche également le code exact qui a provoqué l'erreur.
+        """
+        # ast.unparse n'est disponible qu'à partir de Python 3.9, 
+        # mais le projet gpusync requiert >= 3.9 selon le pyproject.toml !
+        try:
+            code_fautif = ast.unparse(node)
+        except Exception:
+            code_fautif = "<code indisponible>"
+            
+        raise SyntaxError(
+            f"Erreur de transpilation GPU : La syntaxe Python '{type(node).__name__}' "
+            f"à la ligne {getattr(node, 'lineno', 'inconnue')} n'est pas supportée par ce compilateur.\n"
+            f"Code non supporté :\n"
+            f">>> {code_fautif}"
+        )
