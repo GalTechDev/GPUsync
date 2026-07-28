@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "GalTechDev", email = "poussigalitv@gmail.com"}
+    {name = "GalTechDev", email = "poussigalitv@gmail.com"},
+    {name = "ThePhoenix78", email = "thephoenix788@gmail.com"}
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -63,7 +64,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -q --cov=gpusync"
+addopts = "-ra -q"
 testpaths = [
     "tests",
 ]
