@@ -86,34 +86,84 @@ class LLVMDeviceManager:
             inputs = raw_args
             outputs = []
 
-        # Récupérer la fonction JIT compilée d'origine
-        func = getattr(task, "func", None)
-        if func is None:
-            logger.warning("LLVM execute_kernel: task.func est None, exécution vide.")
-            return None
-
-        # Execution parallèle découpée sur le CPU
-        chunk_size = max(1, total_size // self.num_threads)
-
-        def run_chunk(start_idx, end_idx):
-            for ctx in range(start_idx, end_idx):
-                res = func(ctx, *inputs)
-                if num_returns == 1:
-                    outputs[0][ctx] = res
-                elif num_returns > 1:
-                    for r in range(num_returns):
-                        outputs[r][ctx] = res[r]
-
-        # Lance l'exécution multi-thread sur le pool LLVM
-        futures = []
-        for t in range(self.num_threads):
-            start = t * chunk_size
-            end = total_size if t == self.num_threads - 1 else (t + 1) * chunk_size
-            if start < end:
-                futures.append(self.executor.submit(run_chunk, start, end))
-
-        if not fire_and_forget:
-            concurrent.futures.wait(futures)
+        name = getattr(task, "kernel_name_llvm", getattr(task, "name", "unknown_kernel"))
+        
+        # 1. Compilation JIT du wrapper C
+        if name not in getattr(task, "_compiled_programs", {}):
+            code = getattr(task, "kernel_code_llvm", None)
+            if not code:
+                logger.error("LLVM execute_kernel: kernel_code_llvm est manquant.")
+                return None
+                
+            import tempfile, os, ctypes
+            import distutils.ccompiler
+            
+            cache_dir = os.path.join(tempfile.gettempdir(), "gpusync_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            c_path = os.path.join(cache_dir, f"{name}.c")
+            with open(c_path, "w", encoding="utf-8") as f:
+                f.write(code)
+                
+            compiler = distutils.ccompiler.new_compiler()
+            try:
+                # Ajout du flag OpenMP si MSVC, ou -fopenmp si GCC
+                # distutils gère les flags additionnels via extra_postargs
+                is_msvc = compiler.compiler_type == "msvc"
+                cflags = ["/openmp"] if is_msvc else ["-fopenmp"]
+                ldflags = ["/openmp"] if is_msvc else ["-fopenmp"]
+                
+                try:
+                    objs = compiler.compile([c_path], output_dir=cache_dir, extra_postargs=cflags)
+                    out_path = os.path.join(cache_dir, f"{name}_lib")
+                    compiler.link_shared_object(objs, out_path, extra_postargs=ldflags)
+                except Exception as comp_e:
+                    logger.warning(f"Compilation avec OpenMP a échoué ({comp_e}), tentative sans OpenMP...")
+                    # Fallback sans multi-threading matériel
+                    objs = compiler.compile([c_path], output_dir=cache_dir)
+                    out_path = os.path.join(cache_dir, f"{name}_lib")
+                    compiler.link_shared_object(objs, out_path)
+                
+                # Charger la DLL
+                import sys
+                ext = ".dll" if sys.platform == "win32" else ".so"
+                dll_path = out_path + ext
+                if not os.path.exists(dll_path):
+                     for f in os.listdir(cache_dir):
+                         if f.startswith(f"{name}_lib") and (f.endswith(".dll") or f.endswith(".so") or f.endswith(".pyd")):
+                             dll_path = os.path.join(cache_dir, f)
+                             break
+                             
+                lib = ctypes.CDLL(dll_path)
+                c_func = getattr(lib, f"launch_{name}")
+                
+                if not hasattr(task, "_compiled_programs"):
+                    task._compiled_programs = {}
+                task._compiled_programs[name] = c_func
+                
+            except Exception as e:
+                logger.error(f"Erreur de compilation JIT LLVM/C++ : {e}")
+                return None
+                
+        c_func = task._compiled_programs[name]
+        
+        # 2. Préparation des arguments CTypes
+        import ctypes
+        ctypes_args = [ctypes.c_int(total_size)]
+        
+        for arg in inputs:
+            if isinstance(arg, int):
+                ctypes_args.append(ctypes.c_int(arg))
+            elif isinstance(arg, float):
+                ctypes_args.append(ctypes.c_float(arg))
+            elif isinstance(arg, np.ndarray):
+                ctypes_args.append(arg.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+                
+        for out_buf in outputs:
+            ctypes_args.append(out_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+            
+        # 3. Exécution native (zéro-copy)
+        c_func(*ctypes_args)
 
         return None
 
