@@ -5,6 +5,7 @@ import logging
 import numpy as np
 
 from ..executor import await_event
+from gpusync.utils.imports import cp
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,6 @@ class CUDADeviceManager:
         """
         devices = []
         try:
-            # pyrefly: ignore [missing-import]
-            import cupy as cp
 
             num_devices = cp.cuda.runtime.getDeviceCount()
             for i in range(num_devices):
@@ -40,8 +39,6 @@ class CUDADeviceManager:
         return devices
 
     def __init__(self, device, num_queues: int = 16):
-        # pyrefly: ignore [missing-import]
-        import cupy as cp
 
         self.device = device
         self.backend = "cuda"
@@ -72,9 +69,6 @@ class CUDADeviceManager:
         """
         Exécute le kernel CUDA de la tâche sur ce périphérique.
         """
-        # pyrefly: ignore [missing-import]
-        import cupy as cp
-
         queue = stream if stream is not None else self.get_queue()
         device_id = self.device.id
 
@@ -153,9 +147,6 @@ class CUDADeviceManager:
         """
         Alloue un buffer CUDA (cupy.ndarray) en VRAM et y copie les données de l'hôte.
         """
-        # pyrefly: ignore [missing-import]
-        import cupy as cp
-
         with self.device:
             gpu_arr = cp.asarray(host_data)
         return gpu_arr
@@ -164,9 +155,6 @@ class CUDADeviceManager:
         """
         Alloue un buffer CUDA (cupy.ndarray) vide en VRAM.
         """
-        # pyrefly: ignore [missing-import]
-        import cupy as cp
-
         with self.device:
             gpu_arr = cp.empty(shape, dtype=dtype)
         return gpu_arr
@@ -206,9 +194,6 @@ class CUDADeviceManager:
         """
         Lecture rapide du buffer (Page-Locked DMA) sans affecter la queue principale.
         """
-        # pyrefly: ignore [missing-import]
-        import cupy as cp
-
         with self.device:
             read_stream = stream if stream is not None else cp.cuda.Stream(non_blocking=True)
             host_pinned = cp.cuda.alloc_pinned_memory(src_buffer.nbytes)

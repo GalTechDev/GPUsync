@@ -1,7 +1,10 @@
-# pyrefly: ignore [missing-import]
 import logging
 from contextlib import contextmanager
 from typing import Any, List
+
+from .devices import ALL_DEVICE_MANAGERS
+from .utils.devices import list_gpus
+from gpusync.utils.imports import cp, cl
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +35,6 @@ class Scheduler:
         Si un `gpu` spécifique a été passé dans le constructeur, il est configuré directement.
         Sinon, effectue une découverte automatique filtrée par `device_name_filter`.
         """
-        from .devices import ALL_DEVICE_MANAGERS
-        from typing import Any
-
         lookup_backend = "cuda" if self.backend == "llvm_cuda" else self.backend
         manager_cls: Any = next((c for c in ALL_DEVICE_MANAGERS if getattr(c, "backend", None) == lookup_backend), None)
 
@@ -61,9 +61,6 @@ class Scheduler:
                     )
 
             if lookup_backend == "cuda" and isinstance(raw_device, int):
-                # pyrefly: ignore [missing-import]
-                import cupy as cp
-
                 raw_device = cp.cuda.Device(raw_device)
 
             manager = manager_cls(raw_device, num_queues=self.num_queues_per_device)
@@ -124,8 +121,6 @@ class SwarmScheduler:
         self._next_device_idx = 0
 
     def initialize(self):
-        from .devices import ALL_DEVICE_MANAGERS
-
         # 1. Si une liste spécifique de périphériques est fournie
         if self.gpus is not None:
             for gpu in self.gpus:
@@ -135,9 +130,6 @@ class SwarmScheduler:
                 # Détection automatique du backend si non spécifié (heuristic)
                 if backend is None:
                     try:
-                        # pyrefly: ignore [missing-import]
-                        import pyopencl as cl
-
                         if isinstance(raw_device, cl.Device):
                             backend = "opencl"
                     except Exception:
@@ -153,9 +145,6 @@ class SwarmScheduler:
 
                 try:
                     if backend == "cuda" and isinstance(raw_device, int):
-                        # pyrefly: ignore [missing-import]
-                        import cupy as cp
-
                         raw_device = cp.cuda.Device(raw_device)
                     manager = manager_cls(raw_device, num_queues=self.num_queues_per_device)
                     self.devices_managers.append(manager)
@@ -226,8 +215,6 @@ def get_default_scheduler() -> Scheduler:
     """
     global _default_scheduler
     if _default_scheduler is None:
-        from .utils.devices import list_gpus
-
         gpus = list_gpus()
         if not gpus:
             raise RuntimeError("Aucun GPU disponible pour initialiser le Scheduler par défaut.")
@@ -245,8 +232,6 @@ def use_gpu(backend: str = "opencl", gpu_idx: int = 0):
         with use_gpu(backend="opencl") as sched:
             res = mon_kernel(data)
     """
-    from .utils.devices import list_gpus
-
     gpus = list_gpus()
     if not gpus:
         raise RuntimeError("Aucun GPU disponible.")

@@ -1,5 +1,8 @@
 import logging
 
+from gpusync.devices import ALL_DEVICE_MANAGERS
+from gpusync.utils.imports import cp
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,8 +27,6 @@ def list_gpus():
     disponibles sur la machine en interrogeant dynamiquement chaque manager
     enregistré dans ALL_DEVICE_MANAGERS.
     """
-    from gpusync.devices import ALL_DEVICE_MANAGERS
-
     gpus = []
 
     for manager_cls in ALL_DEVICE_MANAGERS:
@@ -36,8 +37,6 @@ def list_gpus():
                 name = dev.name
             else:
                 try:
-                    import cupy as cp
-
                     props = cp.cuda.runtime.getDeviceProperties(dev.id)
                     name = props["name"].decode("utf-8")
                 except Exception:

@@ -5,6 +5,12 @@ import logging
 import llvmlite.binding as llvm
 import numpy as np
 
+import tempfile
+import os
+import ctypes
+import sys
+import distutils.ccompiler
+
 logger = logging.getLogger(__name__)
 
 # Initialisation unique du sous-système LLVM JIT
@@ -95,9 +101,6 @@ class LLVMDeviceManager:
                 logger.error("LLVM execute_kernel: kernel_code_llvm est manquant.")
                 return None
                 
-            import tempfile, os, ctypes
-            import distutils.ccompiler
-            
             cache_dir = os.path.join(tempfile.gettempdir(), "gpusync_cache")
             os.makedirs(cache_dir, exist_ok=True)
             
@@ -125,7 +128,6 @@ class LLVMDeviceManager:
                     compiler.link_shared_object(objs, out_path)
                 
                 # Charger la DLL
-                import sys
                 ext = ".dll" if sys.platform == "win32" else ".so"
                 dll_path = out_path + ext
                 if not os.path.exists(dll_path):
@@ -148,7 +150,6 @@ class LLVMDeviceManager:
         c_func = task._compiled_programs[name]
         
         # 2. Préparation des arguments CTypes
-        import ctypes
         ctypes_args = [ctypes.c_int(total_size)]
         
         for arg in inputs:

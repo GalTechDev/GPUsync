@@ -1,8 +1,10 @@
 import ast
 import asyncio
 import inspect
+import textwrap
 
 from .memory import AsyncBuffer
+from .utils.bg_loop import auto_sync
 
 
 class PipelineNode:
@@ -104,8 +106,6 @@ class MultiDeviceScheduler:
 
 def gpusync_pipeline(multi_scheduler: MultiDeviceScheduler):
     def decorator(func):
-        import textwrap
-
         source = inspect.getsource(func)
         source = textwrap.dedent(source)
         tree = ast.parse(source)
@@ -136,8 +136,6 @@ def gpusync_pipeline(multi_scheduler: MultiDeviceScheduler):
                 # (car en GPU, un pointeur argument est potentiellement modifié in-place)
                 if deps_A.intersection(deps_B):
                     node_A.dependencies.append(node_B)
-
-        from .utils.bg_loop import auto_sync
 
         @auto_sync
         async def wrapper(*args, **kwargs):

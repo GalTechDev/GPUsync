@@ -3,7 +3,7 @@ import logging
 import os
 
 # pyrefly: ignore [missing-import]
-
+from gpusync.utils.imports import sp, AbsentModule
 logger = logging.getLogger(__name__)
 
 
@@ -14,10 +14,7 @@ def analyze_symbolic_bounds(tree, kernel_name):
 
     Retourne une chaîne de caractères documentant l'analyse symbolique.
     """
-    try:
-        # pyrefly: ignore [missing-import]
-        import sympy as sp
-    except ImportError:
+    if isinstance(sp, AbsentModule):
         return "SymPy non installé. Analyse symbolique des dimensions ignorée."
 
     func_def = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)), None)
@@ -94,7 +91,6 @@ def _ast_to_sympy_expr(node, ctx_name):
     Traduit récursivement un nœud AST numérique ou arithmétique simple en expression SymPy.
     """
     # pyrefly: ignore [missing-import]
-    import sympy as sp
 
     if isinstance(node, ast.Name):
         return sp.Symbol(node.id, integer=True)

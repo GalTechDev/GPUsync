@@ -10,6 +10,15 @@ from .cuda import compile_to_cuda
 from .llvm import compile_to_llvm
 from .llvm_cuda import compile_to_llvm_cuda
 from .opencl import compile_to_opencl
+from .spirv import compile_opencl_to_spirv
+from ..utils.diagnostics import analyze_symbolic_bounds, write_structured_debug_code
+import copy
+import math
+import asyncio
+from ..memory import AsyncBuffer
+from ..task import AsyncTask
+from ..utils.bg_loop import auto_sync
+from ..scheduler import get_default_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +49,6 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
 
     if compile_spirv:
         try:
-            from .spirv import compile_opencl_to_spirv
-
             kernel_code_opencl = compile_opencl_to_spirv(opencl_source_text, kernel_name)
         except Exception as e:
             logger.warning(f"Impossible de compiler en SPIR-V : {e}. Fallback vers le code source OpenCL textuel.")
@@ -58,8 +65,6 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
 
     # Diagnostic & Génération de code structurée de débug/cache (non bloquant)
     try:
-        from ..utils.diagnostics import analyze_symbolic_bounds, write_structured_debug_code
-
         sympy_report = analyze_symbolic_bounds(tree, kernel_name)
         write_structured_debug_code(
             kernel_name, opencl_source_text, kernel_code_cuda, kernel_code_llvm, kernel_code_ptx, sympy_report
@@ -68,9 +73,6 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
         pass
 
     # Compile la fonction Python originale avec substitution des constantes pour le fallback LLVM CPU
-    import copy
-    import math
-
     py_tree = copy.deepcopy(tree)
 
     class ConstantSubstituter(ast.NodeTransformer):
@@ -110,10 +112,6 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
         py_func = None
 
     # Imports dynamiques locaux pour éviter les cycles de dépendances de packages
-    from ..memory import AsyncBuffer
-    from ..task import AsyncTask
-    from ..utils.bg_loop import auto_sync
-
     task = AsyncTask(
         kernel_code_opencl=kernel_code_opencl,
         kernel_name_opencl=kernel_name,
@@ -144,8 +142,6 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
         sur la queue, le stream GPU ou le moteur JIT CPU LLVM.
         """
         if scheduler is None:
-            from ..scheduler import get_default_scheduler
-
             scheduler = get_default_scheduler()
 
         # Coercion automatique des arguments numpy d'entrée vers des AsyncBuffer GPU
@@ -190,11 +186,7 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
         Accepte aussi bien un tableau NumPy qu'un Générateur / Itérable (ex: flux de lecture disque NVMe).
         """
         if scheduler is None:
-            from ..scheduler import get_default_scheduler
-
             scheduler = get_default_scheduler()
-        import asyncio
-        import inspect
 
         is_gen = (
             inspect.isgenerator(host_data)

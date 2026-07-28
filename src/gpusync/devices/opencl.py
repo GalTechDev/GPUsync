@@ -3,9 +3,9 @@ import logging
 
 # pyrefly: ignore [missing-import]
 import numpy as np
-import pyopencl as cl
 
 from ..executor import await_event
+from gpusync.utils.imports import cl
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,6 @@ class OpenCLDeviceManager:
         """
         devices = []
         try:
-            # pyrefly: ignore [missing-import]
-            import pyopencl as cl
 
             platforms = cl.get_platforms()
             all_devs = []

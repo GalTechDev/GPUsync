@@ -2,6 +2,8 @@ import numpy as np
 from typing import Any
 
 from .utils.bg_loop import auto_sync
+from .scheduler import get_default_scheduler
+from gpusync.utils.imports import cp
 
 
 class AsyncBuffer:
@@ -41,8 +43,6 @@ class AsyncBuffer:
             scheduler = None
 
         if scheduler is None:
-            from .scheduler import get_default_scheduler
-
             scheduler = get_default_scheduler()
 
         if hasattr(scheduler, "get_queue"):
@@ -73,8 +73,6 @@ class AsyncBuffer:
             scheduler = None
 
         if scheduler is None:
-            from .scheduler import get_default_scheduler
-
             scheduler = get_default_scheduler()
 
         if hasattr(scheduler, "get_queue"):
@@ -155,9 +153,6 @@ class AsyncBuffer:
         backend = "cuda"
 
         try:
-            # pyrefly: ignore [missing-import]
-            import cupy as cp
-
             if isinstance(dlpack_obj, cp.ndarray):
                 buffer_obj = dlpack_obj
             else:

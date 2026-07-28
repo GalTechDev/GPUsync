@@ -1,6 +1,8 @@
 import asyncio
 import logging
 
+from gpusync.utils.imports import cl
+
 # pyrefly: ignore [missing-import]
 
 logger = logging.getLogger(__name__)
@@ -36,9 +38,6 @@ async def await_event(event_or_stream):
         event = event_or_stream
 
         def _event_callback(status):
-            # pyrefly: ignore [missing-import]
-            import pyopencl as cl
-
             if status == cl.command_execution_status.COMPLETE:
                 loop.call_soon_threadsafe(future.set_result, event)
             else:
@@ -46,14 +45,8 @@ async def await_event(event_or_stream):
                 loop.call_soon_threadsafe(future.set_exception, err)
 
         try:
-            # pyrefly: ignore [missing-import]
-            import pyopencl as cl
-
             event.set_callback(cl.command_execution_status.COMPLETE, _event_callback)
         except Exception as e:
-            # pyrefly: ignore [missing-import]
-            import pyopencl as cl
-
             logger.warning(f"Impossible d'utiliser set_callback OpenCL, fallback en polling : {e}")
             while event.command_execution_status != cl.command_execution_status.COMPLETE:
                 if event.command_execution_status < 0:
