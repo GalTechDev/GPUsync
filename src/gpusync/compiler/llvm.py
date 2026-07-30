@@ -196,6 +196,24 @@ class LLVMIRTranspiler(ast.NodeVisitor):
                 val = self.builder.sitofp(val, self.f32)
             self.builder.store(val, gep)
 
+    def visit_AnnAssign(self, node):
+        if not node.value:
+            return
+        val = self.visit(node.value)
+        target = node.target
+        
+        if isinstance(target, ast.Name):
+            ptr = self.get_symbol_ptr(target.id, val.type)
+            if ptr.type.pointee == self.f32 and val.type == self.i32:
+                val = self.builder.sitofp(val, self.f32)
+            self.builder.store(val, ptr)
+        elif isinstance(target, ast.Subscript):
+            target.ctx = ast.Store()
+            gep = self.visit(target)
+            if val.type == self.i32:
+                val = self.builder.sitofp(val, self.f32)
+            self.builder.store(val, gep)
+
     def visit_AugAssign(self, node):
         target_load = ast.Name(id=node.target.id, ctx=ast.Load()) if isinstance(node.target, ast.Name) else node.target
         binop = ast.BinOp(left=target_load, op=node.op, right=node.value)

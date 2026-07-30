@@ -52,7 +52,11 @@ def _compile_and_wrap_kernel(tree, kernel_name, raw_cuda=None, constants=None, c
         except Exception as e:
             logger.warning(f"Impossible de compiler en SPIR-V : {e}. Fallback vers le code source OpenCL textuel.")
 
-    kernel_code_llvm = compile_to_llvm(tree, kernel_name, num_returns, constants)
+    try:
+        kernel_code_llvm = compile_to_llvm(tree, kernel_name, num_returns, constants)
+    except Exception as e:
+        logger.warning(f"Impossible de pré-compiler en LLVM : {e}. Le backend LLVM (simulation CPU) ne sera pas disponible.")
+        kernel_code_llvm = None
     kernel_code_ptx = None
 
     if raw_cuda:

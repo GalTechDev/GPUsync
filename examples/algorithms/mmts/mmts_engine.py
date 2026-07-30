@@ -22,8 +22,9 @@ from sklearn.cluster import KMeans
 # Ajout des chemins de recherche système pour importer gpusync
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# Importation de la configuration
-from config import *
+# Constantes locales génériques (le moteur est aveugle sur les données métiers)
+DEFAULT_W = 5
+MAX_ITERATIONS = 5
 
 # Variables globales pour GPUsync
 _gpusync_sched = None
@@ -224,7 +225,8 @@ class XmeansTS:
     Classe pour l'algorithme X-means avec DTW pour le clustering de séries temporelles
     """
     
-    def __init__(self, data, numclust, file, listID, coeffRap, representative_mode="euclidean", scheduler=None):
+    def __init__(self, data, numclust, file, listID, coeffRap, id_column="id", representative_mode="euclidean", scheduler=None):
+        self.id_column = id_column
         """
         Initialisation de la classe XmeansTS
         
@@ -775,7 +777,7 @@ class XmeansTS:
             nbInstanceMinim: Nombre minimum d'instances par cluster
         """
         # Récupérer l'array des IDs pour éviter l'indexation lente de pandas .iloc dans la boucle
-        id_array = listID[ID_COLUMN].values
+        id_array = listID[self.id_column].values
         for i in assignments:
             if len(assignments[i]) >= nbInstanceMinim:
                 ids = []
@@ -807,7 +809,7 @@ class XmeansTS:
             Liste mise à jour des IDs valides
         """
         # Dictionnaire pour mapper instantanément un ID vers son index de ligne (évite np.where dans la boucle)
-        id_to_idx = {val: idx for idx, val in enumerate(self.dfListID[ID_COLUMN].values)}
+        id_to_idx = {val: idx for idx, val in enumerate(self.dfListID[self.id_column].values)}
         
         for key in assignmentsTemp:
             self.assignments[nbClustTempp] = assignmentsTemp[key]
@@ -850,14 +852,14 @@ class XmeansTS:
                                 val_id = int(val_id)
                         except Exception:
                             pass
-                        rows.append({ID_COLUMN: val_id, 'MEAS': float(LBVal)})
+                        rows.append({self.id_column: val_id, 'MEAS': float(LBVal)})
                 
-                MatDist = pd.DataFrame(rows, columns=[ID_COLUMN, 'MEAS'])
+                MatDist = pd.DataFrame(rows, columns=[self.id_column, 'MEAS'])
             
             nbClustTempp += 1
         return listeIDOk
     
-    def updateVar(self, listFilterID, colID=ID_COLUMN, ranges=None):
+    def updateVar(self, listFilterID, colID=None, ranges=None):
         """
         Met à jour les variables
         
@@ -869,6 +871,8 @@ class XmeansTS:
         Returns:
             Données et DataFrame mis à jour
         """
+        if colID is None:
+            colID = self.id_column
         dfListIDTemp = self.dfListID[~self.dfListID[colID].isin(listFilterID)]
         data = []
         for i in range(len(dfListIDTemp)):
@@ -1018,7 +1022,7 @@ class XmeansTS:
             
             for ctr in range(len(self.assignments)):
                 for elemid in self.assignments[ctr]:
-                    dfListIDTemp.loc[dfListIDTemp[ID_COLUMN] == elemid, "cluster"] = ctr
+                    dfListIDTemp.loc[dfListIDTemp[self.id_column] == elemid, "cluster"] = ctr
             
             return dfListIDTemp
     
@@ -1040,7 +1044,7 @@ class XmeansTS:
         
         MatriceDist = pd.DataFrame()
         if not self.centroids or self.data is None or len(self.data) == 0:
-            MatriceDist[ID_COLUMN] = self.dfListID[ID_COLUMN]
+            MatriceDist[self.id_column] = self.dfListID[self.id_column]
             return MatriceDist
             
         keys_list = list(self.centroids.keys())
@@ -1051,11 +1055,137 @@ class XmeansTS:
         for c_idx, c_key in enumerate(keys_list):
             MatriceDist[f"{c_key}_{tabEnviIndice}"] = dist_mat[:, c_idx]
             
-        MatriceDist[ID_COLUMN] = self.dfListID[ID_COLUMN]
+        MatriceDist[self.id_column] = self.dfListID[self.id_column]
         print(f"DEBUG getLastMat - Colonnes créées: {list(MatriceDist.columns)}")
         return MatriceDist
     
     def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
+        """
+        Définit les coefficients pour l'analyse
+        
+        Args:
+            listID: Liste des IDs
+            data: Données
+            num_clust: Nombre de clusters
+            nbInstanceMinim: Nombre minimum d'instances par cluster
+            w: Paramètre de fenêtre pour DTW
+            
+        Returns:
+            Coefficients calculés
+        """
+        # À implémenter si nécessaire
+        return [1.0]  # Valeur par défaut
+
+
+def defineCoeff(self, listID, data, num_clust, nbInstanceMinim, w=1):
         """
         Définit les coefficients pour l'analyse
         
@@ -1078,8 +1208,9 @@ class MultiXmeansTS:
     Classe pour l'analyse multi-variable avec X-means
     """
     
-    def __init__(self):
+    def __init__(self, id_column="id"):
         """Initialisation de la classe MultiXmeansTS"""
+        self.id_column = id_column
         self.XmeansTSVars = [XmeansTS]
         self.centroids = {}
         self.assignmentsMulti = {}
@@ -1088,7 +1219,7 @@ class MultiXmeansTS:
         self.max_split_depth = 5
 
     def _assign_multi_cluster(self, dft, assignmentsOk, indiceSd, reason, depth=0):
-        ids = list(dft[ID_COLUMN])
+        ids = list(dft[self.id_column])
         assignmentsOk[indiceSd] = ids
         self.split_decisions.append({
             "cluster_id": int(indiceSd),
@@ -1166,8 +1297,8 @@ class MultiXmeansTS:
         """K-means multi with controlled recursive subdivision on the final DTW matrix."""
         columns = [str(col) for col in columns]
         print(f"DEBUG KmeanMutiShapeAdaptive - len(dft): {len(dft)}, nbClust: {nbClust}, depth: {depth}")
-        if ID_COLUMN not in dft.columns:
-            raise KeyError(ID_COLUMN)
+        if self.id_column not in dft.columns:
+            raise KeyError(self.id_column)
         if not columns:
             return self._assign_multi_cluster(dft, assignmentsOk, indiceSd, "no_feature_columns", depth)
         if depth >= self.max_split_depth:
@@ -1234,7 +1365,7 @@ class MultiXmeansTS:
             for clust in dftmp['Cluster'].unique():
                 retireId = True
                 dftTemp = dftmp[dftmp['Cluster'] == clust]
-                IdTemp = list(dftTemp[ID_COLUMN])
+                IdTemp = list(dftTemp[self.id_column])
                 
                 for tabEnviIndice in self.files:
                     # Construire le chemin du fichier
@@ -1290,8 +1421,16 @@ class MultiXmeansTS:
                         xlsQualEnvi = pd.ExcelFile(file_path)
                         dataTemp = xlsQualEnvi.parse(0)
                     
-                    dataTemp = dataTemp[dataTemp[ID_COLUMN].isin(IdTemp)]
-                    dataTemp1 = dataTemp.drop([ID_COLUMN], axis=1)
+                    local_id_column = self.id_column
+                    if local_id_column not in dataTemp.columns:
+                        if 'id' in dataTemp.columns:
+                            local_id_column = 'id'
+                        elif 'elev_id' in dataTemp.columns:
+                            local_id_column = 'elev_id'
+                        else:
+                            local_id_column = dataTemp.columns[0]
+                    dataTemp = dataTemp[dataTemp[local_id_column].isin(IdTemp)]
+                    dataTemp1 = dataTemp.drop([local_id_column], axis=1)
                     
                     listpointCentr = []
                     listpoint = []
@@ -1341,11 +1480,11 @@ class MultiXmeansTS:
                     indiceSd = indiceSd + 1
         else:
             print(f"DEBUG - Pas assez d'individus ({len(dft)} <= {nbClust*2}), création d'un seul cluster")
-            assignmentsOk[indiceSd] = list(dft[ID_COLUMN])
+            assignmentsOk[indiceSd] = list(dft[self.id_column])
             indiceSd = indiceSd + 1
 
 
-def defineCoeff(data, num_clust, num_iter, listDataFrame, LastnbClust, tabEnviIndice, assignmentsResult, centroidsCompare, distCompare, data22, listeIDOk1, nbInstanceMinim, w=1, scheduler=None):
+def defineCoeff(data, num_clust, num_iter, listDataFrame, LastnbClust, tabEnviIndice, assignmentsResult, centroidsCompare, distCompare, data22, listeIDOk1, nbInstanceMinim, w=1, id_column="id", scheduler=None):
     """
     Fonction externe optimisée GPU pour définir les coefficients de l'analyse.
     """
@@ -1397,8 +1536,8 @@ class XmeansTS_MultiPopulation(XmeansTS):
     Evalue P populations de centroïdes en parallèle sur le GPU à chaque étape
     pour éviter les minima locaux et garantir la meilleure qualité de partitionnement.
     """
-    def __init__(self, data, numclust, file, listID, coeffRap, representative_mode="euclidean", scheduler=None, P=5):
-        super().__init__(data, numclust, file, listID, coeffRap, representative_mode, scheduler)
+    def __init__(self, data, numclust, file, listID, coeffRap, id_column="id", representative_mode="euclidean", scheduler=None, P=5):
+        super().__init__(data, numclust, file, listID, coeffRap, id_column=id_column, representative_mode=representative_mode, scheduler=scheduler)
         self.P = P  # Nombre de populations à évaluer en parallèle
 
     def k_means_clust(self, data, num_clust, num_iter, listDataFrame, LastnbClust, tabEnviIndice, distCompare, listeIDOk1, nbInstanceMinim, w):
@@ -1521,11 +1660,12 @@ class XmeansTS_MultiPopulation(XmeansTS):
             dfListIDTemp["cluster"] = -1
             for ctr in range(len(self.assignments)):
                 for elemid in self.assignments[ctr]:
-                    dfListIDTemp.loc[dfListIDTemp[ID_COLUMN] == elemid, "cluster"] = ctr
+                    dfListIDTemp.loc[dfListIDTemp[self.id_column] == elemid, "cluster"] = ctr
             return dfListIDTemp
 
 
 if __name__ == "__main__":
+    id_column = "elev_id"
     print("=" * 80)
     print(" EXECUTION COMPLETE DU PIPELINE MMTS SUR LE DOSSIER DATASET (GPU ONLY)")
     print("=" * 80)
@@ -1563,12 +1703,12 @@ if __name__ == "__main__":
             try:
                 if os.path.getsize(xlsx_path) > 1000:
                     df_var = pd.read_excel(xlsx_path)
-                    if ID_COLUMN in df_var.columns:
-                        cols_data = [c for c in df_var.columns if c != ID_COLUMN and not str(c).startswith('Unnamed')]
+                    if id_column in df_var.columns:
+                        cols_data = [c for c in df_var.columns if c != id_column and not str(c).startswith('Unnamed')]
                         if cols_data:
                             # Reconstruire un DataFrame propre avec elev_id en toute première colonne (A1)
-                            df_clean = df_var[[ID_COLUMN] + cols_data].copy()
-                            df_clean.columns = [ID_COLUMN] + [str(i) for i in range(len(cols_data))]
+                            df_clean = df_var[[id_column] + cols_data].copy()
+                            df_clean.columns = [id_column] + [str(i) for i in range(len(cols_data))]
                             # Enregistrer au format CSV
                             df_clean.to_csv(csv_path, index=False)
                             print(f"    - [REGEN] {filename} -> {csv_filename} (Nettoyé)")
@@ -1613,8 +1753,8 @@ if __name__ == "__main__":
         if len(df_clean) > limit_n:
             df_clean = df_clean.head(limit_n)
             
-        data_matrix = df_clean.drop([ID_COLUMN], axis=1).values.astype(np.float32)
-        listID_var = pd.DataFrame({ID_COLUMN: df_clean[ID_COLUMN]})
+        data_matrix = df_clean.drop([id_column], axis=1).values.astype(np.float32)
+        listID_var = pd.DataFrame({id_column: df_clean[id_column]})
         
         # Calculer le coefficient d'entropie de cette variable
         print(f"    - Calcul du coefficient d'entropie...")
@@ -1666,7 +1806,7 @@ if __name__ == "__main__":
         if merged_df is None:
             merged_df = mat_dist
         else:
-            merged_df = pd.merge(merged_df, mat_dist, on=ID_COLUMN, how="inner")
+            merged_df = pd.merge(merged_df, mat_dist, on=id_column, how="inner")
             
     print(f"    -> Dimension du dataset fusionné : {merged_df.shape}")
     
@@ -1679,7 +1819,7 @@ if __name__ == "__main__":
     multi.file_prefix = "RomaneDataSet_"
     
     assignmentsOk = {}
-    cols_to_cluster = [c for c in merged_df.columns if c != ID_COLUMN]
+    cols_to_cluster = [c for c in merged_df.columns if c != id_column]
     
     multi.KmeanMutiShape(
         nbClust=3,
