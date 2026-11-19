@@ -536,17 +536,14 @@ impl Lowerer<'_> {
                 }
                 let cur = self.locals[i].ty;
                 let vt = v.ty();
-                // Python est dynamique : une locale entière qui reçoit un flottant devient flottante.
-                if !v.is_lit() && vt != cur && cur.is_int() && vt.is_float() {
-                    self.hints.insert(name.to_string(), vt);
-                    self.restart = true;
-                } else if self.weak[i]
-                    && !v.is_lit()
-                    && vt != cur
+                // Python est dynamique : une locale entière qui reçoit un flottant devient
+                // flottante ; une locale née d'un littéral prend le type de la valeur suivante.
+                let int_to_float = cur.is_int() && vt.is_float();
+                let weak_retype = self.weak[i]
                     && vt.is_numeric()
                     && cur.is_numeric()
-                    && !(cur.is_float() && vt.is_int())
-                {
+                    && !(cur.is_float() && vt.is_int());
+                if !v.is_lit() && vt != cur && (int_to_float || weak_retype) {
                     self.hints.insert(name.to_string(), vt);
                     self.restart = true;
                 } else if matches!(v, Val::Lit(Lit::Float(_))) && cur.is_int() {

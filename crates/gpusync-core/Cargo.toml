@@ -7,3 +7,15 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+gpusync-backend-opencl.workspace = true
+gpusync-backend-wgpu.workspace = true
+gpusync-codegen.workspace = true
+gpusync-frontend.workspace = true
+gpusync-ir.workspace = true
+gpusync-runtime.workspace = true
+
+[dev-dependencies]
+gpusync-backend-opencl.workspace = true
+gpusync-backend-wgpu.workspace = true
+gpusync-ir.workspace = true
+gpusync-runtime.workspace = true

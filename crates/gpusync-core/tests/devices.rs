@@ -1,0 +1,98 @@
+//! Test différentiel : le kernel `sample` (vrai AST Python, tests/fixtures/sample.json) est exécuté
+//! sur chaque périphérique présent et comparé à l'interpréteur de référence.
+
+use gpusync_core::{Device, Input, compile, launch, parse};
+use gpusync_ir::{Const, Scalar};
+use gpusync_runtime::Backend;
+
+const SAMPLE: &str = include_str!("fixtures/sample.json");
+
+fn f32s(b: &[u8]) -> Vec<f32> {
+    b.chunks(4)
+        .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+fn all_device_ids() -> Vec<String> {
+    let mut ids = vec!["cpu:0".to_string()];
+    for b in [
+        &gpusync_backend_wgpu::WgpuBackend as &dyn Backend,
+        &gpusync_backend_opencl::OpenClBackend,
+    ] {
+        if let Ok(devs) = b.devices() {
+            ids.extend(devs.iter().map(|d| d.id()));
+        }
+    }
+    ids
+}
+
+#[test]
+fn frontend_types_des_locales() {
+    let k = parse(SAMPLE).unwrap();
+    let ty = |n: &str| k.locals.iter().find(|l| l.name == n).unwrap().ty;
+    assert_eq!(ty("acc"), Scalar::F32, "acc = 0 puis acc += x*m → f32");
+    assert_eq!(ty("i"), Scalar::I32);
+    assert_eq!(ty("y"), Scalar::F32);
+    assert!(!k.requirements().f64, "aucune promotion implicite vers f64");
+}
+
+#[test]
+fn meme_resultat_sur_tous_les_peripheriques() {
+    let k = parse(SAMPLE).unwrap();
+    let n = 10_007; // pas un multiple de la taille de groupe
+    let x: Vec<f32> = (0..n).map(|i| -5.0 + 10.0 * i as f32 / n as f32).collect();
+    let kk: Vec<i32> = (0..n as i32).map(|i| i - n as i32 / 2).collect();
+    let xb: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let kb: Vec<u8> = kk.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let run = |id: &str| -> Vec<f32> {
+        let dev = Device::open(id).unwrap();
+        let c = compile(&dev, &k).unwrap_or_else(|e| panic!("{id} : {e}"));
+        let mut out = vec![0u8; n * 4];
+        unsafe {
+            let arr = launch(
+                &dev,
+                &c,
+                &[
+                    Input::Host {
+                        ptr: xb.as_ptr(),
+                        bytes: xb.len(),
+                    },
+                    Input::Host {
+                        ptr: kb.as_ptr(),
+                        bytes: kb.len(),
+                    },
+                ],
+                &[Const::F32(0.5)],
+                n,
+                Some(out.as_mut_ptr()),
+            )
+            .unwrap_or_else(|e| panic!("{id} : {e}"));
+            if dev.zero_copy() {
+                assert_eq!(
+                    arr.host_ptr(),
+                    Some(out.as_mut_ptr()),
+                    "{id} : la sortie devrait être en zéro-copie"
+                );
+            }
+            arr.read_into(out.as_mut_ptr()).unwrap();
+        }
+        f32s(&out)
+    };
+    let reference = run("cpu:0");
+    for id in all_device_ids().iter().skip(1) {
+        let got = run(id);
+        let mut worst = 0f32;
+        for (i, (a, b)) in got.iter().zip(&reference).enumerate() {
+            let tol = 1e-5 * b.abs().max(1.0);
+            let d = (a - b).abs();
+            worst = worst.max(d / b.abs().max(1.0));
+            assert!(
+                d <= tol,
+                "{id} : élément {i} (x = {}, k = {}) : {a} au lieu de {b}",
+                x[i],
+                kk[i]
+            );
+        }
+        eprintln!("{id:<10} OK — écart relatif max {worst:.2e}");
+    }
+}

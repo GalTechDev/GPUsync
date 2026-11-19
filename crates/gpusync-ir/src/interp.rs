@@ -21,7 +21,11 @@ enum Flow {
 /// Exécute `kernel` sur `n` éléments ; `out` reçoit `n` valeurs du type de sortie.
 pub fn run(kernel: &Kernel, n: usize, args: &[Arg], out: &mut [u8]) -> Result<(), String> {
     if args.len() != kernel.params.len() {
-        return Err(format!("{} argument(s) attendu(s), {} reçu(s)", kernel.params.len(), args.len()));
+        return Err(format!(
+            "{} argument(s) attendu(s), {} reçu(s)",
+            kernel.params.len(),
+            args.len()
+        ));
     }
     for (p, a) in kernel.params.iter().zip(args) {
         if let (ParamKind::Array, Arg::Array(bytes)) = (p.kind, a) {
@@ -36,10 +40,20 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], out: &mut [u8]) -> Result<()
     }
     let mut locals: Vec<Const> = kernel.locals.iter().map(|l| zero(l.ty)).collect();
     for i in 0..n {
-        let mut st = State { kernel, args, i, locals: &mut locals };
+        let mut st = State {
+            kernel,
+            args,
+            i,
+            locals: &mut locals,
+        };
         let value = match st.block(&kernel.body)? {
             Flow::Return(v) => v,
-            _ => return Err(format!("le kernel '{}' s'est terminé sans return", kernel.name)),
+            _ => {
+                return Err(format!(
+                    "le kernel '{}' s'est terminé sans return",
+                    kernel.name
+                ));
+            }
         };
         store(value, &mut out[i * osize..(i + 1) * osize]);
     }
@@ -70,15 +84,30 @@ impl State<'_, '_> {
                 self.locals[*local] = self.eval(value)?;
                 Ok(Flow::Normal)
             }
-            Stmt::If { cond, then, otherwise } => {
-                if as_bool(self.eval(cond)?) { self.block(then) } else { self.block(otherwise) }
+            Stmt::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                if as_bool(self.eval(cond)?) {
+                    self.block(then)
+                } else {
+                    self.block(otherwise)
+                }
             }
-            Stmt::For { var, start, stop, step, body } => {
+            Stmt::For {
+                var,
+                start,
+                stop,
+                step,
+                body,
+            } => {
                 let (start, stop, step) = (self.eval(start)?, self.eval(stop)?, self.eval(step)?);
                 self.locals[*var] = start;
                 loop {
                     let v = self.locals[*var];
-                    let go = (gt(step, zero(step.ty())) && lt(v, stop)) || (lt(step, zero(step.ty())) && gt(v, stop));
+                    let go = (gt(step, zero(step.ty())) && lt(v, stop))
+                        || (lt(step, zero(step.ty())) && gt(v, stop));
                     if !go {
                         break;
                     }
@@ -154,7 +183,10 @@ impl State<'_, '_> {
                 if as_bool(c) { a } else { b }
             }
             ExprKind::Call(f, args) => {
-                let vals = args.iter().map(|a| self.eval(a)).collect::<Result<Vec<_>, _>>()?;
+                let vals = args
+                    .iter()
+                    .map(|a| self.eval(a))
+                    .collect::<Result<Vec<_>, _>>()?;
                 intrinsic(*f, &vals)
             }
             ExprKind::Cast(a) => convert(self.eval(a)?, e.ty),
@@ -361,13 +393,33 @@ mod tests {
         Kernel {
             name: "k".into(),
             params: vec![
-                Param { name: "x".into(), kind: ParamKind::Array, ty: Scalar::F32 },
-                Param { name: "s".into(), kind: ParamKind::Scalar, ty: Scalar::F32 },
+                Param {
+                    name: "x".into(),
+                    kind: ParamKind::Array,
+                    ty: Scalar::F32,
+                },
+                Param {
+                    name: "s".into(),
+                    kind: ParamKind::Scalar,
+                    ty: Scalar::F32,
+                },
             ],
             output: Scalar::F32,
-            locals: vec![Local { name: "acc".into(), ty: Scalar::F32 }, Local { name: "i".into(), ty: Scalar::I32 }],
+            locals: vec![
+                Local {
+                    name: "acc".into(),
+                    ty: Scalar::F32,
+                },
+                Local {
+                    name: "i".into(),
+                    ty: Scalar::I32,
+                },
+            ],
             body: vec![
-                Stmt::Assign { local: 0, value: e(Scalar::F32, ExprKind::Const(Const::F32(0.0))) },
+                Stmt::Assign {
+                    local: 0,
+                    value: e(Scalar::F32, ExprKind::Const(Const::F32(0.0))),
+                },
                 Stmt::For {
                     var: 1,
                     start: e(Scalar::I32, ExprKind::Const(Const::I32(0))),
@@ -382,7 +434,11 @@ mod tests {
                                 acc(),
                                 Box::new(e(
                                     Scalar::F32,
-                                    ExprKind::Binary(BinOp::Mul, x(), Box::new(e(Scalar::F32, ExprKind::Param(1)))),
+                                    ExprKind::Binary(
+                                        BinOp::Mul,
+                                        x(),
+                                        Box::new(e(Scalar::F32, ExprKind::Param(1))),
+                                    ),
                                 )),
                             ),
                         ),
@@ -393,7 +449,11 @@ mod tests {
                     ExprKind::Select(
                         Box::new(e(
                             Scalar::Bool,
-                            ExprKind::Compare(CmpOp::Gt, x(), Box::new(e(Scalar::F32, ExprKind::Const(Const::F32(0.0))))),
+                            ExprKind::Compare(
+                                CmpOp::Gt,
+                                x(),
+                                Box::new(e(Scalar::F32, ExprKind::Const(Const::F32(0.0)))),
+                            ),
                         )),
                         acc(),
                         Box::new(e(Scalar::F32, ExprKind::Const(Const::F32(-1.0)))),
@@ -406,10 +466,22 @@ mod tests {
     #[test]
     fn execute_boucle_et_ternaire() {
         let k = sample();
-        let xs: Vec<u8> = [1.0f32, -2.0, 0.5].iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let xs: Vec<u8> = [1.0f32, -2.0, 0.5]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
         let mut out = vec![0u8; 12];
-        run(&k, 3, &[Arg::Array(&xs), Arg::Scalar(Const::F32(2.0))], &mut out).unwrap();
-        let got: Vec<f32> = out.chunks(4).map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect();
+        run(
+            &k,
+            3,
+            &[Arg::Array(&xs), Arg::Scalar(Const::F32(2.0))],
+            &mut out,
+        )
+        .unwrap();
+        let got: Vec<f32> = out
+            .chunks(4)
+            .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(got, vec![6.0, -1.0, 3.0]);
         assert!(!k.requirements().f64);
     }
@@ -417,15 +489,29 @@ mod tests {
     #[test]
     fn range_comme_python() {
         // range(5, 0, -2) → 5, 3, 1 ; pas nul → aucune itération (au lieu d'une boucle infinie).
-        for (start, stop, step, expected) in [(5, 0, -2, 3), (0, 5, 1, 5), (0, 5, 0, 0), (3, 3, 1, 0)] {
+        for (start, stop, step, expected) in
+            [(5, 0, -2, 3), (0, 5, 1, 5), (0, 5, 0, 0), (3, 3, 1, 0)]
+        {
             let c = |v| e(Scalar::I32, ExprKind::Const(Const::I32(v)));
             let k = Kernel {
                 name: "r".into(),
                 params: vec![],
                 output: Scalar::I32,
-                locals: vec![Local { name: "n".into(), ty: Scalar::I32 }, Local { name: "i".into(), ty: Scalar::I32 }],
+                locals: vec![
+                    Local {
+                        name: "n".into(),
+                        ty: Scalar::I32,
+                    },
+                    Local {
+                        name: "i".into(),
+                        ty: Scalar::I32,
+                    },
+                ],
                 body: vec![
-                    Stmt::Assign { local: 0, value: c(0) },
+                    Stmt::Assign {
+                        local: 0,
+                        value: c(0),
+                    },
                     Stmt::For {
                         var: 1,
                         start: c(start),
@@ -435,7 +521,11 @@ mod tests {
                             local: 0,
                             value: e(
                                 Scalar::I32,
-                                ExprKind::Binary(BinOp::Add, Box::new(e(Scalar::I32, ExprKind::Local(0))), Box::new(c(1))),
+                                ExprKind::Binary(
+                                    BinOp::Add,
+                                    Box::new(e(Scalar::I32, ExprKind::Local(0))),
+                                    Box::new(c(1)),
+                                ),
                             ),
                         }],
                     },
@@ -444,7 +534,11 @@ mod tests {
             };
             let mut out = [0u8; 4];
             run(&k, 1, &[], &mut out).unwrap();
-            assert_eq!(i32::from_ne_bytes(out), expected, "range({start}, {stop}, {step})");
+            assert_eq!(
+                i32::from_ne_bytes(out),
+                expected,
+                "range({start}, {stop}, {step})"
+            );
         }
     }
 }

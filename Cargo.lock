@@ -252,6 +252,14 @@ dependencies = [
 [[package]]
 name = "gpusync-core"
 version = "0.1.0"
+dependencies = [
+ "gpusync-backend-opencl",
+ "gpusync-backend-wgpu",
+ "gpusync-codegen",
+ "gpusync-frontend",
+ "gpusync-ir",
+ "gpusync-runtime",
+]
 
 [[package]]
 name = "gpusync-frontend"

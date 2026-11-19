@@ -1,0 +1,459 @@
+{
+ "name": "sample",
+ "filename": "sample_kernel.py",
+ "line_offset": 5,
+ "params": [
+  {
+   "name": "x",
+   "kind": "array",
+   "dtype": "f32"
+  },
+  {
+   "name": "m",
+   "kind": "scalar",
+   "dtype": "f32"
+  },
+  {
+   "name": "k",
+   "kind": "array",
+   "dtype": "i32"
+  }
+ ],
+ "output": "f32",
+ "body": [
+  {
+   "_type": "Expr",
+   "value": {
+    "_type": "Constant",
+    "value": {
+     "kind": "str",
+     "repr": ""
+    },
+    "lineno": 3
+   },
+   "lineno": 3
+  },
+  {
+   "_type": "Assign",
+   "targets": [
+    {
+     "_type": "Name",
+     "id": "acc",
+     "ctx": {
+      "_type": "Store"
+     },
+     "lineno": 4
+    }
+   ],
+   "value": {
+    "_type": "Constant",
+    "value": {
+     "kind": "int",
+     "repr": "0"
+    },
+    "lineno": 4
+   },
+   "type_comment": null,
+   "lineno": 4
+  },
+  {
+   "_type": "For",
+   "target": {
+    "_type": "Name",
+    "id": "i",
+    "ctx": {
+     "_type": "Store"
+    },
+    "lineno": 5
+   },
+   "iter": {
+    "_type": "Call",
+    "func": {
+     "_type": "Name",
+     "id": "range",
+     "ctx": {
+      "_type": "Load"
+     },
+     "lineno": 5
+    },
+    "args": [
+     {
+      "_type": "Name",
+      "id": "SCALE",
+      "ctx": {
+       "_type": "Load"
+      },
+      "lineno": 5
+     }
+    ],
+    "keywords": [],
+    "lineno": 5
+   },
+   "body": [
+    {
+     "_type": "AugAssign",
+     "target": {
+      "_type": "Name",
+      "id": "acc",
+      "ctx": {
+       "_type": "Store"
+      },
+      "lineno": 6
+     },
+     "op": {
+      "_type": "Add"
+     },
+     "value": {
+      "_type": "BinOp",
+      "left": {
+       "_type": "Name",
+       "id": "x",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 6
+      },
+      "op": {
+       "_type": "Mult"
+      },
+      "right": {
+       "_type": "Name",
+       "id": "m",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 6
+      },
+      "lineno": 6
+     },
+     "lineno": 6
+    }
+   ],
+   "orelse": [],
+   "type_comment": null,
+   "lineno": 5
+  },
+  {
+   "_type": "If",
+   "test": {
+    "_type": "Compare",
+    "left": {
+     "_type": "BinOp",
+     "left": {
+      "_type": "Name",
+      "id": "k",
+      "ctx": {
+       "_type": "Load"
+      },
+      "lineno": 7
+     },
+     "op": {
+      "_type": "Mod"
+     },
+     "right": {
+      "_type": "Constant",
+      "value": {
+       "kind": "int",
+       "repr": "2"
+      },
+      "lineno": 7
+     },
+     "lineno": 7
+    },
+    "ops": [
+     {
+      "_type": "Eq"
+     }
+    ],
+    "comparators": [
+     {
+      "_type": "Constant",
+      "value": {
+       "kind": "int",
+       "repr": "0"
+      },
+      "lineno": 7
+     }
+    ],
+    "lineno": 7
+   },
+   "body": [
+    {
+     "_type": "Assign",
+     "targets": [
+      {
+       "_type": "Name",
+       "id": "acc",
+       "ctx": {
+        "_type": "Store"
+       },
+       "lineno": 8
+      }
+     ],
+     "value": {
+      "_type": "BinOp",
+      "left": {
+       "_type": "Name",
+       "id": "acc",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 8
+      },
+      "op": {
+       "_type": "Add"
+      },
+      "right": {
+       "_type": "Call",
+       "func": {
+        "_type": "Name",
+        "id": "float",
+        "ctx": {
+         "_type": "Load"
+        },
+        "lineno": 8
+       },
+       "args": [
+        {
+         "_type": "BinOp",
+         "left": {
+          "_type": "Name",
+          "id": "k",
+          "ctx": {
+           "_type": "Load"
+          },
+          "lineno": 8
+         },
+         "op": {
+          "_type": "FloorDiv"
+         },
+         "right": {
+          "_type": "Constant",
+          "value": {
+           "kind": "int",
+           "repr": "3"
+          },
+          "lineno": 8
+         },
+         "lineno": 8
+        }
+       ],
+       "keywords": [],
+       "lineno": 8
+      },
+      "lineno": 8
+     },
+     "type_comment": null,
+     "lineno": 8
+    }
+   ],
+   "orelse": [],
+   "lineno": 7
+  },
+  {
+   "_type": "Assign",
+   "targets": [
+    {
+     "_type": "Name",
+     "id": "y",
+     "ctx": {
+      "_type": "Store"
+     },
+     "lineno": 9
+    }
+   ],
+   "value": {
+    "_type": "IfExp",
+    "test": {
+     "_type": "Compare",
+     "left": {
+      "_type": "Name",
+      "id": "x",
+      "ctx": {
+       "_type": "Load"
+      },
+      "lineno": 9
+     },
+     "ops": [
+      {
+       "_type": "Gt"
+      }
+     ],
+     "comparators": [
+      {
+       "_type": "Constant",
+       "value": {
+        "kind": "int",
+        "repr": "0"
+       },
+       "lineno": 9
+      }
+     ],
+     "lineno": 9
+    },
+    "body": {
+     "_type": "Name",
+     "id": "acc",
+     "ctx": {
+      "_type": "Load"
+     },
+     "lineno": 9
+    },
+    "orelse": {
+     "_type": "BinOp",
+     "left": {
+      "_type": "BinOp",
+      "left": {
+       "_type": "Name",
+       "id": "x",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 9
+      },
+      "op": {
+       "_type": "Mod"
+      },
+      "right": {
+       "_type": "Constant",
+       "value": {
+        "kind": "float",
+        "repr": "3.0"
+       },
+       "lineno": 9
+      },
+      "lineno": 9
+     },
+     "op": {
+      "_type": "Pow"
+     },
+     "right": {
+      "_type": "Constant",
+      "value": {
+       "kind": "int",
+       "repr": "2"
+      },
+      "lineno": 9
+     },
+     "lineno": 9
+    },
+    "lineno": 9
+   },
+   "type_comment": null,
+   "lineno": 9
+  },
+  {
+   "_type": "Return",
+   "value": {
+    "_type": "BinOp",
+    "left": {
+     "_type": "BinOp",
+     "left": {
+      "_type": "Name",
+      "id": "y",
+      "ctx": {
+       "_type": "Load"
+      },
+      "lineno": 10
+     },
+     "op": {
+      "_type": "Add"
+     },
+     "right": {
+      "_type": "Call",
+      "func": {
+       "_type": "Attribute",
+       "value": {
+        "_type": "Name",
+        "id": "gs",
+        "ctx": {
+         "_type": "Load"
+        },
+        "lineno": 10
+       },
+       "attr": "sqrt",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 10
+      },
+      "args": [
+       {
+        "_type": "Call",
+        "func": {
+         "_type": "Name",
+         "id": "abs",
+         "ctx": {
+          "_type": "Load"
+         },
+         "lineno": 10
+        },
+        "args": [
+         {
+          "_type": "Name",
+          "id": "x",
+          "ctx": {
+           "_type": "Load"
+          },
+          "lineno": 10
+         }
+        ],
+        "keywords": [],
+        "lineno": 10
+       }
+      ],
+      "keywords": [],
+      "lineno": 10
+     },
+     "lineno": 10
+    },
+    "op": {
+     "_type": "Add"
+    },
+    "right": {
+     "_type": "Call",
+     "func": {
+      "_type": "Attribute",
+      "value": {
+       "_type": "Name",
+       "id": "math",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 10
+      },
+      "attr": "floor",
+      "ctx": {
+       "_type": "Load"
+      },
+      "lineno": 10
+     },
+     "args": [
+      {
+       "_type": "Name",
+       "id": "x",
+       "ctx": {
+        "_type": "Load"
+       },
+       "lineno": 10
+      }
+     ],
+     "keywords": [],
+     "lineno": 10
+    },
+    "lineno": 10
+   },
+   "lineno": 10
+  }
+ ],
+ "constants": {
+  "SCALE": {
+   "kind": "int",
+   "repr": "3"
+  }
+ },
+ "modules": {
+  "gs": "gpusync",
+  "math": "math"
+ }
+}

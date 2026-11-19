@@ -139,11 +139,27 @@ pub type Block = Vec<Stmt>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Assign { local: usize, value: Expr },
-    If { cond: Expr, then: Block, otherwise: Block },
+    Assign {
+        local: usize,
+        value: Expr,
+    },
+    If {
+        cond: Expr,
+        then: Block,
+        otherwise: Block,
+    },
     /// `for var in range(start, stop, step)` : bornes évaluées une fois, pas nul → aucune itération.
-    For { var: usize, start: Expr, stop: Expr, step: Expr, body: Block },
-    While { cond: Expr, body: Block },
+    For {
+        var: usize,
+        start: Expr,
+        stop: Expr,
+        step: Expr,
+        body: Block,
+    },
+    While {
+        cond: Expr,
+        body: Block,
+    },
     Break,
     Continue,
     /// Écrit la valeur de l'élément courant de la sortie et termine le thread.
@@ -254,7 +270,10 @@ impl Kernel {
     }
 
     pub fn array_params(&self) -> impl Iterator<Item = (usize, &Param)> {
-        self.params.iter().enumerate().filter(|(_, p)| p.kind == ParamKind::Array)
+        self.params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind == ParamKind::Array)
     }
 }
 
@@ -280,12 +299,22 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
     for s in block {
         match s {
             Stmt::Assign { value, .. } | Stmt::Return(value) => expr(value, f),
-            Stmt::If { cond, then, otherwise } => {
+            Stmt::If {
+                cond,
+                then,
+                otherwise,
+            } => {
                 expr(cond, f);
                 visit_exprs(then, f);
                 visit_exprs(otherwise, f);
             }
-            Stmt::For { start, stop, step, body, .. } => {
+            Stmt::For {
+                start,
+                stop,
+                step,
+                body,
+                ..
+            } => {
                 expr(start, f);
                 expr(stop, f);
                 expr(step, f);
@@ -306,7 +335,11 @@ pub fn floordiv_i32(a: i32, b: i32) -> i32 {
         return 0;
     }
     let q = a.wrapping_div(b);
-    if a.wrapping_rem(b) != 0 && ((a < 0) != (b < 0)) { q.wrapping_sub(1) } else { q }
+    if a.wrapping_rem(b) != 0 && ((a < 0) != (b < 0)) {
+        q.wrapping_sub(1)
+    } else {
+        q
+    }
 }
 
 /// Reste entier « à la Python » (signe du diviseur), diviseur nul → 0.
@@ -315,18 +348,30 @@ pub fn mod_i32(a: i32, b: i32) -> i32 {
         return 0;
     }
     let r = a.wrapping_rem(b);
-    if r != 0 && ((r < 0) != (b < 0)) { r.wrapping_add(b) } else { r }
+    if r != 0 && ((r < 0) != (b < 0)) {
+        r.wrapping_add(b)
+    } else {
+        r
+    }
 }
 
 /// Reste flottant « à la Python » : `fmod` corrigé du signe du diviseur.
 pub fn mod_f64(a: f64, b: f64) -> f64 {
     let r = a % b;
-    if r != 0.0 && ((r < 0.0) != (b < 0.0)) { r + b } else { r }
+    if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
+        r + b
+    } else {
+        r
+    }
 }
 
 pub fn mod_f32(a: f32, b: f32) -> f32 {
     let r = a % b;
-    if r != 0.0 && ((r < 0.0) != (b < 0.0)) { r + b } else { r }
+    if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
+        r + b
+    } else {
+        r
+    }
 }
 
 #[cfg(test)]

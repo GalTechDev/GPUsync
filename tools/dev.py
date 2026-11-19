@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VENV = ROOT / ".venv"
 PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-DEV_DEPS = ["maturin>=1.16,<2", "pytest>=8"]
+DEV_DEPS = ["maturin>=1.16,<2", "pytest>=8", "numpy>=1.22"]
 
 
 def step(title: str) -> None:
