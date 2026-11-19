@@ -45,8 +45,10 @@ struct PyDevice {
     vendor: String,
     /// Version de l'API ou du driver.
     version: String,
-    /// Calcul en float64 supporté.
+    /// Calcul en float64 supporté (arithmétique).
     f64: bool,
+    /// Fonctions transcendantes (exp, log, sin…) en float64 supportées.
+    f64_math: bool,
     /// Mémoire partagée avec l'hôte (zéro-copie possible).
     unified_memory: bool,
     /// Mémoire globale en octets (None si le backend ne l'expose pas).
@@ -65,6 +67,7 @@ impl From<&DeviceInfo> for PyDevice {
             vendor: d.vendor.clone(),
             version: d.version.clone(),
             f64: d.f64,
+            f64_math: d.f64_math,
             unified_memory: d.unified_memory,
             memory_bytes: d.memory_bytes,
             max_buffer_bytes: d.max_buffer_bytes,
@@ -82,12 +85,18 @@ impl PyDevice {
 
     fn __repr__(&self) -> String {
         let mut s = format!(
-            "Device('{}', backend='{}', f64={}, unified_memory={}",
+            "Device('{}', backend='{}', f64={}",
             self.name,
             self.backend,
-            py_bool(self.f64),
-            py_bool(self.unified_memory)
+            py_bool(self.f64)
         );
+        if self.f64 && !self.f64_math {
+            s.push_str(", f64_math=False");
+        }
+        s.push_str(&format!(
+            ", unified_memory={}",
+            py_bool(self.unified_memory)
+        ));
         if let Some(m) = self.memory_bytes {
             s.push_str(&format!(
                 ", memory='{:.1} Go'",

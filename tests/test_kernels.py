@@ -5,6 +5,7 @@ c'est la référence quand le kernel est vectorisable ; sinon une référence Nu
 """
 
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -113,6 +114,28 @@ def precise(x: gs.f64[:]) -> gs.f64[:]:
     return x * 1e-12 + 1.0
 
 
+@gs.kernel
+def f64_ops(x: gs.f64[:], s: gs.f64) -> gs.f64[:]:
+    """Opérations f64 disponibles sur Vulkan : arithmétique, //, %, sqrt, floor, abs, min, max, comparaisons."""
+    y = (x % 0.7) + (x // 0.3) * s + gs.sqrt(x) + gs.floor(x * 3.0) + abs(x - 0.5) + max(x, 0.2)
+    return y if x > 0.5 else -y
+
+
+@gs.kernel(compat="strict")
+def precise_strict(x: gs.f64[:]) -> gs.f64[:]:
+    return x * 1e-12 + 1.0
+
+
+@gs.kernel
+def f64_math(x: gs.f64[:]) -> gs.f64[:]:
+    return gs.exp(x) + gs.log(1.0 + x * x)
+
+
+@gs.kernel(compat="strict")
+def f64_math_strict(x: gs.f64[:]) -> gs.f64[:]:
+    return gs.exp(x) + gs.log(1.0 + x * x)
+
+
 # ───────────────────────────── tests différentiels ─────────────────────────────
 
 
@@ -195,14 +218,68 @@ def test_while_break_continue(device):
     check(collatz(n, device=device), np.array([steps(int(v)) for v in n], dtype=np.uint32))
 
 
-def test_f64_ou_erreur_claire(device):
+def test_f64(device):
+    """f64 arithmétique : exact là où c'est disponible ; sinon erreur (strict) ou repli averti (auto)."""
     x = RNG.random(N)
     dev = next(d for d in gs.devices() if d.id == device)
     if dev.f64:
-        check(precise(x, device=device), x * 1e-12 + 1.0, rtol=1e-15, atol=0)
-    else:
-        with pytest.raises(gs.UnsupportedFeature, match="f64"):
-            precise(x, device=device)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # aucun repli attendu
+            check(precise(x, device=device), x * 1e-12 + 1.0, rtol=1e-15, atol=0)
+        return
+    with pytest.raises(gs.UnsupportedFeature, match="f64.*compatibles"):
+        precise_strict(x, device=device)
+    with pytest.warns(gs.CompatibilityWarning, match=f"f64 n'est pas disponible sur {device}"):
+        y = precise(x, device=device)
+    assert y.device != device
+    check(y, x * 1e-12 + 1.0, rtol=1e-15, atol=0)
+
+
+def test_f64_operations_sans_fonctions_transcendantes(device):
+    x = RNG.uniform(-3, 3, N)
+    x = np.abs(x)  # sqrt
+    y = (np.remainder(x, 0.7) + np.floor(x / 0.3) * 1.25 + np.sqrt(x) + np.floor(x * 3.0) + np.abs(x - 0.5)
+         + np.maximum(x, 0.2))
+    ref = np.where(x > 0.5, y, -y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", gs.CompatibilityWarning)
+        check(f64_ops(x, 1.25, device=device), ref, rtol=1e-14, atol=1e-14)
+
+
+def test_f64_fonctions_mathematiques(device):
+    """exp / log en f64 : jamais sur Vulkan (précision f32 silencieuse ou plantage du pilote, mesuré)."""
+    x = RNG.random(N)
+    ref = np.exp(x) + np.log(1.0 + x * x)
+    dev = next(d for d in gs.devices() if d.id == device)
+    if dev.f64_math:
+        check(f64_math(x, device=device), ref, rtol=1e-14, atol=0)
+        return
+    with pytest.raises(gs.UnsupportedFeature, match="gs.exp|f64"):
+        f64_math_strict(x, device=device)
+    with pytest.warns(gs.CompatibilityWarning, match=device):
+        y = f64_math(x, device=device)
+    assert next(d for d in gs.devices() if d.id == y.device).f64_math
+    check(y, ref, rtol=1e-14, atol=0)
+
+
+def test_choix_automatique_selon_les_besoins():
+    """Sans device= : premier du classement s'il convient, sinon repli averti vers un périphérique capable."""
+    from gpusync._device import capable, ranked
+
+    first = ranked()[0]
+    x32, x64 = f32(RNG.random(64)), RNG.random(64)
+    assert normalize(x32, 0.0, 1.0).device == first.id
+    for kern, req in ((precise, precise._req), (f64_math, f64_math._req)):
+        if capable(first, req):
+            assert kern(x64).device == first.id
+        else:
+            with warnings.catch_warnings(record=True):
+                warnings.simplefilter("always")
+                y = kern(x64)
+            chosen = next(d for d in gs.devices() if d.id == y.device)
+            assert capable(chosen, req)
+            if chosen.backend != "cpu":
+                assert chosen.backend == "opencl"
 
 
 def test_formes_quelconques_et_tableau_vide(device):
@@ -249,11 +326,13 @@ def test_resultat_inutilise_et_entrees_liberees(device):
 
 
 def test_choix_du_peripherique():
-    assert gs.default_device().id == DEVICES[0]
+    from gpusync._device import ranked
+
+    assert gs.default_device().id == ranked()[0].id
     with gs.device("cpu") as d:
         assert d.id == "cpu:0"
         assert normalize(f32([2.0]), 0.0, 2.0).device == "cpu:0"
-    assert normalize(f32([2.0]), 0.0, 2.0).device == DEVICES[0]
+    assert normalize(f32([2.0]), 0.0, 2.0).device == ranked()[0].id
     with pytest.raises(gs.DeviceError, match="introuvable"):
         normalize(f32([1.0]), 0.0, 1.0, device="opencl:42")
 

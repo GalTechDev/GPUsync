@@ -29,7 +29,7 @@ from ._core import (
     backends,
     devices,
 )
-from ._device import default_device, device, set_default_device
+from ._device import CompatibilityWarning, default_device, device, set_default_device
 from ._kernel import Kernel, kernel
 from ._math import *  # noqa: F403  (sqrt, exp, … utilisables dans les kernels)
 from ._math import __all__ as _math_all
@@ -40,6 +40,7 @@ __all__ = [
     "devices", "backends", "Device", "BackendStatus",
     "device", "default_device", "set_default_device",
     "f32", "f64", "i32", "u32",
+    "CompatibilityWarning",
     "GpusyncError", "KernelSyntaxError", "TypeMismatch", "ShapeMismatch", "UnsupportedFeature", "DeviceError",
     "__version__",
     *_math_all,

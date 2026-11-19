@@ -1,8 +1,13 @@
-"""Choix du périphérique : par défaut le premier de `gs.devices()`, sinon `device=...`,
-`with gs.device(...)` ou `gs.set_default_device(...)`.
+"""Choix du périphérique (§4.8 de l'architecture).
 
-Un périphérique se désigne par un objet `Device`, un identifiant (`"opencl:1"`), un nom de
-backend (`"opencl"`, `"metal"`, `"vulkan"`, `"dx12"`, `"cpu"`) ou `"gpu"` (premier GPU).
+Sans `device=` ni `with gs.device(...)`, le périphérique prévu est le premier du **classement** :
+GPU dédiés (Vulkan, puis OpenCL), puis GPU intégrés (Metal, puis OpenCL : zéro-copie), puis CPU.
+Si ce périphérique ne sait pas exécuter le kernel (ex. `gs.exp` en f64 sur Vulkan), l'option `compat`
+du kernel décide : `"auto"` → avertissement puis repli sur OpenCL (même GPU de préférence), sinon `cpu:0` ;
+`"strict"` → `gs.UnsupportedFeature`.
+
+Un périphérique se désigne par un objet `Device`, un identifiant (`"opencl:1"`), un nom de backend
+(`"opencl"`, `"metal"`, `"vulkan"`, `"dx12"`, `"cpu"`) ou `"gpu"` (premier GPU du classement).
 """
 
 from __future__ import annotations
@@ -15,13 +20,44 @@ from . import _core
 _local = threading.local()
 _default: str | None = None
 
+_DISCRETE = {"cuda": 0, "vulkan": 1, "opencl": 2, "dx12": 3, "metal": 4}
+_INTEGRATED = {"metal": 0, "opencl": 1, "vulkan": 2, "dx12": 3}
+
+
+class CompatibilityWarning(UserWarning):
+    """Le kernel s'exécute sur un autre périphérique que prévu, faute d'une opération disponible."""
+
+
+def _rank(d) -> tuple:
+    if d.backend == "cpu":
+        return (3, 0, d.index)
+    if d.kind == "discrete_gpu":
+        return (0, _DISCRETE.get(d.backend, 9), d.index)
+    if d.kind == "cpu":  # OpenCL sur CPU (POCL…)
+        return (2, 0, d.index)
+    return (1, _INTEGRATED.get(d.backend, 9), d.index)
+
+
+def ranked() -> list:
+    """Périphériques dans l'ordre de préférence."""
+    return sorted(_core.devices(), key=_rank)
+
+
+def capable(dev, req: dict) -> bool:
+    """Le périphérique sait-il exécuter un kernel ayant ces besoins ?"""
+    return (dev.f64 or not req["f64"]) and (dev.f64_math or not req["f64_math"])
+
+
+def _by_id(dev_id: str):
+    return next(d for d in _core.devices() if d.id == dev_id)
+
 
 def resolve(device=None) -> str:
-    """Renvoie l'identifiant (`"metal:0"`…) du périphérique demandé."""
+    """Identifiant (`"metal:0"`…) du périphérique prévu : demandé, ou premier du classement."""
     if device is None:
         stack = getattr(_local, "stack", None)
         device = stack[-1] if stack else _default
-    devs = _core.devices()
+    devs = ranked()
     if device is None:
         if not devs:
             raise _core.DeviceError("aucun périphérique disponible")
@@ -46,8 +82,20 @@ def resolve(device=None) -> str:
     raise _core.DeviceError(f"périphérique « {device} » introuvable. Disponibles : {', '.join(ids)}")
 
 
+def fallback(planned: str, req: dict) -> str | None:
+    """Repli pour un kernel que `planned` ne sait pas exécuter : OpenCL sur le même GPU physique,
+    puis un autre OpenCL compatible, puis cpu:0."""
+    plan = _by_id(planned)
+    opencl = [d for d in ranked() if d.backend == "opencl" and capable(d, req)]
+    same_gpu = [d for d in opencl if d.name == plan.name]
+    for d in same_gpu + opencl:
+        return d.id
+    cpu = [d for d in ranked() if d.backend == "cpu" and capable(d, req)]
+    return cpu[0].id if cpu else None
+
+
 def set_default_device(device) -> None:
-    """Change le périphérique par défaut (None : revenir au premier de gs.devices())."""
+    """Change le périphérique par défaut (None : revenir au premier du classement)."""
     global _default
     _default = None if device is None else resolve(device)
 
@@ -61,12 +109,14 @@ def device(device):
         stack = _local.stack = []
     stack.append(dev_id)
     try:
-        yield next(d for d in _core.devices() if d.id == dev_id)
+        yield _by_id(dev_id)
     finally:
         stack.pop()
 
 
-def default_device():
-    """Le périphérique qui serait utilisé maintenant."""
+def default_device(kernel=None):
+    """Le périphérique qui serait utilisé maintenant (pour `kernel`, compte tenu de ses besoins)."""
     dev_id = resolve(None)
-    return next(d for d in _core.devices() if d.id == dev_id)
+    if kernel is not None:
+        dev_id = kernel._choose(None)[0]
+    return _by_id(dev_id)

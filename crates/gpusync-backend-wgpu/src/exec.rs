@@ -23,6 +23,7 @@ pub struct WgKernel {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     n_inputs: usize,
+    has_fparams: bool,
 }
 
 pub struct WgBuffer {
@@ -62,7 +63,12 @@ impl WgDevice {
         let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gpusync"),
-            required_features: wgpu::Features::empty(),
+            // f64 en WGSL (Vulkan) : extension native de wgpu, demandée seulement si disponible.
+            required_features: if info.f64 {
+                wgpu::Features::SHADER_F64
+            } else {
+                wgpu::Features::empty()
+            },
             required_limits: limits.clone(),
             ..Default::default()
         }))
@@ -83,7 +89,12 @@ impl WgDevice {
     }
 
     /// Compile (avec cache) un module WGSL dont le point d'entrée est `main`.
-    pub fn compile(&self, code: &str, n_inputs: usize) -> Result<Arc<WgKernel>, BackendError> {
+    pub fn compile(
+        &self,
+        code: &str,
+        n_inputs: usize,
+        has_fparams: bool,
+    ) -> Result<Arc<WgKernel>, BackendError> {
         let mut cache = self.kernels.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(k) = cache.get(code) {
             return Ok(k.clone());
@@ -103,6 +114,9 @@ impl WgDevice {
         let mut entries: Vec<_> = (0..n_inputs as u32).map(|b| storage(b, true)).collect();
         entries.push(storage(n_inputs as u32, false));
         entries.push(storage(n_inputs as u32 + 1, true));
+        if has_fparams {
+            entries.push(storage(n_inputs as u32 + 2, true));
+        }
         let layout = self
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -142,6 +156,7 @@ impl WgDevice {
             pipeline,
             layout,
             n_inputs,
+            has_fparams,
         });
         cache.insert(code.to_string(), k.clone());
         Ok(k)
@@ -178,6 +193,7 @@ impl WgDevice {
         inputs: &[&WgBuffer],
         out: &WgBuffer,
         params: &[u32],
+        fparams: &[f64],
         n: usize,
     ) -> Result<(), BackendError> {
         if inputs.len() != k.n_inputs {
@@ -189,7 +205,7 @@ impl WgDevice {
         // faux silencieux, objectif O2).
         let oom = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let submitted = self.submit(k, inputs, out, params, n);
+        let submitted = self.submit(k, inputs, out, params, fparams, n);
         let errors = [
             pollster::block_on(validation.pop()),
             pollster::block_on(oom.pop()),
@@ -210,6 +226,7 @@ impl WgDevice {
         inputs: &[&WgBuffer],
         out: &WgBuffer,
         params: &[u32],
+        fparams: &[f64],
         n: usize,
     ) -> Result<(), BackendError> {
         let params_buf = self
@@ -235,6 +252,25 @@ impl WgDevice {
             binding: inputs.len() as u32 + 1,
             resource: params_buf.as_entire_binding(),
         });
+        let fparams_buf = k.has_fparams.then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: unsafe {
+                        std::slice::from_raw_parts(
+                            fparams.as_ptr().cast(),
+                            std::mem::size_of_val(fparams),
+                        )
+                    },
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
+        });
+        if let Some(b) = &fparams_buf {
+            entries.push(wgpu::BindGroupEntry {
+                binding: inputs.len() as u32 + 2,
+                resource: b.as_entire_binding(),
+            });
+        }
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &k.layout,

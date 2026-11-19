@@ -34,7 +34,16 @@ fn lit(c: Const) -> String {
         .into(),
         Const::F32(v) if v < 0.0 => format!("({}f)", float_repr(format!("{v:?}"))),
         Const::F32(v) => format!("{}f", float_repr(format!("{v:?}"))),
-        Const::F64(v) => float_repr(format!("{v:?}")),
+        // Pas de bitcast vers f64 en naga : l'infini et NaN passent par un f32 (conversion exacte).
+        Const::F64(v) if v.is_nan() => "f64(bitcast<f32>(0x7fc00000u))".into(),
+        Const::F64(v) if v.is_infinite() => (if v > 0.0 {
+            "f64(bitcast<f32>(0x7f800000u))"
+        } else {
+            "f64(bitcast<f32>(0xff800000u))"
+        })
+        .into(),
+        Const::F64(v) if v < 0.0 => format!("({}lf)", float_repr(format!("{v:?}"))),
+        Const::F64(v) => format!("{}lf", float_repr(format!("{v:?}"))),
     }
 }
 
@@ -63,6 +72,7 @@ impl Gen<'_> {
                     (BinOp::FloorDiv, _) => format!("floor({x} / {y})"),
                     (BinOp::Mod, Scalar::I32) => format!("gs_mod_i32({x}, {y})"),
                     (BinOp::Mod, Scalar::U32) => format!("gs_mod_u32({x}, {y})"),
+                    (BinOp::Mod, Scalar::F64) => format!("gs_mod_f64({x}, {y})"),
                     (BinOp::Mod, _) => format!("gs_mod_f32({x}, {y})"),
                     (BinOp::Pow, _) => format!("gs_pow_f32({x}, {y})"),
                     (BinOp::Add, _) => format!("({x} + {y})"),
@@ -207,6 +217,10 @@ const HELPERS: &[(Helper, &str)] = &[
         Helper::ModF32,
         "fn gs_mod_f32(a: f32, b: f32) -> f32 {\n    var r = a % b;\n    if (r != 0.0f && ((r < 0.0f) != (b < 0.0f))) { r = r + b; }\n    return r;\n}",
     ),
+    (
+        Helper::ModF64,
+        "fn gs_mod_f64(a: f64, b: f64) -> f64 {\n    var r = a % b;\n    if (r != 0.0lf && ((r < 0.0lf) != (b < 0.0lf))) { r = r + b; }\n    return r;\n}",
+    ),
     // pow WGSL n'est défini que pour x ≥ 0 : on rétablit la sémantique de C / Python.
     (
         Helper::PowF32,
@@ -214,12 +228,20 @@ const HELPERS: &[(Helper, &str)] = &[
     ),
 ];
 
+/// Le kernel a-t-il des paramètres scalaires f64 (binding `gs_fparams`) ?
+pub fn has_f64_params(k: &Kernel) -> bool {
+    k.params
+        .iter()
+        .any(|p| p.kind == ParamKind::Scalar && p.ty == Scalar::F64)
+}
+
 /// Génère le module WGSL. Point d'entrée : `main`.
 pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
-    if k.requirements().f64 {
-        return Err(CodegenError(
-            "f64 n'est pas disponible en WGSL (Metal, Vulkan, DX12 via wgpu)".into(),
-        ));
+    let req = k.requirements();
+    if let Some(op) = req.f64_math_op {
+        return Err(CodegenError(format!(
+            "{op} en f64 n'est pas disponible via wgpu (Vulkan le calculerait en précision f32, voire planterait)"
+        )));
     }
     let mut g = Gen {
         k,
@@ -248,6 +270,13 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
         "@group(0) @binding({}) var<storage, read> gs_params: array<u32>;",
         binding + 1
     ));
+    if has_f64_params(k) {
+        // Pas de bitcast vers f64 en naga : les scalaires f64 ont leur propre buffer.
+        g.out.line(format!(
+            "@group(0) @binding({}) var<storage, read> gs_fparams: array<f64>;",
+            binding + 2
+        ));
+    }
     let used = helpers(k);
     for (h, code) in HELPERS {
         if used.contains(h) {
@@ -257,7 +286,7 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
     let n_scalars = k
         .params
         .iter()
-        .filter(|p| p.kind == ParamKind::Scalar)
+        .filter(|p| p.kind == ParamKind::Scalar && p.ty != Scalar::F64)
         .count();
     g.out
         .line(format!("@compute @workgroup_size({WGSL_WORKGROUP_SIZE})"));
@@ -268,15 +297,24 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
     ));
     g.out
         .line(format!("if (gs_i >= gs_params[{n_scalars}]) {{ return; }}"));
-    let mut word = 0;
+    let (mut word, mut fword) = (0, 0);
     for (i, p) in k.params.iter().enumerate() {
         if p.kind == ParamKind::Scalar {
             let read = match p.ty {
-                Scalar::U32 => format!("gs_params[{word}]"),
-                t => format!("bitcast<{}>(gs_params[{word}])", w_type(t)),
+                Scalar::F64 => {
+                    fword += 1;
+                    format!("gs_fparams[{}]", fword - 1)
+                }
+                Scalar::U32 => {
+                    word += 1;
+                    format!("gs_params[{}]", word - 1)
+                }
+                t => {
+                    word += 1;
+                    format!("bitcast<{}>(gs_params[{}])", w_type(t), word - 1)
+                }
             };
             g.out.line(format!("let {} = {read};", param_name(k, i)));
-            word += 1;
         }
     }
     for (i, l) in k.locals.iter().enumerate() {
@@ -322,9 +360,59 @@ mod tests {
     }
 
     #[test]
-    fn f64_refuse() {
+    fn f64_arithmetique_accepte_mais_pas_les_fonctions_transcendantes() {
         let mut k = crate::tests::sample();
+        // Tout en f64 : le sample utilise ** (pow) → refusé.
         k.output = Scalar::F64;
-        assert!(emit_wgsl(&k).is_err());
+        k.params[0].ty = Scalar::F64;
+        k.params[1].ty = Scalar::F64;
+        fn retype(b: &mut Block) {
+            for s in b {
+                match s {
+                    Stmt::Assign { value, .. } | Stmt::Return(value) => retype_e(value),
+                    Stmt::For { body, .. } => retype(body),
+                    _ => {}
+                }
+            }
+        }
+        fn retype_e(e: &mut Expr) {
+            if e.ty == Scalar::F32 {
+                e.ty = Scalar::F64;
+            }
+            match &mut e.kind {
+                ExprKind::Const(Const::F32(v)) => e.kind = ExprKind::Const(Const::F64(*v as f64)),
+                ExprKind::Binary(_, a, b) | ExprKind::Compare(_, a, b) => {
+                    retype_e(a);
+                    retype_e(b);
+                }
+                ExprKind::Select(c, a, b) => {
+                    retype_e(c);
+                    retype_e(a);
+                    retype_e(b);
+                }
+                _ => {}
+            }
+        }
+        k.locals[0].ty = Scalar::F64;
+        retype(&mut k.body);
+        let err = emit_wgsl(&k).unwrap_err().0;
+        assert!(err.contains("**") && err.contains("f64"), "{err}");
+        // Sans le ** : accepté, avec le buffer gs_fparams et le % flottant f64.
+        if let Stmt::Return(e) = &mut k.body[2] {
+            if let ExprKind::Select(_, a, _) = &mut e.kind {
+                **a = Expr {
+                    ty: Scalar::F64,
+                    kind: ExprKind::Param(0),
+                };
+            }
+        }
+        let c = emit_wgsl(&k).unwrap().code;
+        assert!(
+            c.contains("var<storage, read> gs_fparams: array<f64>;"),
+            "{c}"
+        );
+        assert!(c.contains("let p1_moyenne = gs_fparams[0];"), "{c}");
+        assert!(c.contains("gs_mod_f64(p0_x[gs_i], 3.0lf)"), "{c}");
+        assert!(c.contains("if (gs_i >= gs_params[1]) { return; }"), "{c}");
     }
 }

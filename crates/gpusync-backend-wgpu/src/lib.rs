@@ -4,8 +4,9 @@
 //! qu'une entrée par GPU physique, dans l'ordre de préférence Metal > Vulkan > DX12.
 //! Les adaptateurs logiciels (CPU) sont ignorés : le CPU passe par OpenCL (POCL) ou l'interpréteur.
 //!
-//! f64 : WGSL n'a pas de type f64, donc `DeviceInfo::f64` vaut toujours `false` ici, même si le GPU
-//! le supporte en Vulkan (utiliser OpenCL pour le f64).
+//! f64 : disponible en Vulkan quand l'adaptateur a `SHADER_F64` (extension de naga), mais **sans les
+//! fonctions transcendantes** (mesuré sur la RTX 4080 SUPER : exp calculé en précision f32, log qui fait
+//! planter le pilote) : `f64_math` vaut toujours `false` ici.
 
 mod exec;
 
@@ -72,6 +73,7 @@ struct Candidate {
     device_id: u32,
     kind: DeviceKind,
     driver: String,
+    f64: bool,
     max_buffer_bytes: u64,
 }
 
@@ -103,6 +105,8 @@ fn candidate(i: usize, a: &wgpu::Adapter) -> Option<Candidate> {
             wgpu::DeviceType::Other => DeviceKind::Other,
         },
         driver,
+        f64: info.backend == wgpu::Backend::Vulkan
+            && a.features().contains(wgpu::Features::SHADER_F64),
         max_buffer_bytes: a
             .limits()
             .max_buffer_size
@@ -154,7 +158,8 @@ fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
                 kind: c.kind,
                 vendor: vendor.to_string(),
                 version,
-                f64: false,
+                f64: c.f64,
+                f64_math: false,
                 unified_memory: c.kind == DeviceKind::IntegratedGpu,
                 memory_bytes: None,
                 max_buffer_bytes: Some(c.max_buffer_bytes),
@@ -195,6 +200,7 @@ mod tests {
             device_id: dev,
             kind,
             driver: String::new(),
+            f64: api == "vulkan",
             max_buffer_bytes: 1 << 30,
         }
     }
@@ -226,7 +232,10 @@ mod tests {
             ]
         );
         assert!(devs[1].1.unified_memory && !devs[0].1.unified_memory);
-        assert!(!devs[0].1.f64, "pas de f64 en WGSL");
+        assert!(
+            devs[0].1.f64 && !devs[0].1.f64_math,
+            "f64 Vulkan sans fonctions transcendantes"
+        );
     }
 
     #[test]

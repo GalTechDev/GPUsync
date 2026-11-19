@@ -4,7 +4,8 @@
 //! - **OpenCL** : paramètres dans l'ordre déclaré (tableaux = buffers, scalaires = valeurs),
 //!   puis le buffer de sortie, puis `n` (uint).
 //! - **WGSL** : un binding par tableau d'entrée (ordre déclaré), puis la sortie, puis un buffer
-//!   `array<u32>` contenant les scalaires (un mot chacun) suivis de `n`.
+//!   `array<u32>` contenant les scalaires non f64 (un mot chacun) suivis de `n`, puis — seulement si le
+//!   kernel a des scalaires f64 — un buffer `array<f64>` avec ces scalaires.
 
 mod opencl;
 mod wgsl;
@@ -14,7 +15,7 @@ use std::collections::BTreeSet;
 use gpusync_ir::*;
 
 pub use opencl::emit_opencl;
-pub use wgsl::{WGSL_WORKGROUP_SIZE, emit_wgsl};
+pub use wgsl::{WGSL_WORKGROUP_SIZE, emit_wgsl, has_f64_params};
 
 /// Code généré, prêt à compiler.
 #[derive(Debug, Clone, PartialEq)]

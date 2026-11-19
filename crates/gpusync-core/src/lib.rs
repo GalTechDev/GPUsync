@@ -84,6 +84,7 @@ pub fn cpu_info() -> DeviceInfo {
         vendor: "GPUsync".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         f64: true,
+        f64_math: true,
         unified_memory: true,
         memory_bytes: None,
         max_buffer_bytes: None,
@@ -160,22 +161,34 @@ enum Imp {
     Cpu,
 }
 
-/// Vérifie les capacités du périphérique (§6.2), génère le code et le compile.
-pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
-    let info = dev.info();
-    if k.requirements().f64 && !info.f64 {
-        let hint = match dev {
-            Device::Wg(_) => {
-                " (WGSL n'a pas de f64 ; essayez un périphérique OpenCL qui le supporte, ou cpu:0)"
-            }
-            _ => " (essayez un autre périphérique, ou cpu:0)",
-        };
-        return Err(CoreError::Unsupported(format!(
-            "le kernel '{}' utilise f64, non supporté par '{}' ({}){hint}",
+/// Raison pour laquelle `info` ne peut pas exécuter `k` (§6.2), ou `None` s'il le peut.
+pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
+    let req = k.requirements();
+    if req.f64 && !info.f64 {
+        return Some(format!(
+            "le kernel '{}' utilise f64, non supporté par '{}' ({})",
             k.name,
             info.name,
             info.id()
-        )));
+        ));
+    }
+    if let Some(op) = req.f64_math_op.filter(|_| !info.f64_math) {
+        return Some(format!(
+            "le kernel '{}' utilise {op} en f64, non disponible sur '{}' ({}) : seuls OpenCL, CUDA et cpu:0 \
+             fournissent les fonctions mathématiques en double précision",
+            k.name,
+            info.name,
+            info.id()
+        ));
+    }
+    None
+}
+
+/// Vérifie les capacités du périphérique (§6.2), génère le code et le compile.
+pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
+    let info = dev.info();
+    if let Some(msg) = unsupported(&info, k) {
+        return Err(CoreError::Unsupported(msg));
     }
     let imp = match dev {
         Device::Cl(d) => {
@@ -185,8 +198,12 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
         Device::Wg(d) => {
             let src = gpusync_codegen::emit_wgsl(k).map_err(|e| CoreError::Unsupported(e.0))?;
             Imp::Wg(
-                d.compile(&src.code, k.array_params().count())
-                    .map_err(dev_err)?,
+                d.compile(
+                    &src.code,
+                    k.array_params().count(),
+                    gpusync_codegen::has_f64_params(k),
+                )
+                .map_err(dev_err)?,
             )
         }
         Device::Cpu => Imp::Cpu,
@@ -524,21 +541,21 @@ pub unsafe fn launch(
                 });
             }
             let mut params: Vec<u32> = Vec::new();
+            let mut fparams: Vec<f64> = Vec::new();
             let mut s = scalars.iter();
             for p in k.params.iter().filter(|p| p.kind == ParamKind::Scalar) {
-                params.push(match interp::convert(*s.next().unwrap(), p.ty) {
-                    Const::I32(v) => v as u32,
-                    Const::U32(v) => v,
-                    Const::F32(v) => v.to_bits(),
-                    Const::Bool(v) => v as u32,
-                    Const::F64(_) => {
-                        return Err(CoreError::Unsupported("f64 indisponible en WGSL".into()));
-                    }
-                });
+                match interp::convert(*s.next().unwrap(), p.ty) {
+                    Const::I32(v) => params.push(v as u32),
+                    Const::U32(v) => params.push(v),
+                    Const::F32(v) => params.push(v.to_bits()),
+                    Const::Bool(v) => params.push(v as u32),
+                    Const::F64(v) => fparams.push(v),
+                }
             }
             params.push(n32);
             let out = d.alloc(out_bytes).map_err(dev_err)?;
-            d.launch(wk, &bufs, &out, &params, n).map_err(dev_err)?;
+            d.launch(wk, &bufs, &out, &params, &fparams, n)
+                .map_err(dev_err)?;
             Ok(DeviceArray {
                 device: dev.clone(),
                 storage: Storage::Wg(out),

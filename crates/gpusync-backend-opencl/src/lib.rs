@@ -56,6 +56,8 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
                 vendor: d.vendor().unwrap_or_default().trim().to_string(),
                 version: d.version().unwrap_or_default().trim().to_string(),
                 f64: d.double_fp_config().map(|c| c != 0).unwrap_or(false),
+                // OpenCL fournit toute la bibliothèque mathématique en double précision.
+                f64_math: d.double_fp_config().map(|c| c != 0).unwrap_or(false),
                 unified_memory: unified,
                 memory_bytes: d.global_mem_size().ok(),
                 max_buffer_bytes: d.max_mem_alloc_size().ok(),

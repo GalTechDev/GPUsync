@@ -101,10 +101,15 @@ impl KernelIR {
         source(&self.ir, target).map_err(to_py)
     }
 
-    /// Le kernel utilise-t-il f64 ?
+    /// Besoins du kernel : {"f64": bool, "f64_math": bool, "f64_math_op": str | None}.
     #[getter]
-    fn uses_f64(&self) -> bool {
-        self.ir.requirements().f64
+    fn requirements(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let r = self.ir.requirements();
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("f64", r.f64)?;
+        d.set_item("f64_math", r.f64_math)?;
+        d.set_item("f64_math_op", r.f64_math_op)?;
+        Ok(d.unbind())
     }
 
     /// Compile pour `device_id` sans lancer (pour mesurer ou vérifier tôt).

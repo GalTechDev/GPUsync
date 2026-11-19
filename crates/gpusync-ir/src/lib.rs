@@ -255,9 +255,52 @@ impl Intrinsic {
 }
 
 /// Capacités exigées par un kernel (§6.2), comparées à celles du périphérique avant compilation.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Requirements {
+    /// Le kernel manipule des f64 (arithmétique, comparaisons, `//`, `%`, sqrt, floor, ceil, abs,
+    /// min, max, conversions).
     pub f64: bool,
+    /// Il appelle en plus une fonction transcendante en f64 (exp, log, sin, pow…) : indisponible en
+    /// Vulkan, où elle serait calculée en précision f32 sans erreur, voire ferait planter le pilote.
+    pub f64_math: bool,
+    /// Première opération qui exige `f64_math`, pour les messages (ex. « gs.exp »).
+    pub f64_math_op: Option<&'static str>,
+}
+
+impl Intrinsic {
+    /// Fonction transcendante (indisponible en f64 sur Vulkan).
+    pub fn is_transcendental(self) -> bool {
+        !matches!(
+            self,
+            Intrinsic::Sqrt
+                | Intrinsic::Floor
+                | Intrinsic::Ceil
+                | Intrinsic::Abs
+                | Intrinsic::Min
+                | Intrinsic::Max
+        )
+    }
+
+    pub fn python_name(self) -> &'static str {
+        match self {
+            Intrinsic::Sqrt => "gs.sqrt",
+            Intrinsic::Exp => "gs.exp",
+            Intrinsic::Exp2 => "gs.exp2",
+            Intrinsic::Log => "gs.log",
+            Intrinsic::Log2 => "gs.log2",
+            Intrinsic::Sin => "gs.sin",
+            Intrinsic::Cos => "gs.cos",
+            Intrinsic::Tan => "gs.tan",
+            Intrinsic::Tanh => "gs.tanh",
+            Intrinsic::Atan2 => "gs.atan2",
+            Intrinsic::Floor => "gs.floor",
+            Intrinsic::Ceil => "gs.ceil",
+            Intrinsic::Pow => "gs.pow",
+            Intrinsic::Abs => "abs",
+            Intrinsic::Min => "min",
+            Intrinsic::Max => "max",
+        }
+    }
 }
 
 impl Kernel {
@@ -265,8 +308,28 @@ impl Kernel {
         let mut f64 = self.output == Scalar::F64
             || self.params.iter().any(|p| p.ty == Scalar::F64)
             || self.locals.iter().any(|l| l.ty == Scalar::F64);
-        visit_exprs(&self.body, &mut |e| f64 |= e.ty == Scalar::F64);
-        Requirements { f64 }
+        let mut f64_math_op: Option<&'static str> = None;
+        visit_exprs(&self.body, &mut |e| {
+            f64 |= e.ty == Scalar::F64;
+            let op = match &e.kind {
+                ExprKind::Call(f, args)
+                    if args.first().is_some_and(|a| a.ty == Scalar::F64)
+                        && f.is_transcendental() =>
+                {
+                    Some(f.python_name())
+                }
+                ExprKind::Binary(BinOp::Pow, a, _) if a.ty == Scalar::F64 => Some("**"),
+                _ => None,
+            };
+            if f64_math_op.is_none() {
+                f64_math_op = op;
+            }
+        });
+        Requirements {
+            f64,
+            f64_math: f64_math_op.is_some(),
+            f64_math_op,
+        }
     }
 
     pub fn array_params(&self) -> impl Iterator<Item = (usize, &Param)> {

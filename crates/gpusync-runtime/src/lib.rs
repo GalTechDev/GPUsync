@@ -49,8 +49,10 @@ pub struct DeviceInfo {
     pub vendor: String,
     /// Version de l'API ou du driver, ex. « OpenCL 3.0 CUDA » ou « 610.88 ».
     pub version: String,
-    /// Le périphérique sait-il calculer en float64 ?
+    /// Le périphérique sait-il calculer en float64 (arithmétique) ?
     pub f64: bool,
+    /// … y compris les fonctions transcendantes (exp, log, sin…) en f64 ?
+    pub f64_math: bool,
     /// Mémoire partagée avec l'hôte (zéro-copie possible, §8.4 de l'architecture).
     pub unified_memory: bool,
     /// Mémoire globale en octets, si le backend l'expose (wgpu ne l'expose pas).
@@ -168,6 +170,7 @@ mod tests {
                         vendor: "test".into(),
                         version: "1".into(),
                         f64: true,
+                        f64_math: true,
                         unified_memory: false,
                         memory_bytes: None,
                         max_buffer_bytes: None,
