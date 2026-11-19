@@ -29,6 +29,19 @@ Pic mémoire supplémentaire pour 1 Gio d'entrée (la sortie seule compte pour 1
 Mesure : mémoire résidente (macOS), mémoire engagée (Windows). Sur 10 M éléments, OpenCL en zéro-copie
 traite 83 Go/s sur le M5 Pro contre 9,5 Go/s pour Metal (copies).
 
+#### Mesures f64 via wgpu (sonde sur le PC, wgpu 30)
+
+| GPU / API | `SHADER_F64` | Résultat |
+|---|---|---|
+| RTX 4080 SUPER, Vulkan | ✅ | arithmétique, `//`, `%`, comparaisons, `sqrt`, `floor`, `ceil`, `abs`, `min`, `max`, `fma`, conversions : **précision f64** (≤ 2·10⁻¹⁶) |
+| RTX 4080 SUPER, Vulkan | ✅ | `exp` : accepté mais **calculé en précision f32** (1,7·10⁻⁷), sans erreur ; `log` : **le pilote plante** (violation d'accès) |
+| RTX 4080 SUPER, Vulkan | ✅ | paramètre f64 par `bitcast<f64>(vec2<u32>)` : refusé par naga ; par un buffer `array<f64>` : correct |
+| RTX 4080 SUPER et UHD 770, DX12 | ❌ | — |
+| UHD 770, Vulkan ; M5 Pro, Metal | ❌ | pas d'unités f64 dans le matériel |
+
+Les fonctions transcendantes en f64 (GLSL.std.450 ne les définit qu'en 16 et 32 bits) sont donc **refusées
+avant compilation** sur Vulkan : sinon, résultat faux silencieux ou plantage.
+
 #### Décisions prises pendant M1
 
 - **Sémantique** : `//` et `%` suivent Python et NumPy (arrondi vers −∞, signe du diviseur), y compris sur
@@ -36,8 +49,9 @@ traite 83 Go/s sur le M5 Pro contre 9,5 Go/s pour Metal (copies).
   flottants ; `pow` corrigé en WGSL pour une base négative.
 - **Typage** : un littéral prend le type de son contexte (`x * 2` reste f32) ; une locale prend le type de ses
   affectations (`acc = 0` puis `acc += x` → f32) ; aucune promotion implicite vers f64.
-- **f64 via wgpu** : `Device.f64` vaut `False` pour Metal, Vulkan et DX12 (pas de f64 en WGSL), même si le GPU
-  le supporte. Le f64 passe par OpenCL (RTX) ou `cpu:0`.
+- **f64 via wgpu** : à M1, `Device.f64` vaut `False` pour Metal, Vulkan et DX12. C'était trop restrictif :
+  wgpu active le f64 sur Vulkan (`SHADER_F64`), à condition d'éviter les fonctions mathématiques. Corrigé
+  à M1.5 (§6.2, mesures ci-dessous).
 - **`cpu:0`** : l'interpréteur de référence est exposé comme périphérique, toujours disponible, en dernier.
 - **Taille des buffers wgpu** : limitée à ~1 Gio sur l'UHD 770 en Vulkan. Un tableau trop grand lève
   `gs.UnsupportedFeature` (avant correction, wgpu renvoyait un résultat faux sans erreur). Le découpage
@@ -284,23 +298,43 @@ for bloc in normalize.stream(generateur(), mean=0.0, std=1.0):
 ```python
 gs.devices()
 # [Device('Apple M5 Pro', backend='metal', f64=False, unified_memory=True),
-#  Device('Apple M5 Pro', backend='opencl', version='1.2', f64=False, unified_memory=True)]
+#  Device('Apple M5 Pro', backend='opencl', f64=False, unified_memory=True, memory='17.8 Go')]
+# Sur le PC : Device('NVIDIA GeForce RTX 4080 SUPER', backend='vulkan', f64=True, f64_math=False, …)
 
 with gs.device("opencl"):            # pour un bloc de code
     ...
 normalize(x, 0.0, 1.0, device="opencl:0")   # pour un appel
 ```
 
-Sélection par défaut (premier disponible) :
+#### Choix automatique (M1.5)
 
-| Plateforme | Ordre |
+Sans `device=` ni `with gs.device(...)`, GPUsync choisit le périphérique **pour chaque kernel**, selon ce qu'il
+exige (§6.2) et ce que le matériel sait faire. L'utilisateur n'a jamais à choisir entre Vulkan et OpenCL.
+
+1. **Filtrer** les périphériques capables : `f64`, `f64_math`, et plus tard atomiques, mémoire locale…
+2. **Classer** les restants :
+
+| Rang | Catégorie | Backend préféré | Pourquoi |
+|---|---|---|---|
+| 1 | GPU dédié | CUDA (M6) → Vulkan → OpenCL → DX12 | le plus puissant ; Vulkan a l'overhead le plus bas (0,095 ms contre 0,27 ms en OpenCL sur la RTX) |
+| 2 | GPU intégré | Metal (Mac) ; sinon OpenCL → Vulkan | zéro-copie : Metal `NoCopy`, OpenCL `USE_HOST_PTR` |
+| 3 | CPU | OpenCL (POCL) → `cpu:0` | dernier recours |
+
+3. Si seul `cpu:0` convient (ex. f64 avec `exp` sur un Mac), le calcul s'y fait, avec un avertissement
+   `gs.PerformanceWarning` émis une fois par kernel : le résultat est correct, mais lent.
+
+Le choix est mis en cache par kernel et visible : `y.device`, `gs.default_device(kernel)`. Exemples sur le PC :
+
+| Kernel | Choisi |
 |---|---|
-| macOS | Metal (wgpu) → OpenCL → CPU |
-| Linux / Windows | CUDA (à partir de M6) → Vulkan / DX12 (wgpu) → OpenCL → CPU |
+| f32 | `vulkan:0` (RTX) |
+| f64 arithmétique | `vulkan:0` (RTX, `SHADER_F64`) |
+| f64 avec `gs.exp` | `opencl:0` (RTX) |
+
+Avec `device=` explicite, le périphérique demandé est utilisé tel quel ; s'il ne convient pas,
+`gs.UnsupportedFeature` liste les périphériques compatibles.
 
 Le backend « CPU » est l'interpréteur de l'IR (lent, toujours disponible) ; POCL via OpenCL est l'option CPU rapide.
-
-L'ordre sur macOS est provisoire : wgpu copie les données alors qu'OpenCL ne copie pas (§8.4). Il sera revu avec les mesures de M1 (décision D10).
 
 ### 4.9 Débogage et introspection
 
@@ -393,10 +427,21 @@ Types : `bool`, `i32`, `u32`, `i64`, `f16`, `f32`, `f64`, tableaux `T[dims]` (gl
 Une passe calcule ce que le kernel exige :
 
 ```rust
-struct Requirements { f64: bool, i64: bool, f16: bool, atomics_f32: bool, local_mem_bytes: u32, … }
+struct Requirements { f64: bool, f64_math: bool, i64: bool, f16: bool, atomics_f32: bool, local_mem_bytes: u32, … }
 ```
 
-Comparées aux capacités du périphérique **avant** la génération de code → `gs.UnsupportedFeature` clair au lieu d'une erreur de driver ou d'un résultat faux.
+- `f64` : le kernel manipule des f64 (arithmétique, comparaisons, `//`, `%`, `sqrt`, `floor`, `ceil`, `abs`,
+  `min`, `max`, `fma`, conversions).
+- `f64_math` : il appelle en plus une fonction transcendante en f64 (`exp`, `exp2`, `log`, `log2`, `sin`,
+  `cos`, `tan`, `tanh`, `atan2`, `pow`, `**`).
+
+| Périphérique | `f64` | `f64_math` |
+|---|---|---|
+| OpenCL avec `cl_khr_fp64`, CUDA, `cpu:0` | ✅ | ✅ |
+| Vulkan avec `SHADER_F64` | ✅ | ❌ (résultat faux silencieux ou plantage du pilote, mesuré) |
+| Metal, DX12, GPU sans f64 | ❌ | ❌ |
+
+Comparées aux capacités du périphérique **avant** la génération de code → `gs.UnsupportedFeature` clair au lieu d'une erreur de driver ou d'un résultat faux. Elles servent aussi au choix automatique du périphérique (§4.8).
 
 ### 6.3 Interpréteur de référence
 
@@ -420,7 +465,7 @@ trait Emitter {
 | Cible | Version de base | Points d'attention |
 |---|---|---|
 | **OpenCL C** | 1.2 | suffixe `f` sur les littéraux f32 ; `#pragma OPENCL EXTENSION cl_khr_fp64` seulement si requis ; pas d'atomiques flottants en 1.2 → émulation par boucle CAS ; garde de bornes |
-| **WGSL** | wgpu | pas de f64 ni de i64 ; nombre de buffers par kernel et taille max d'un buffer limités (limites par défaut de wgpu, relevables selon l'adaptateur) → à prendre en compte dans le découpage out-of-core |
+| **WGSL** | wgpu | f64 seulement sur Vulkan avec `SHADER_F64` (extension de naga : type `f64`, littéraux `1.5lf`, paramètres f64 dans un buffer `array<f64>` séparé), sans fonctions transcendantes ; pas de i64 ; taille max d'un buffer et d'une liaison limitée → tailles de bloc (§9.2) |
 | **CUDA C** | NVRTC (M6) | littéraux `f`, `__restrict__`, garde de bornes |
 
 Règles communes :
@@ -675,7 +720,7 @@ Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget �
 |---|---|---|
 | **M0** Squelette | workspace Cargo, maturin, `gs.devices()` liste wgpu + OpenCL | `pip install -e .` puis `gs.devices()` sur le Mac |
 | **M1** MVP élément par élément | frontend minimal, IR, interpréteur, émetteurs WGSL + OpenCL C, `gs.Array` synchrone, zéro-copie OpenCL sur mémoire unifiée | `normalize` correct sur Metal et OpenCL ; overhead ≤ 0,3 ms ; tests différentiels verts ; pic mémoire ×1 sur 1 Go en OpenCL sur le Mac |
-| **M1.5** Moteur de transferts | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM | critères du §9.8 sur le Mac et le PC |
+| **M1.5** Moteur de transferts et choix automatique | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM ; f64 via Vulkan (`SHADER_F64`) ; besoins `f64` / `f64_math` ; choix automatique du périphérique par kernel (§4.8) | critères du §9.8 sur le Mac et le PC ; un kernel f64 arithmétique tourne sur Vulkan (RTX), un kernel f64 avec `exp` sur OpenCL (RTX), sans `device=` |
 | **M2** Index et formes | `gs.index()`, dimensions nommées, retours multiples, boucles, `gs.local`, réductions de `gs.Array` | `pairwise_dist` et `stats` corrects ; ta DTW portée et comparée au prototype |
 | **M3** Out-of-core avec index | découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes | `pairwise_dist` sur des données dont la sortie dépasse la VRAM |
 | **M4** Async et interop | `await`, DLPack, cache disque | même script en synchrone, async et Jupyter |
@@ -698,4 +743,4 @@ Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget �
 | D7 | Syntaxe du mode explicite (`grid=` + `gs.Out`) | à valider sur 2–3 vrais cas (histogramme, scatter) |
 | D8 | API des réductions : méthodes de `gs.Array` seulement, ou aussi des kernels de réduction écrits par l'utilisateur ? | méthodes d'abord |
 | D9 | Backend natif (Metal, Vulkan) en plus de wgpu pour le zéro-copie ? | Metal : inutile, wgpu-hal permet `NoCopy` (M1.5). Vulkan : nécessaire pour importer la mémoire hôte (absent de wgpu 30) ; à décider après M1.5 selon le coût mesuré de l'anneau de transfert, sachant que CUDA (M6) couvre la RTX |
-| D10 | Sur Mac, Metal (wgpu) reste-t-il le backend par défaut s'il copie alors qu'OpenCL ne copie pas ? | oui si Metal `NoCopy` (M1.5) tient le critère « 0 en plus » ; sur PC, OpenCL devrait devenir le défaut de l'UHD 770 (zéro-copie), à confirmer par les mesures de M1.5 |
+| D10 | Backend par défaut ? | ✅ remplacé par le choix automatique par kernel (§4.8, M1.5) : Metal sur Mac si `NoCopy` tient le critère « 0 en plus », OpenCL pour les GPU intégrés, Vulkan pour les GPU dédiés, OpenCL quand `f64_math` est requis |
