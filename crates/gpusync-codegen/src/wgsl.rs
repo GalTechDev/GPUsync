@@ -1,0 +1,330 @@
+//! IR → WGSL (wgpu : Metal, Vulkan, DX12). Pas de f64 en WGSL : refusé avant d'arriver ici.
+
+use gpusync_ir::*;
+
+use crate::opencl::{float_repr, intrinsic_name};
+use crate::{CodegenError, Helper, KernelSource, Out, helpers, local_name, param_name};
+
+/// Taille d'un groupe de travail. La grille est en 2D (x, y) pour dépasser 65 535 groupes.
+pub const WGSL_WORKGROUP_SIZE: u32 = 256;
+
+fn w_type(t: Scalar) -> &'static str {
+    match t {
+        Scalar::Bool => "bool",
+        Scalar::I32 => "i32",
+        Scalar::U32 => "u32",
+        Scalar::F32 => "f32",
+        Scalar::F64 => "f64",
+    }
+}
+
+fn lit(c: Const) -> String {
+    match c {
+        Const::Bool(b) => (if b { "true" } else { "false" }).into(),
+        Const::I32(i32::MIN) => "bitcast<i32>(0x80000000u)".into(),
+        Const::I32(v) if v < 0 => format!("({v}i)"),
+        Const::I32(v) => format!("{v}i"),
+        Const::U32(v) => format!("{v}u"),
+        Const::F32(v) if v.is_nan() => "bitcast<f32>(0x7fc00000u)".into(),
+        Const::F32(v) if v.is_infinite() => (if v > 0.0 {
+            "bitcast<f32>(0x7f800000u)"
+        } else {
+            "bitcast<f32>(0xff800000u)"
+        })
+        .into(),
+        Const::F32(v) if v < 0.0 => format!("({}f)", float_repr(format!("{v:?}"))),
+        Const::F32(v) => format!("{}f", float_repr(format!("{v:?}"))),
+        Const::F64(v) => float_repr(format!("{v:?}")),
+    }
+}
+
+struct Gen<'a> {
+    k: &'a Kernel,
+    out: Out,
+    tmp: usize,
+}
+
+impl Gen<'_> {
+    fn expr(&self, e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Const(c) => lit(*c),
+            ExprKind::Local(i) => local_name(self.k, *i),
+            ExprKind::Param(i) => match self.k.params[*i].kind {
+                ParamKind::Array => format!("{}[gs_i]", param_name(self.k, *i)),
+                ParamKind::Scalar => param_name(self.k, *i),
+            },
+            ExprKind::Unary(UnOp::Neg, a) => format!("(-{})", self.expr(a)),
+            ExprKind::Unary(UnOp::Not, a) => format!("(!{})", self.expr(a)),
+            ExprKind::Binary(op, a, b) => {
+                let (x, y) = (self.expr(a), self.expr(b));
+                match (op, a.ty) {
+                    (BinOp::FloorDiv, Scalar::I32) => format!("gs_floordiv_i32({x}, {y})"),
+                    (BinOp::FloorDiv, Scalar::U32) => format!("gs_floordiv_u32({x}, {y})"),
+                    (BinOp::FloorDiv, _) => format!("floor({x} / {y})"),
+                    (BinOp::Mod, Scalar::I32) => format!("gs_mod_i32({x}, {y})"),
+                    (BinOp::Mod, Scalar::U32) => format!("gs_mod_u32({x}, {y})"),
+                    (BinOp::Mod, _) => format!("gs_mod_f32({x}, {y})"),
+                    (BinOp::Pow, _) => format!("gs_pow_f32({x}, {y})"),
+                    (BinOp::Add, _) => format!("({x} + {y})"),
+                    (BinOp::Sub, _) => format!("({x} - {y})"),
+                    (BinOp::Mul, _) => format!("({x} * {y})"),
+                    (BinOp::Div, _) => format!("({x} / {y})"),
+                    (BinOp::And, _) => format!("({x} && {y})"),
+                    (BinOp::Or, _) => format!("({x} || {y})"),
+                }
+            }
+            ExprKind::Compare(op, a, b) => {
+                let s = match op {
+                    CmpOp::Eq => "==",
+                    CmpOp::Ne => "!=",
+                    CmpOp::Lt => "<",
+                    CmpOp::Le => "<=",
+                    CmpOp::Gt => ">",
+                    CmpOp::Ge => ">=",
+                };
+                format!("({} {s} {})", self.expr(a), self.expr(b))
+            }
+            // select(faux, vrai, condition)
+            ExprKind::Select(c, a, b) => format!(
+                "select({}, {}, {})",
+                self.expr(b),
+                self.expr(a),
+                self.expr(c)
+            ),
+            ExprKind::Call(f, args) => {
+                let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
+                match f {
+                    Intrinsic::Pow => format!("gs_pow_f32({}, {})", a[0], a[1]),
+                    Intrinsic::Abs if args[0].ty == Scalar::U32 => a[0].clone(),
+                    _ => format!("{}({})", intrinsic_name(*f), a.join(", ")),
+                }
+            }
+            ExprKind::Cast(a) => format!("{}({})", w_type(e.ty), self.expr(a)),
+        }
+    }
+
+    fn block(&mut self, b: &Block) {
+        for s in b {
+            self.stmt(s);
+        }
+    }
+
+    fn indent(&mut self, b: &Block) {
+        self.out.depth += 1;
+        self.block(b);
+        self.out.depth -= 1;
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Assign { local, value } => {
+                let l = format!("{} = {};", local_name(self.k, *local), self.expr(value));
+                self.out.line(l);
+            }
+            Stmt::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                let c = format!("if ({}) {{", self.expr(cond));
+                self.out.line(c);
+                self.indent(then);
+                if !otherwise.is_empty() {
+                    self.out.line("} else {");
+                    self.indent(otherwise);
+                }
+                self.out.line("}");
+            }
+            Stmt::For {
+                var,
+                start,
+                stop,
+                step,
+                body,
+            } => {
+                let n = self.tmp;
+                self.tmp += 1;
+                let v = local_name(self.k, *var);
+                let (s0, e0, t0) = (self.expr(start), self.expr(stop), self.expr(step));
+                self.out.line("{");
+                self.out.depth += 1;
+                self.out.line(format!("let gs_stop{n} = {e0};"));
+                self.out.line(format!("let gs_step{n} = {t0};"));
+                self.out.line(format!("{v} = {s0};"));
+                let cond = if start.ty == Scalar::U32 {
+                    format!("gs_step{n} > 0u && {v} < gs_stop{n}")
+                } else {
+                    format!(
+                        "(gs_step{n} > 0i && {v} < gs_stop{n}) || (gs_step{n} < 0i && {v} > gs_stop{n})"
+                    )
+                };
+                self.out.line("loop {");
+                self.out.depth += 1;
+                self.out.line(format!("if (!({cond})) {{ break; }}"));
+                self.block(body);
+                self.out
+                    .line(format!("continuing {{ {v} = {v} + gs_step{n}; }}"));
+                self.out.depth -= 1;
+                self.out.line("}");
+                self.out.depth -= 1;
+                self.out.line("}");
+            }
+            Stmt::While { cond, body } => {
+                let c = format!("while ({}) {{", self.expr(cond));
+                self.out.line(c);
+                self.indent(body);
+                self.out.line("}");
+            }
+            Stmt::Break => self.out.line("break;"),
+            Stmt::Continue => self.out.line("continue;"),
+            Stmt::Return(e) => {
+                let r = format!("gs_out[gs_i] = {};", self.expr(e));
+                self.out.line(r);
+                self.out.line("return;");
+            }
+        }
+    }
+}
+
+const HELPERS: &[(Helper, &str)] = &[
+    (
+        Helper::FloorDivI32,
+        "fn gs_floordiv_i32(a: i32, b: i32) -> i32 {\n    if (b == 0i) { return 0i; }\n    var q = a / b;\n    if ((a % b != 0i) && ((a < 0i) != (b < 0i))) { q = q - 1i; }\n    return q;\n}",
+    ),
+    (
+        Helper::FloorDivU32,
+        "fn gs_floordiv_u32(a: u32, b: u32) -> u32 { if (b == 0u) { return 0u; } return a / b; }",
+    ),
+    (
+        Helper::ModI32,
+        "fn gs_mod_i32(a: i32, b: i32) -> i32 {\n    if (b == 0i) { return 0i; }\n    var r = a % b;\n    if (r != 0i && ((r < 0i) != (b < 0i))) { r = r + b; }\n    return r;\n}",
+    ),
+    (
+        Helper::ModU32,
+        "fn gs_mod_u32(a: u32, b: u32) -> u32 { if (b == 0u) { return 0u; } return a % b; }",
+    ),
+    (
+        Helper::ModF32,
+        "fn gs_mod_f32(a: f32, b: f32) -> f32 {\n    var r = a % b;\n    if (r != 0.0f && ((r < 0.0f) != (b < 0.0f))) { r = r + b; }\n    return r;\n}",
+    ),
+    // pow WGSL n'est défini que pour x ≥ 0 : on rétablit la sémantique de C / Python.
+    (
+        Helper::PowF32,
+        "fn gs_pow_f32(x: f32, y: f32) -> f32 {\n    if (y == 0.0f) { return 1.0f; }\n    if (x > 0.0f) { return pow(x, y); }\n    if (x == 0.0f) { return select(bitcast<f32>(0x7f800000u), 0.0f, y > 0.0f); }\n    if (floor(y) != y) { return bitcast<f32>(0x7fc00000u); }\n    let r = pow(-x, y);\n    if (abs(y % 2.0f) == 1.0f) { return -r; }\n    return r;\n}",
+    ),
+];
+
+/// Génère le module WGSL. Point d'entrée : `main`.
+pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
+    if k.requirements().f64 {
+        return Err(CodegenError(
+            "f64 n'est pas disponible en WGSL (Metal, Vulkan, DX12 via wgpu)".into(),
+        ));
+    }
+    let mut g = Gen {
+        k,
+        out: Out {
+            buf: String::new(),
+            depth: 0,
+        },
+        tmp: 0,
+    };
+    g.out
+        .line(format!("// GPUsync — kernel « {} » (WGSL, généré)", k.name));
+    let mut binding = 0;
+    for (i, p) in k.array_params() {
+        g.out.line(format!(
+            "@group(0) @binding({binding}) var<storage, read> {}: array<{}>;",
+            param_name(k, i),
+            w_type(p.ty)
+        ));
+        binding += 1;
+    }
+    g.out.line(format!(
+        "@group(0) @binding({binding}) var<storage, read_write> gs_out: array<{}>;",
+        w_type(k.output)
+    ));
+    g.out.line(format!(
+        "@group(0) @binding({}) var<storage, read> gs_params: array<u32>;",
+        binding + 1
+    ));
+    let used = helpers(k);
+    for (h, code) in HELPERS {
+        if used.contains(h) {
+            g.out.line(*code);
+        }
+    }
+    let n_scalars = k
+        .params
+        .iter()
+        .filter(|p| p.kind == ParamKind::Scalar)
+        .count();
+    g.out
+        .line(format!("@compute @workgroup_size({WGSL_WORKGROUP_SIZE})"));
+    g.out.line("fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {");
+    g.out.depth = 1;
+    g.out.line(format!(
+        "let gs_i = gid.x + gid.y * (nwg.x * {WGSL_WORKGROUP_SIZE}u);"
+    ));
+    g.out
+        .line(format!("if (gs_i >= gs_params[{n_scalars}]) {{ return; }}"));
+    let mut word = 0;
+    for (i, p) in k.params.iter().enumerate() {
+        if p.kind == ParamKind::Scalar {
+            let read = match p.ty {
+                Scalar::U32 => format!("gs_params[{word}]"),
+                t => format!("bitcast<{}>(gs_params[{word}])", w_type(t)),
+            };
+            g.out.line(format!("let {} = {read};", param_name(k, i)));
+            word += 1;
+        }
+    }
+    for (i, l) in k.locals.iter().enumerate() {
+        g.out
+            .line(format!("var {}: {};", local_name(k, i), w_type(l.ty)));
+    }
+    g.block(&k.body);
+    g.out.depth = 0;
+    g.out.line("}");
+    Ok(KernelSource {
+        code: g.out.buf,
+        entry: "main".into(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn genere_un_module_wgsl() {
+        let src = emit_wgsl(&crate::tests::sample()).unwrap();
+        let c = &src.code;
+        assert!(
+            c.contains("@group(0) @binding(0) var<storage, read> p0_x: array<f32>;"),
+            "{c}"
+        );
+        assert!(
+            c.contains("@binding(1) var<storage, read_write> gs_out: array<f32>;"),
+            "{c}"
+        );
+        assert!(
+            c.contains("let p1_moyenne = bitcast<f32>(gs_params[0]);"),
+            "{c}"
+        );
+        assert!(
+            c.contains("let p2__cart = bitcast<i32>(gs_params[1]);"),
+            "{c}"
+        );
+        assert!(c.contains("if (gs_i >= gs_params[2]) { return; }"), "{c}");
+        assert!(c.contains("gs_pow_f32(p0_x[gs_i], 2.0f)"), "{c}");
+        assert!(c.contains("select("), "{c}");
+    }
+
+    #[test]
+    fn f64_refuse() {
+        let mut k = crate::tests::sample();
+        k.output = Scalar::F64;
+        assert!(emit_wgsl(&k).is_err());
+    }
+}
