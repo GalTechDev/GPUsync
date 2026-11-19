@@ -120,3 +120,15 @@ def default_device(kernel=None):
     if kernel is not None:
         dev_id = kernel._choose(None)[0]
     return _by_id(dev_id)
+
+
+def set_memory_budget(nbytes=None) -> None:
+    """Budget mémoire par périphérique pour le mode Résident (None : 50 % de la mémoire du périphérique).
+    Au-delà, les calculs passent en mode Flux (par blocs), sans limite de taille."""
+    limits = _core.get_transfer_limits()
+    _core.set_transfer_limits(limits["chunk_bytes"], None if nbytes is None else int(nbytes), limits["direct_chunk_bytes"])
+
+
+def _set_transfer_limits(chunk_bytes=64 << 20, budget_bytes=None, direct_chunk_bytes=None) -> None:
+    """Réglages internes du moteur de transferts (tests : forcer le découpage sur de petits tableaux)."""
+    _core.set_transfer_limits(int(chunk_bytes), budget_bytes, direct_chunk_bytes)

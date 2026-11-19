@@ -20,13 +20,23 @@ from ._array import Array
 from ._ast import KernelDeclarationError, kernel_json
 from ._device import CompatibilityWarning, _by_id, capable, fallback, ranked, resolve
 
-_ALIGN = 4096  # alignement des sorties : zéro-copie garanti sur les GPU intégrés (Intel, Apple)
+_ALIGN = 16384  # alignement des sorties : une page sur Apple Silicon (16 Kio), 4 sur ailleurs
+
+
+class OutOfMemory(_core.GpusyncError):
+    """La sortie ne peut pas être allouée en mémoire : passez une destination avec out=."""
 
 
 def _aligned_empty(shape, dtype) -> np.ndarray:
     dtype = np.dtype(dtype)
     nbytes = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
-    raw = np.empty(nbytes + _ALIGN, dtype=np.uint8)
+    try:
+        raw = np.empty(nbytes + _ALIGN, dtype=np.uint8)
+    except MemoryError:
+        raise OutOfMemory(
+            f"impossible d'allouer la sortie ({nbytes / 2**30:.1f} Gio) en mémoire. Passez une destination, "
+            f"ex. out=np.memmap('sortie.bin', dtype=np.{dtype.name}, mode='w+', shape={tuple(shape)})"
+        ) from None
     offset = (-raw.ctypes.data) % _ALIGN
     return raw[offset : offset + nbytes].view(dtype).reshape(shape)
 
@@ -91,7 +101,24 @@ class Kernel:
         """Code généré : "opencl", "wgsl" ou "ir"."""
         return self._ir.source(target)
 
-    def __call__(self, *args, device=None) -> Array:
+    def stream(self, source, *rest, device=None):
+        """Traite un flux de blocs (générateur, itérable) et renvoie un itérateur de résultats NumPy.
+
+        Chaque élément de `source` est le premier argument du kernel (un tableau), ou un tuple des
+        premiers arguments ; `rest` complète l'appel. Le bloc suivant est lancé avant de rendre le
+        résultat du bloc courant : calcul et consommation se recouvrent.
+        """
+        pending = None
+        for item in source:
+            args = (item if isinstance(item, tuple) else (item,)) + rest
+            current = self(*args, device=device)
+            if pending is not None:
+                yield pending.numpy()
+            pending = current
+        if pending is not None:
+            yield pending.numpy()
+
+    def __call__(self, *args, device=None, out=None) -> Array:
         if len(args) != len(self._params):
             raise TypeError(f"{self.__name__}() attend {len(self._params)} argument(s), {len(args)} reçu(s)")
         dev_id, warning = self._choose(device)
@@ -141,7 +168,17 @@ class Kernel:
                     f"{self.__name__}() : les tableaux doivent avoir la même forme ('{first}' {shape}, '{name}' {arr_shape})"
                 )
 
-        out = _aligned_empty(shape, self._out.np)
+        if out is None:
+            out = _aligned_empty(shape, self._out.np)
+        else:
+            if not isinstance(out, np.ndarray):
+                raise TypeError("out : tableau NumPy (ou np.memmap) attendu")
+            if out.dtype != self._out.np or out.shape != shape:
+                raise _core.ShapeMismatch(
+                    f"out : forme {shape} et type {self._out.np} attendus, reçu {out.shape} {out.dtype}"
+                )
+            if not (out.flags.c_contiguous and out.flags.writeable):
+                raise _core.TypeMismatch("out : le tableau doit être contigu et modifiable")
         if out.size == 0:
             return Array(None, out, dev_id)
         keepalive.append(out)

@@ -29,8 +29,8 @@ from ._core import (
     backends,
     devices,
 )
-from ._device import CompatibilityWarning, default_device, device, set_default_device
-from ._kernel import Kernel, kernel
+from ._device import CompatibilityWarning, default_device, device, set_default_device, set_memory_budget
+from ._kernel import Kernel, OutOfMemory, kernel
 from ._math import *  # noqa: F403  (sqrt, exp, … utilisables dans les kernels)
 from ._math import __all__ as _math_all
 from ._types import f32, f64, i32, u32
@@ -38,9 +38,9 @@ from ._types import f32, f64, i32, u32
 __all__ = [
     "kernel", "Kernel", "Array",
     "devices", "backends", "Device", "BackendStatus",
-    "device", "default_device", "set_default_device",
+    "device", "default_device", "set_default_device", "set_memory_budget",
     "f32", "f64", "i32", "u32",
-    "CompatibilityWarning",
+    "CompatibilityWarning", "OutOfMemory",
     "GpusyncError", "KernelSyntaxError", "TypeMismatch", "ShapeMismatch", "UnsupportedFeature", "DeviceError",
     "__version__",
     *_math_all,

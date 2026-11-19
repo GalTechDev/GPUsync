@@ -3,7 +3,8 @@
 
 mod exec;
 
-pub use exec::{ClArg, ClBuffer, ClDevice, ClKernel};
+pub use exec::{ClArg, ClBuffer, ClDevice, ClKernel, Pinned, wait};
+pub use opencl3::event::Event as ClEvent;
 
 use gpusync_runtime::{Backend, BackendError, DeviceInfo, DeviceKind};
 use opencl3::device::{

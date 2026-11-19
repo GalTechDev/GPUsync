@@ -64,7 +64,7 @@ fn meme_resultat_sur_tous_les_peripheriques() {
                 ],
                 &[Const::F32(0.5)],
                 n,
-                Some(out.as_mut_ptr()),
+                out.as_mut_ptr(),
             )
             .unwrap_or_else(|e| panic!("{id} : {e}"));
             if dev.zero_copy() {

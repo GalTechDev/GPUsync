@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use gpusync_core::{
-    Compiled, CoreError, Device, DeviceArray, Input, compile, launch, parse, source,
+    Compiled, CoreError, Device, DeviceArray, Input, TransferLimits, compile, launch, parse,
+    set_transfer_limits, source, transfer_limits,
 };
 use gpusync_ir::{Const, Kernel, ParamKind, Scalar};
 use pyo3::exceptions::PyException;
@@ -229,7 +230,7 @@ impl KernelIR {
                     _ => unreachable!(),
                 })
                 .collect();
-            unsafe { launch(&dev, &c, &inputs, &consts, n, Some(out_ptr as *mut u8)) }
+            unsafe { launch(&dev, &c, &inputs, &consts, n, out_ptr as *mut u8) }
         });
         let array = result.map_err(to_py)?;
         // Les DeviceArray d'entrée doivent aussi rester en vie (leurs buffers sont lus).
@@ -267,6 +268,12 @@ impl DeviceArrayPy {
         self.array.bytes()
     }
 
+    /// Mode d'exécution : "direct" (zéro-copie), "resident", "flux" ou "cpu".
+    #[getter]
+    fn mode(&self) -> &'static str {
+        self.array.mode.name()
+    }
+
     /// Adresse hôte du résultat s'il est en zéro-copie (sinon None).
     #[getter]
     fn host_ptr(&self) -> Option<usize> {
@@ -296,6 +303,38 @@ fn compile_kernel(spec_json: &str) -> PyResult<KernelIR> {
     })
 }
 
+/// Réglages du moteur de transferts : {"chunk_bytes", "budget_bytes", "direct_chunk_bytes"}.
+#[pyfunction]
+fn get_transfer_limits(py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+    let l = transfer_limits();
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("chunk_bytes", l.chunk_bytes)?;
+    d.set_item("budget_bytes", l.budget_bytes)?;
+    d.set_item("direct_chunk_bytes", l.direct_chunk_bytes)?;
+    Ok(d.unbind())
+}
+
+/// Modifie les réglages du moteur de transferts (None : valeur par défaut pour budget et bloc Direct).
+#[pyfunction]
+#[pyo3(name = "set_transfer_limits", signature = (chunk_bytes, budget_bytes, direct_chunk_bytes))]
+fn set_transfer_limits_py(
+    chunk_bytes: usize,
+    budget_bytes: Option<u64>,
+    direct_chunk_bytes: Option<usize>,
+) -> PyResult<()> {
+    if chunk_bytes < 64 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "chunk_bytes : au moins 64 octets",
+        ));
+    }
+    set_transfer_limits(TransferLimits {
+        chunk_bytes,
+        budget_bytes,
+        direct_chunk_bytes,
+    });
+    Ok(())
+}
+
 /// Le périphérique travaille-t-il directement dans la mémoire de l'hôte ?
 #[pyfunction]
 fn device_zero_copy(py: Python<'_>, device_id: &str) -> PyResult<bool> {
@@ -315,5 +354,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DeviceArrayPy>()?;
     m.add_function(wrap_pyfunction!(compile_kernel, m)?)?;
     m.add_function(wrap_pyfunction!(device_zero_copy, m)?)?;
+    m.add_function(wrap_pyfunction!(get_transfer_limits, m)?)?;
+    m.add_function(wrap_pyfunction!(set_transfer_limits_py, m)?)?;
     Ok(())
 }

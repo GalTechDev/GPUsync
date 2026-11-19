@@ -42,9 +42,15 @@ class Array:
         return self._host.nbytes
 
     @property
+    def mode(self) -> str:
+        """Mode d'exécution (§9.1) : "direct" (zéro-copie), "resident" (resté sur le GPU), "flux" (par blocs,
+        déjà dans sa destination) ou "cpu"."""
+        return self._handle.mode if self._handle is not None else "host"
+
+    @property
     def zero_copy(self) -> bool:
-        """Le résultat est-il calculé directement dans la mémoire du tableau NumPy ?"""
-        return self._handle is not None and self._handle.host_ptr == self._host.ctypes.data
+        """Le résultat est-il calculé directement dans la mémoire du tableau NumPy (mode Direct) ?"""
+        return self.mode == "direct"
 
     # ── lecture ──
     def numpy(self) -> np.ndarray:

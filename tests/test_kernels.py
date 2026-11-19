@@ -337,13 +337,17 @@ def test_choix_du_peripherique():
         normalize(f32([1.0]), 0.0, 1.0, device="opencl:42")
 
 
-def test_tableau_trop_grand_pour_wgpu_erreur_claire():
-    # Sur certains GPU (Intel UHD en Vulkan : 1 Gio − 4 o), un buffer de 1 Gio ne peut pas être lié :
-    # avant M1 final, wgpu l'ignorait et renvoyait un résultat faux sans erreur.
+def test_tableau_plus_grand_qu_un_buffer_wgpu():
+    # Sur l'UHD 770 en Vulkan, un buffer lié est limité à 1 Gio − 4 o. Avant M1.5 : résultat faux sans
+    # erreur, puis erreur claire ; depuis M1.5 : traité par blocs (mode Flux), sans limite.
     small = [d for d in gs.devices() if d.backend in ("metal", "vulkan", "dx12")
              and d.max_buffer_bytes is not None and d.max_buffer_bytes < (1 << 30) + 4096]
     if not small:
         pytest.skip("aucun périphérique wgpu limité à ~1 Gio par buffer")
-    x = np.zeros(small[0].max_buffer_bytes // 4 + 1, np.float32)
-    with pytest.raises(gs.UnsupportedFeature, match="taille maximale d'un buffer"):
-        normalize(x, 0.0, 1.0, device=small[0])
+    n = small[0].max_buffer_bytes // 4 + 1
+    x = np.arange(n, dtype=np.float32)
+    y = normalize(x, 1.0, 2.0, device=small[0])
+    assert y.mode == "flux"
+    out = np.asarray(y)
+    for i in (0, 1, n // 2, n - 2, n - 1):  # extrémités et frontières de blocs
+        assert out[i] == (np.float32(i) - 1) / 2

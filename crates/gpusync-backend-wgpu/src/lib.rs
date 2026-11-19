@@ -10,7 +10,7 @@
 
 mod exec;
 
-pub use exec::{WgBuffer, WgDevice, WgKernel};
+pub use exec::{FluxIn, WgBuffer, WgDevice, WgKernel};
 
 use std::sync::OnceLock;
 
