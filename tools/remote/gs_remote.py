@@ -508,7 +508,13 @@ def make_hub_handler(hub: Hub):
             addr = self.client_address[0]
             try:
                 if not hub.ip_allowed(addr):
-                    raise HttpError(403, "adresse IP non autorisée")
+                    hint = f" — pour l'autoriser : gs_remote.py hub --allow {addr}/32"
+                    ip = ipaddress.ip_address(addr)
+                    if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
+                        hint += " (adresse Tailscale / CGNAT)"
+                    log(f"refusé {addr} : adresse IP non autorisée{hint}")
+                    self._send(403, {"error": "adresse IP non autorisée"})
+                    return
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > MAX_BODY:
                     raise HttpError(413, "requête trop grosse")

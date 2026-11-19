@@ -66,6 +66,18 @@ python3 tools/remote/gs_remote.py agent --hub http://127.0.0.1:8765 --name mac -
 
 **Aucune règle de pare-feu à créer sur le PC** : l'agent ne fait que des connexions sortantes.
 
+#### Via Tailscale
+
+Si les machines sont reliées par Tailscale, utilise l'adresse Tailscale du Mac (`100.x.y.z`) dans `--hub`, et autorise
+l'adresse Tailscale du PC sur le hub (par défaut, seules les IP privées du réseau local sont acceptées) :
+
+```bash
+caffeinate -i python3 tools/remote/gs_remote.py hub --allow 100.90.141.102/32
+```
+
+Avantage : Tailscale chiffre tout le trafic entre les machines (WireGuard), ce qui lève la limite « trafic non chiffré »
+de la section Sécurité. Si le hub refuse une connexion, son journal affiche la commande `--allow` à utiliser.
+
 Les fois suivantes, `py gs_remote.py agent` suffit : l'URL du hub, le nom et le jeton sont mémorisés
 dans `%USERPROFILE%\.gpusync-remote\agent.json`.
 
