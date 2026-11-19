@@ -523,10 +523,11 @@ Support par backend :
 |---|---|---|
 | OpenCL | ✅ mesuré | `CL_MEM_USE_HOST_PTR` en entrée, `CL_MEM_ALLOC_HOST_PTR` + map en sortie |
 | Metal natif | ✅ | `newBufferWithBytesNoCopy` (mémoire alignée sur une page), `storageModeShared` |
-| wgpu | ⚠️ partiel | pas d'API pour utiliser un pointeur existant → au moins une copie en entrée. La fonctionnalité native `MAPPABLE_PRIMARY_BUFFERS` pourrait éviter la copie en sortie (à vérifier) |
+| wgpu → Metal | ✅ faisable | `newBufferWithBytesNoCopy`, confié à wgpu par `wgpu-hal` (`metal::Device::buffer_from_raw`, vérifié dans wgpu 30) |
+| wgpu → Vulkan / DX12 | ❌ | wgpu-hal 30 n'importe pas de mémoire hôte comme buffer (seulement `texture_from_raw`). Le matériel le permet pourtant (`VK_EXT_external_memory_host` présent sur la RTX 4080 SUPER et l'UHD 770, alignement 4 Kio) : il faudrait un backend Vulkan natif |
 | CUDA (Jetson, Grace) | ✅ | `cudaHostRegister` ou mémoire managée |
 
-Conséquence : sur Mac, le zéro-copie passe d'abord par **OpenCL** (dès M1). Un **backend Metal natif** n'est ajouté que si les mesures montrent que les copies de wgpu coûtent cher sur de gros volumes (décision D9).
+Mesuré à M1 : wgpu copie et consomme 3 à 5 fois la taille des données. La réponse est le moteur de transferts (§9) : zéro-copie là où l'import est possible, transferts par blocs bornés ailleurs.
 
 ### 8.5 Threads et GIL
 
@@ -541,9 +542,78 @@ Conséquence : sur Mac, le zéro-copie passe d'abord par **OpenCL** (dès M1). U
 
 ---
 
-## 9. Out-of-core
+## 9. Moteur de transferts (out-of-core intégré)
 
-### 9.1 Ce qui est découpable
+**Principe : un seul chemin d'exécution.** Tout appel est planifié en blocs ; un tableau qui tient en mémoire
+n'est qu'un plan à un bloc. Il n'y a **aucune limite de taille**, seulement des budgets mémoire et des
+contraintes de taille de bloc. L'out-of-core n'est pas un mode spécial : c'est la gestion normale des transferts.
+
+### 9.1 Trois modes, choisis automatiquement à chaque appel
+
+| Mode | Quand | Transferts | Mémoire en plus |
+|---|---|---|---|
+| **Direct** (zéro-copie) | GPU à mémoire unifiée, mémoire importable (OpenCL `USE_HOST_PTR`, Metal `NoCopy`) | aucun : le GPU lit et écrit les tableaux NumPy | 0 |
+| **Résident** | GPU dédié, l'appel tient dans le budget VRAM | un transfert DMA par entrée ; le résultat reste en VRAM (chaînage gratuit) | anneau de transfert (RAM, borné) |
+| **Flux** | GPU dédié au-delà du budget VRAM ; ou source non importable (memmap refusé, générateur) ; ou wgpu sans import | un transfert par bloc, recouvert par le calcul | anneau de transfert (RAM, borné) + quelques blocs (VRAM) |
+
+Les trois modes exécutent le même code généré : un bloc est vu par le kernel comme un tableau entier.
+
+### 9.2 Blocs
+
+- **Taille d'un bloc** = min(cible par défaut 64 Mio par tableau ; taille max d'un buffer ou d'une liaison du
+  périphérique ; budget ÷ (nombre de tampons × nombre de tableaux)), arrondie aux alignements (page de
+  16 Kio sur Apple Silicon, 4 Kio ailleurs ; 256 o pour les décalages de liaison wgpu).
+- **Les limites matérielles deviennent des tailles de bloc** : 1 Gio par liaison sur l'UHD 770 en Vulkan,
+  3,3 Gio par allocation sur le M5 Pro en OpenCL. Aucune n'est plus une erreur.
+- **Élément par élément** : un bloc est une sous-plage d'indices de toutes les entrées et de la sortie.
+- **Avec index (M2)** : découpage de la sortie le long de sa première dimension ; une entrée qui ne partage
+  pas cette dimension est résidente (§9.7).
+
+### 9.3 Transferts sur GPU dédié
+
+- **Anneau de transfert** : K tampons (3 par défaut) de la taille d'un bloc, en mémoire épinglée (OpenCL
+  `CL_MEM_ALLOC_HOST_PTR` mappé ; wgpu : buffers `MAP_WRITE` / `MAP_READ` réutilisés). Remplis par `memcpy`
+  depuis la source sur un thread Rust (GIL libéré) ; le DMA se fait à pleine vitesse depuis la mémoire épinglée.
+- **Pipeline** : pendant que le bloc *k* est calculé, le bloc *k+1* est envoyé et le bloc *k−1* revient
+  **directement dans sa destination finale** (tableau NumPy, memmap). OpenCL : une file de transferts et une
+  file de calcul synchronisées par événements, donc un vrai recouvrement. wgpu : une seule file ; le
+  recouvrement se fait entre les `memcpy` CPU et le travail du GPU.
+- **Budget VRAM** : 50 % de la mémoire du périphérique par défaut (OpenCL : `CL_DEVICE_GLOBAL_MEM_SIZE` ;
+  Vulkan : tas mémoire lus via wgpu-hal), réglable par `gs.set_memory_budget()`.
+- **Pool** : tampons et buffers de blocs réutilisés d'un appel à l'autre, aucune allocation par appel.
+- **Coût en RAM borné** : de l'ordre de 3 tampons × 64 Mio × (entrées + sortie), soit 0,4 à 0,8 Gio quel que
+  soit le volume (contre 3 à 5 fois le volume mesuré à M1).
+- **Le dernier `memcpy`** (source → tampon épinglé) disparaît avec CUDA (M6 : `cudaHostRegister`, DMA direct
+  depuis le tableau NumPy) ou un backend Vulkan natif (`VK_EXT_external_memory_host`).
+
+### 9.4 Mémoire unifiée
+
+- Mode Direct **par bloc** : chaque bloc est une sous-plage du tableau NumPy importée sans copie
+  (`USE_HOST_PTR` en OpenCL, `newBufferWithBytesNoCopy` en Metal via wgpu-hal). Aucune copie, quel que soit
+  le volume ; les blocs servent seulement à respecter la taille max d'une allocation.
+- Vulkan via wgpu sur GPU intégré (UHD 770) : pas d'import en wgpu 30, donc mode Flux avec anneau borné.
+  OpenCL reste le chemin zéro-copie de l'UHD 770.
+- memmap (fichier) : import tenté ; s'il est refusé (pages d'un fichier), mode Flux.
+
+### 9.5 Sources et destinations, sans limite
+
+| Source | Appel | Résultat |
+|---|---|---|
+| `np.ndarray` en RAM | `f(x)` | `gs.Array` |
+| `np.memmap` plus gros que la RAM | `f(x, out=np.memmap(...))` | écrit bloc par bloc dans le fichier de sortie |
+| générateur / itérable de blocs | `f.stream(gen)` | itérateur de résultats, un par bloc |
+
+- `out=` : tout tableau contigu de la bonne forme et du bon type (évite aussi d'allouer la sortie).
+- Sans `out=`, la sortie est allouée en RAM : si elle ne peut pas l'être, `gs.OutOfMemory` suggère `out=`.
+
+### 9.6 Chaînage
+
+- Mode Résident : le `gs.Array` reste en VRAM, le kernel suivant le lit sans transfert.
+- Mode Flux : le résultat est en RAM (ou dans `out=`), le kernel suivant le relit. La fusion de kernels (M7)
+  supprimera ces allers-retours.
+- Mode Direct : pas de transfert dans aucun cas.
+
+### 9.7 Ce qui est découpable (kernels avec index, M2)
 
 On découpe la grille le long de sa **première dimension**. Pour chaque entrée :
 - si elle partage cette dimension (même nom), elle est découpée de la même façon ;
@@ -558,25 +628,19 @@ Exemples :
 
 Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget → `gs.OutOfMemory` qui nomme l'entrée en cause.
 
-### 9.2 Pipeline
+### 9.8 Critères de réussite
 
-Triple tampon par défaut : pendant que le bloc *k* est calculé, le bloc *k+1* est uploadé et le bloc *k−1* est relu. Taille des blocs déduite du budget mémoire, de la taille max d'un buffer du backend et du nombre de tampons.
-
-### 9.3 Sources et destinations
-
-| Source | Appel | Résultat |
+| Cas | Machine | Pourquoi |
 |---|---|---|
-| `np.ndarray`, `np.memmap` | `f(x)` | `gs.Array` out-of-core : `np.asarray` le matérialise en RAM, `.save()` l'écrit sur disque bloc par bloc |
-| générateur / itérable de blocs | `f.stream(gen)` | itérateur de `np.ndarray`, un par bloc |
+| 4 Gio en OpenCL | Mac | dépasse l'allocation max (3,3 Gio) |
+| 2 Gio en Vulkan | PC, UHD 770 | dépasse la liaison max (1 Gio) |
+| 24 Gio en Vulkan et en OpenCL | PC, RTX | dépasse la VRAM (16 Gio) |
+| 40 Gio en memmap, `out=` memmap | Mac | dépasse la RAM (26 Go) |
 
-### 9.4 Sur mémoire unifiée
-
-La limite n'est plus la mémoire du GPU mais **la RAM**, puisque le GPU y accède directement.
-
-- Données qui tiennent en RAM : **pas de découpage**, un seul lancement en zéro-copie.
-- `memmap` ou générateur plus gros que la RAM : découpage par blocs comme ci-dessus, chaque bloc étant lu dans un tampon aligné réutilisé, puis traité en zéro-copie.
-- Pas de triple tampon : il n'y a plus de transfert à recouvrir par le calcul. On garde seulement un double tampon pour recouvrir **la lecture disque** et le calcul.
-- La taille max d'un buffer du backend (notamment wgpu) peut encore imposer un découpage.
+- Mémoire en plus : 0 en Direct ; au plus la taille de l'anneau (~0,5 Gio) en Résident et en Flux,
+  **indépendante du volume**.
+- Débit en mode Flux sur la RTX : proche de la bande passante PCIe, transferts et calcul recouverts.
+- Résultats identiques à NumPy dans tous les cas (tests différentiels avec des volumes qui forcent le découpage).
 
 ---
 
@@ -611,8 +675,9 @@ La limite n'est plus la mémoire du GPU mais **la RAM**, puisque le GPU y accèd
 |---|---|---|
 | **M0** Squelette | workspace Cargo, maturin, `gs.devices()` liste wgpu + OpenCL | `pip install -e .` puis `gs.devices()` sur le Mac |
 | **M1** MVP élément par élément | frontend minimal, IR, interpréteur, émetteurs WGSL + OpenCL C, `gs.Array` synchrone, zéro-copie OpenCL sur mémoire unifiée | `normalize` correct sur Metal et OpenCL ; overhead ≤ 0,3 ms ; tests différentiels verts ; pic mémoire ×1 sur 1 Go en OpenCL sur le Mac |
+| **M1.5** Moteur de transferts | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM | critères du §9.8 sur le Mac et le PC |
 | **M2** Index et formes | `gs.index()`, dimensions nommées, retours multiples, boucles, `gs.local`, réductions de `gs.Array` | `pairwise_dist` et `stats` corrects ; ta DTW portée et comparée au prototype |
-| **M3** Out-of-core | découpage, résidents, triple tampon, `memmap`, `.stream()`, `.save()`, variante mémoire unifiée (§9.4) | 50 Go traités avec un budget de 2 Go ; débit ≥ prototype ; mesure du coût des copies wgpu vs OpenCL zéro-copie (entrée de D9) |
+| **M3** Out-of-core avec index | découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes | `pairwise_dist` sur des données dont la sortie dépasse la VRAM |
 | **M4** Async et interop | `await`, DLPack, cache disque | même script en synchrone, async et Jupyter |
 | **M5** Mode explicite | `grid=`, `gs.Out`, atomiques (dont émulation OpenCL 1.2) | histogramme correct sur toutes les cibles |
 | **M6** CUDA | émetteur CUDA C, backend `cudarc` | parité des tests avec les autres backends sur NVIDIA |
@@ -632,5 +697,5 @@ La limite n'est plus la mémoire du GPU mais **la RAM**, puisque le GPU y accèd
 | D6 | Licence | MIT, comme le prototype |
 | D7 | Syntaxe du mode explicite (`grid=` + `gs.Out`) | à valider sur 2–3 vrais cas (histogramme, scatter) |
 | D8 | API des réductions : méthodes de `gs.Array` seulement, ou aussi des kernels de réduction écrits par l'utilisateur ? | méthodes d'abord |
-| D9 | Backend Metal natif (en plus de wgpu) pour le zéro-copie sur Mac ? | décider après M3, selon le coût mesuré des copies wgpu. D'ici là, OpenCL assure le zéro-copie sur Mac |
-| D10 | Sur Mac, Metal (wgpu) reste-t-il le backend par défaut s'il copie alors qu'OpenCL ne copie pas ? | à trancher avec les mesures de M1 : priorité possible à OpenCL pour les gros volumes, tant que D9 n'est pas résolue |
+| D9 | Backend natif (Metal, Vulkan) en plus de wgpu pour le zéro-copie ? | Metal : inutile, wgpu-hal permet `NoCopy` (M1.5). Vulkan : nécessaire pour importer la mémoire hôte (absent de wgpu 30) ; à décider après M1.5 selon le coût mesuré de l'anneau de transfert, sachant que CUDA (M6) couvre la RTX |
+| D10 | Sur Mac, Metal (wgpu) reste-t-il le backend par défaut s'il copie alors qu'OpenCL ne copie pas ? | oui si Metal `NoCopy` (M1.5) tient le critère « 0 en plus » ; sur PC, OpenCL devrait devenir le défaut de l'UHD 770 (zéro-copie), à confirmer par les mesures de M1.5 |
