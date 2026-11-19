@@ -101,6 +101,7 @@ $R run win --shell -- "nvidia-smi && where python"
 $R get win bench/results.json                 # récupérer un fichier produit à distance
 $R sync all                                   # synchroniser sans exécuter
 $R reset win                                  # effacer le workspace distant
+$R update all                                 # installer cette version de l'outil sur les agents
 $R jobs                                       # tâches en attente ou en cours
 $R kill win                                   # arrêter les tâches de win (ou un id de tâche, ou all)
 $R agents list                                # agents enregistrés
@@ -115,6 +116,32 @@ $R agents rm win                              # révoquer un agent (son jeton n'
 - **Code de retour** : celui de la commande distante (1 si une machine a échoué en multi-cibles).
   `Ctrl+C` arrête les tâches distantes.
 - Les sorties de Python distant sont forcées en UTF-8 et non bufferisées.
+
+### Chronométrage
+
+La durée de chaque commande est **mesurée sur la machine de test** (de son lancement à sa fin), puis renvoyée :
+
+```
+[win] exécution 1.521 s sur place · total 2.23 s
+```
+
+- **exécution … sur place** : le temps réel de la commande, sans le réseau. C'est ce chiffre qui compte.
+- **total** : vu du hub, réseau compris. Le PC Windows étant à l'autre bout du monde (~340 ms par aller-retour),
+  l'écart peut atteindre une seconde.
+
+Pour un benchmark, chronomètre aussi *dans* le script (`time.perf_counter()`, `std::time::Instant`) : ces mesures
+s'exécutent sur la machine de test et excluent le démarrage de Python et la compilation.
+
+### Mettre à jour les agents
+
+Après une modification de `gs_remote.py` sur le Mac :
+
+1. si la partie hub a changé, redémarre le hub (`Ctrl+C`, puis la même commande) ;
+2. `gs_remote.py update all` : chaque agent reçoit la nouvelle version (tâche signée comme les autres), vérifie son
+   hash et sa syntaxe, remplace son propre fichier et redémarre tout seul.
+
+`gs_remote.py info` signale les agents dont la version diffère de celle du hub. Cela repose sur un petit superviseur :
+`gs_remote.py agent` lance l'agent dans un sous-processus et le relance après une mise à jour ou un plantage.
 
 ### Arrêter un script bloqué
 
