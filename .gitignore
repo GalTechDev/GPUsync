@@ -1,0 +1,19 @@
+# Prototype v1 : dépôt séparé (GalTechDev/GPUsync), gardé ici comme référence
+/GPUsync-python/
+
+# Rust
+/target/
+**/target/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Divers
+.DS_Store
