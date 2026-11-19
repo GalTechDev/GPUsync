@@ -17,3 +17,7 @@ build/
 
 # Divers
 .DS_Store
+
+# Extension compilée par maturin (pip install -e .)
+python/gpusync/*.so
+python/gpusync/*.pyd

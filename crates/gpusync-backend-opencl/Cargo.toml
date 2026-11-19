@@ -1,0 +1,12 @@
+[package]
+name = "gpusync-backend-opencl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+cl3 = "0.13.2"
+gpusync-runtime.workspace = true
+opencl3 = "0.12.4"

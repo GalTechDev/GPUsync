@@ -1,7 +1,19 @@
 # GPUsync v2 — Architecture
 
-> Statut : **proposition** (aucun code écrit). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M0 terminé** (19/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
+
+### Avancement
+
+| Jalon | État | Validé sur |
+|---|---|---|
+| M0 Squelette | ✅ workspace Cargo, PyO3 0.30 (abi3-py310) + maturin 1.16, `gs.devices()` / `gs.backends()` via wgpu 30 et opencl3 0.12 (chargement dynamique) | Mac M5 Pro (Python 3.15) ; PC Windows RTX 4080 SUPER + UHD 770 (Python 3.10) |
+| M1 MVP | à faire | |
+
+Écarts au plan, à M0 : seuls les crates nécessaires existent (`gpusync-runtime`, `gpusync-backend-wgpu`,
+`gpusync-backend-opencl`, `gpusync-py`) ; `gpusync-ir`, `gpusync-frontend` et `gpusync-codegen` seront créés
+en M1. Sous Windows, un GPU visible en Vulkan et en DX12 n'est listé qu'une fois (Vulkan). D2 tranchée :
+Python ≥ 3.10, testé aux deux bouts (3.10 sur le PC, 3.15 sur le Mac).
 
 ---
 
@@ -577,7 +589,7 @@ La limite n'est plus la mémoire du GPU mais **la RAM**, puisque le GPU y accèd
 | # | Question | Piste actuelle |
 |---|---|---|
 | D1 | IR maison ou bâtir sur CubeCL ? | IR maison, car OpenCL C est une cible obligatoire. Vérifier les cibles actuelles de CubeCL avant de trancher |
-| D2 | Version minimale de Python | 3.10 (abi3) |
+| D2 | Version minimale de Python | ✅ 3.10 (abi3), décidé à M0 |
 | D3 | `f16` dans le MVP ? | non, à M2 si utile |
 | D4 | Strides (vues non contiguës) | copie contiguë dans le MVP ; à mesurer |
 | D5 | Nom du projet : garder « GPUsync » ? | à décider |

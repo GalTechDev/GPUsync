@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "gpusync"
+description = "Écrire des kernels GPU en Python et les exécuter sur n'importe quel GPU (Metal, Vulkan, DX12, OpenCL)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "GalTechDev" }, { name = "ThePhoenix78" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.maturin]
+manifest-path = "crates/gpusync-py/Cargo.toml"
+module-name = "gpusync._core"
+python-source = "python"
+features = ["pyo3/extension-module"]
+exclude = ["GPUsync-python/**", "tools/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

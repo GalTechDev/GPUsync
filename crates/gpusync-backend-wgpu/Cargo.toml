@@ -1,0 +1,12 @@
+[package]
+name = "gpusync-backend-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+gpusync-runtime.workspace = true
+pollster = "1.0.3"
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "parking_lot", "metal", "vulkan", "dx12", "wgsl"] }

@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.87"
+repository = "https://github.com/GalTechDev/GPUsync"
+
+[workspace.dependencies]
+gpusync-runtime = { path = "crates/gpusync-runtime" }
+gpusync-backend-opencl = { path = "crates/gpusync-backend-opencl" }
+gpusync-backend-wgpu = { path = "crates/gpusync-backend-wgpu" }
+
+[profile.release]
+lto = "thin"

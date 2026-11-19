@@ -1,0 +1,5 @@
+# Prototype v1 : référence locale, inutile sur les agents
+GPUsync-python
+# Extension compilée localement : chaque machine compile la sienne
+python/gpusync/*.so
+python/gpusync/*.pyd
