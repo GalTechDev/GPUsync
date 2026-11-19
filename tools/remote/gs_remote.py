@@ -60,6 +60,8 @@ CTL = "@ctl"                      # identité de la CLI auprès du hub
 POLL_WAIT_S = 25                  # long-polling : durée max d'attente d'une tâche
 ONLINE_TIMEOUT_S = 45             # un agent silencieux depuis plus longtemps est « hors ligne »
 HEARTBEAT_S = 5                   # un agent qui exécute une tâche donne signe de vie au moins toutes les 5 s
+ORPHAN_S = 60                     # tâche que plus aucune CLI ne suit depuis 60 s → arrêtée (CLI tuée, terminal fermé)
+UNKILLABLE_S = 15                 # processus toujours vivant 15 s après l'arrêt forcé → l'agent l'abandonne
 MAX_CLOCK_SKEW_S = 300
 MAX_BODY = 2 * 1024 ** 3
 MAX_GET_FILE = 512 * 1024 ** 2
@@ -238,6 +240,7 @@ class HubJob:
         self.started: float | None = None
         self.ended: float | None = None
         self.kill_requested = False
+        self.last_watch = time.time()  # dernière fois qu'une CLI a lu la sortie de cette tâche
         self.result: bytes | None = None
         self.log_path = hub.jobs_dir / f"{self.id}.log"
         self.log_path.write_bytes(b"")
@@ -262,8 +265,9 @@ class AgentState:
 
 
 class Hub:
-    def __init__(self, allow: list):
+    def __init__(self, allow: list, orphan_s: float = ORPHAN_S):
         self.allow = allow
+        self.orphan_s = orphan_s
         self.jobs_dir = HOME / "hub" / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self.cond = threading.Condition()
@@ -379,6 +383,9 @@ class Hub:
             with open(job.log_path, "ab") as f:
                 f.write(data)
         self.agent(agent).last_seen = time.time()
+        if not job.kill_requested and time.time() - job.last_watch > self.orphan_s:
+            job.kill_requested = True
+            log(f"tâche {job.id} ({agent}) : plus suivie par aucune CLI depuis {self.orphan_s:.0f} s → arrêt")
         return {"kill": job.kill_requested}
 
     def a_upload(self, agent: str, job_id: str, body: bytes) -> dict:
@@ -441,6 +448,7 @@ class Hub:
         job = self.jobs.get(job_id)
         if job is None:
             raise HttpError(404, f"tâche inconnue : {job_id}")
+        job.last_watch = time.time()
         d = job.describe(self)  # lu AVANT le log : si terminé, le log est complet
         with open(job.log_path, "rb") as f:
             f.seek(offset)
@@ -449,6 +457,10 @@ class Hub:
         if d["status"] not in ("queued", "running") and len(data) == LOG_CHUNK_MAX:
             d["status"] = "running"  # il reste de la sortie à lire
         return d
+
+    def c_jobs(self) -> dict:
+        active = [j.describe(self) for j in self.jobs.values() if j.status in ("queued", "running")]
+        return {"jobs": sorted(active, key=lambda d: d["agent"])}
 
     def c_kill(self, job_id: str) -> dict:
         job = self.jobs.get(job_id)
@@ -530,6 +542,8 @@ def make_hub_handler(hub: Hub):
                     return hub.c_agents()
                 if method == "POST" and parts == ["c", "jobs"]:
                     return hub.c_submit(js())
+                if method == "GET" and parts == ["c", "jobs"]:
+                    return hub.c_jobs()
                 if method == "GET" and len(parts) == 3 and parts[:2] == ["c", "jobs"]:
                     return hub.c_job(parts[2], int(q.get("offset", ["0"])[0]))
                 if method == "POST" and len(parts) == 4 and parts[:2] == ["c", "jobs"] and parts[3] == "kill":
@@ -576,7 +590,7 @@ def hub_config_ensure(port: int | None = None) -> dict:
 def cmd_hub(args) -> int:
     cfg = hub_config_ensure(args.port)
     allow = [ipaddress.ip_network(c, strict=False) for c in args.allow]
-    hub = Hub(allow)
+    hub = Hub(allow, args.orphan_timeout)
     httpd = ThreadingHTTPServer((args.bind, args.port), make_hub_handler(hub))
     httpd.daemon_threads = True
     print(f"gs-remote hub — {socket.gethostname()}, écoute sur {args.bind}:{args.port}")
@@ -813,7 +827,7 @@ class AgentJob:
             except OSError as e:
                 raise HttpError(400, f"impossible de lancer la commande : {e}") from None
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        start, last_send, reason = time.time(), 0.0, None
+        start, last_send, reason, kill_time = time.time(), 0.0, None, None
         try:
             with open(log_path, "rb") as reader:
                 while True:
@@ -822,19 +836,28 @@ class AgentJob:
                     if chunk or time.time() - last_send > HEARTBEAT_S or finished:
                         text = decoder.decode(chunk, final=finished and not chunk)
                         if self.say(text) and reason is None:
-                            reason = "killed"
+                            reason, kill_time = "killed", time.time()
+                            self.say("\n[gs-remote] arrêt forcé demandé\n")
                             kill_tree(proc)
                         last_send = time.time()
                     if finished and not chunk:
                         break
                     if reason is None and time.time() - start > timeout:
-                        reason = "timeout"
+                        reason, kill_time = "timeout", time.time()
                         self.say(f"\n[gs-remote] timeout ({timeout:.0f} s) : arrêt de la commande\n")
                         kill_tree(proc)
+                    if kill_time and not finished and time.time() - kill_time > UNKILLABLE_S:
+                        # Typiquement : processus bloqué dans un appel au driver GPU. On l'abandonne
+                        # pour que l'agent reste disponible ; il faudra peut-être redémarrer la machine.
+                        reason = "unkillable"
+                        self.say(f"\n[gs-remote] le processus {proc.pid} ne répond pas à l'arrêt forcé "
+                                 f"depuis {UNKILLABLE_S} s (bloqué dans le driver ?). Abandonné : "
+                                 "l'agent reste disponible, mais le processus peut encore tourner.\n")
+                        break
                     if not chunk:
                         time.sleep(0.3)
         finally:
-            if proc.poll() is None:
+            if proc.poll() is None and reason != "unkillable":
                 kill_tree(proc)
             try:
                 log_path.unlink()
@@ -852,9 +875,9 @@ def kill_tree(proc: subprocess.Popen) -> None:
         except (ProcessLookupError, PermissionError):
             pass
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        pass
+        pass  # la boucle de run_command surveille la suite (abandon après UNKILLABLE_S)
 
 
 def cmd_agent(args) -> int:
@@ -1136,6 +1159,33 @@ def cmd_reset(args) -> int:
     return code
 
 
+def cmd_jobs(args) -> int:
+    jobs = ctl().call("GET", "/c/jobs")["jobs"]
+    if not jobs:
+        print("Aucune tâche en cours.")
+    for j in jobs:
+        print(f"  {j['id']}  {j['agent']:<10} {j['type']:<6} {j['status']:<8} {j['duration_s']:.0f} s")
+    return 0
+
+
+def cmd_kill(args) -> int:
+    api = ctl()
+    jobs = api.call("GET", "/c/jobs")["jobs"]
+    if args.target in {j["id"] for j in jobs}:
+        victims = [j for j in jobs if j["id"] == args.target]
+    else:
+        agents = None if args.target == "all" else {s.strip() for s in args.target.split(",")}
+        victims = [j for j in jobs if agents is None or j["agent"] in agents]
+    if not victims:
+        print(f"Aucune tâche en cours pour « {args.target} ».")
+        return 0
+    for j in victims:
+        api.call("POST", f"/c/jobs/{j['id']}/kill")
+        print(f"  arrêt demandé : {j['id']} sur {j['agent']} ({j['type']})")
+    print("L'agent l'arrête au plus tard dans 5 s (vérifier avec : gs_remote.py jobs).")
+    return 0
+
+
 def cmd_info(args) -> int:
     rows = [a for a in list_agents(ctl()) if a["registered"]]
     if args.target != "all":
@@ -1179,6 +1229,8 @@ def main() -> None:
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--allow", action="append", default=[], metavar="CIDR",
                    help="réseaux d'où les agents peuvent se connecter (répétable). Défaut : IP privées")
+    p.add_argument("--orphan-timeout", type=float, default=ORPHAN_S, metavar="S",
+                   help=f"arrêter une tâche que plus aucune CLI ne suit depuis S secondes (défaut {ORPHAN_S})")
     p.set_defaults(func=cmd_hub)
 
     p = sub.add_parser("agents", help="enregistrer / supprimer / lister les agents (machine du hub)")
@@ -1231,16 +1283,31 @@ def main() -> None:
     p.add_argument("--ws")
     p.set_defaults(func=cmd_reset)
 
+    p = sub.add_parser("jobs", help="tâches en attente ou en cours")
+    p.set_defaults(func=cmd_jobs)
+
+    p = sub.add_parser("kill", help="arrêter des tâches : un id de tâche, un agent, une liste ou all")
+    p.add_argument("target")
+    p.set_defaults(func=cmd_kill)
+
     argv, command = sys.argv[1:], []
     if "--" in argv:  # tout ce qui suit `--` est la commande distante, passée telle quelle
         i = argv.index("--")
         argv, command = argv[:i], argv[i + 1:]
     args = ap.parse_args(argv)
     args.command = command
+    if args.cmd not in ("hub", "agent") and hasattr(signal, "SIGTERM"):
+        # CLI arrêtée par SIGTERM (kill, gestionnaire de tâches) : même effet que Ctrl+C,
+        # les tâches distantes suivies sont arrêtées.
+        def _term(*_):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, _term)
     try:
         sys.exit(args.func(args))
     except RemoteError as e:
         sys.exit(f"Erreur : {e}")
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

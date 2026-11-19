@@ -89,6 +89,8 @@ $R run win --shell -- "nvidia-smi && where python"
 $R get win bench/results.json                 # récupérer un fichier produit à distance
 $R sync all                                   # synchroniser sans exécuter
 $R reset win                                  # effacer le workspace distant
+$R jobs                                       # tâches en attente ou en cours
+$R kill win                                   # arrêter les tâches de win (ou un id de tâche, ou all)
 $R agents list                                # agents enregistrés
 $R agents rm win                              # révoquer un agent (son jeton n'est plus accepté)
 ```
@@ -101,6 +103,26 @@ $R agents rm win                              # révoquer un agent (son jeton n'
 - **Code de retour** : celui de la commande distante (1 si une machine a échoué en multi-cibles).
   `Ctrl+C` arrête les tâches distantes.
 - Les sorties de Python distant sont forcées en UTF-8 et non bufferisées.
+
+### Arrêter un script bloqué
+
+| Situation | Ce qui se passe |
+|---|---|
+| `Ctrl+C` ou `SIGTERM` sur la CLI | les tâches suivies sont arrêtées immédiatement |
+| `gs_remote.py kill <agent \| id \| all>` | arrêt forcé, depuis n'importe quel terminal du Mac |
+| la CLI est tuée brutalement ou le terminal fermé | le hub arrête toute tâche que plus aucune CLI ne suit depuis 60 s (`hub --orphan-timeout`) |
+| la commande dépasse `--timeout` (600 s par défaut) | arrêt forcé par l'agent |
+
+Un script bloqué qui n'affiche plus rien est quand même arrêté en 5 s au plus : pendant une tâche, l'agent contacte
+le hub toutes les 5 s et reçoit l'ordre d'arrêt à ce moment-là.
+
+L'arrêt est forcé et touche **tous les sous-processus** : `SIGKILL` sur le groupe de processus (macOS, Linux),
+`taskkill /T /F` (Windows). Aucun script ne peut l'ignorer.
+
+Seule exception : un processus bloqué dans un appel au driver (GPU planté) peut ne pas mourir, même avec `SIGKILL`.
+Si le processus est encore vivant 15 s après l'arrêt forcé, l'agent l'abandonne avec le statut `unkillable`,
+affiche son PID et reste disponible pour les tâches suivantes. Le processus abandonné peut alors nécessiter
+un redémarrage de la machine.
 
 ### Synchronisation
 
