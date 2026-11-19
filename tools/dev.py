@@ -5,6 +5,7 @@
     python tools/dev.py build     # recompile l'extension Rust dans .venv (pip install -e .)
     python tools/dev.py test      # build + cargo test + pytest
     python tools/dev.py info      # python -m gpusync (diagnostic des périphériques)
+    python tools/dev.py run SCRIPT [ARGS…]   # lance un script avec le Python de .venv
 
 Avec gs-remote, sur toutes les machines de test :
 
@@ -79,6 +80,8 @@ def info() -> None:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "run":
+        sys.exit(subprocess.run([str(PY), *sys.argv[2:]], cwd=ROOT, env=venv_env()).returncode)
     tasks = {"setup": setup, "build": build, "test": test, "info": info}
     if len(sys.argv) != 2 or sys.argv[1] not in tasks:
         sys.exit(__doc__)

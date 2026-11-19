@@ -14,7 +14,7 @@ use opencl3::device::Device;
 use opencl3::kernel::{ExecuteKernel, Kernel};
 use opencl3::memory::{Buffer, CL_MAP_READ, CL_MEM_READ_WRITE, CL_MEM_USE_HOST_PTR, ClMem};
 use opencl3::program::Program;
-use opencl3::types::{CL_BLOCKING, cl_mem};
+use opencl3::types::{CL_BLOCKING, CL_NON_BLOCKING, cl_mem};
 
 fn err(what: &str, e: impl std::fmt::Display) -> BackendError {
     BackendError(format!("OpenCL : {what} ({e})"))
@@ -153,12 +153,16 @@ impl ClDevice {
         })
     }
 
-    /// Copie bloquante hôte → périphérique.
-    pub fn write(&self, buf: &ClBuffer, data: &[u8]) -> Result<(), BackendError> {
+    /// Copie hôte → périphérique, mise en file sans attendre.
+    ///
+    /// # Safety
+    /// `data` doit rester valide jusqu'à la fin des opérations en file (`finish`, ou une lecture
+    /// bloquante ultérieure sur la même file).
+    pub unsafe fn write_async(&self, buf: &ClBuffer, data: &[u8]) -> Result<(), BackendError> {
         let mut b = buf.buf_ref();
         unsafe {
             self.queue
-                .enqueue_write_buffer(&mut b, CL_BLOCKING, 0, data, &[])
+                .enqueue_write_buffer(&mut b, CL_NON_BLOCKING, 0, data, &[])
         }
         .map_err(|e| err("écriture", e))?;
         Ok(())

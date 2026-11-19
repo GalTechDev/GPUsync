@@ -1,5 +1,7 @@
 //! Liaison Python (PyO3) : module `gpusync._core`. Seul crate du projet qui dépend de Python.
 
+mod kernel;
+
 use std::sync::Mutex;
 
 use gpusync_backend_opencl::OpenClBackend;
@@ -16,7 +18,14 @@ fn statuses(py: Python<'_>, refresh: bool) -> Vec<BackendStatus> {
         let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if refresh || cache.is_none() {
             let backends: [&dyn Backend; 2] = [&WgpuBackend, &OpenClBackend];
-            *cache = Some(discover(&backends));
+            let mut st = discover(&backends);
+            // L'interpréteur de référence, toujours disponible, en dernier recours.
+            st.push(BackendStatus {
+                name: "cpu",
+                devices: vec![::gpusync_core::cpu_info()],
+                error: None,
+            });
+            *cache = Some(st);
         }
         cache.clone().unwrap_or_default()
     })
@@ -159,5 +168,6 @@ fn gpusync_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBackendStatus>()?;
     m.add_function(wrap_pyfunction!(devices, m)?)?;
     m.add_function(wrap_pyfunction!(backends, m)?)?;
+    kernel::register(m)?;
     Ok(())
 }

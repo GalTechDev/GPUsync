@@ -279,6 +279,8 @@ version = "0.1.0"
 dependencies = [
  "gpusync-backend-opencl",
  "gpusync-backend-wgpu",
+ "gpusync-core",
+ "gpusync-ir",
  "gpusync-runtime",
  "pyo3",
 ]

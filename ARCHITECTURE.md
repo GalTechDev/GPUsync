@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M0 terminé** (19/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M1 terminé** (19/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -8,7 +8,43 @@
 | Jalon | État | Validé sur |
 |---|---|---|
 | M0 Squelette | ✅ workspace Cargo, PyO3 0.30 (abi3-py310) + maturin 1.16, `gs.devices()` / `gs.backends()` via wgpu 30 et opencl3 0.12 (chargement dynamique) | Mac M5 Pro (Python 3.15) ; PC Windows RTX 4080 SUPER + UHD 770 (Python 3.10) |
-| M1 MVP | à faire | |
+| M1 MVP | ✅ `@gs.kernel` élément par élément, IR + interpréteur, émetteurs OpenCL C et WGSL, `gs.Array`, zéro-copie OpenCL | Mac : Metal, OpenCL, cpu (75 tests) ; PC : Vulkan et OpenCL sur RTX 4080 SUPER et UHD 770, cpu (104 tests) |
+
+#### Mesures M1 (`tools/bench_m1.py`)
+
+Surcoût par appel, de bout en bout (appel + `np.asarray`), 1 000 éléments — objectif ≤ 0,3 ms :
+
+| | Metal M5 Pro | OpenCL M5 Pro | Vulkan RTX | Vulkan UHD 770 | OpenCL RTX | OpenCL UHD 770 |
+|---|---|---|---|---|---|---|
+| ms / appel | 0,196 | 0,193 | 0,095 | 0,183 | 0,272 | 0,149 |
+
+Prototype v1 sur le M5 Pro (OpenCL) : 3,07 ms ; pyopencl brut : 0,30 ms.
+
+Pic mémoire supplémentaire pour 1 Gio d'entrée (la sortie seule compte pour 1,00) — objectif ×1 en OpenCL sur le Mac :
+
+| | Metal M5 Pro | OpenCL M5 Pro | Vulkan RTX | OpenCL RTX | OpenCL UHD 770 |
+|---|---|---|---|---|---|
+| Gio | 3,01 | **1,00** (zéro-copie) | 5,23 | 3,35 | **1,00** (zéro-copie) |
+
+Mesure : mémoire résidente (macOS), mémoire engagée (Windows). Sur 10 M éléments, OpenCL en zéro-copie
+traite 83 Go/s sur le M5 Pro contre 9,5 Go/s pour Metal (copies).
+
+#### Décisions prises pendant M1
+
+- **Sémantique** : `//` et `%` suivent Python et NumPy (arrondi vers −∞, signe du diviseur), y compris sur
+  le GPU ; division entière par zéro → 0 (comme NumPy) ; `/` entre entiers donne un f32 ; `**` réservé aux
+  flottants ; `pow` corrigé en WGSL pour une base négative.
+- **Typage** : un littéral prend le type de son contexte (`x * 2` reste f32) ; une locale prend le type de ses
+  affectations (`acc = 0` puis `acc += x` → f32) ; aucune promotion implicite vers f64.
+- **f64 via wgpu** : `Device.f64` vaut `False` pour Metal, Vulkan et DX12 (pas de f64 en WGSL), même si le GPU
+  le supporte. Le f64 passe par OpenCL (RTX) ou `cpu:0`.
+- **`cpu:0`** : l'interpréteur de référence est exposé comme périphérique, toujours disponible, en dernier.
+- **Taille des buffers wgpu** : limitée à ~1 Gio sur l'UHD 770 en Vulkan. Un tableau trop grand lève
+  `gs.UnsupportedFeature` (avant correction, wgpu renvoyait un résultat faux sans erreur). Le découpage
+  automatique viendra avec l'out-of-core (M3).
+- **Entrée D10** : wgpu copie et consomme 3 à 5 fois la taille des données ; OpenCL en zéro-copie, aucune.
+  Sur Mac, Metal reste le défaut (même surcoût par appel), mais les gros volumes ont intérêt à passer par
+  OpenCL : à trancher avec l'out-of-core (M3).
 
 Écarts au plan, à M0 : seuls les crates nécessaires existent (`gpusync-runtime`, `gpusync-backend-wgpu`,
 `gpusync-backend-opencl`, `gpusync-py`) ; `gpusync-ir`, `gpusync-frontend` et `gpusync-codegen` seront créés

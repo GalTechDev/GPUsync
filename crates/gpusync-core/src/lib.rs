@@ -411,8 +411,10 @@ pub unsafe fn launch(
                         host_backed_io = true;
                         unsafe { d.wrap_host(*ptr as *mut u8, *bytes) }
                     } else {
+                        // Copie non bloquante : l'entrée reste en vie jusqu'à la fin du calcul.
+                        host_backed_io = true;
                         d.alloc(*bytes).and_then(|b| {
-                            d.write(&b, unsafe { std::slice::from_raw_parts(*ptr, *bytes) })
+                            unsafe { d.write_async(&b, std::slice::from_raw_parts(*ptr, *bytes)) }
                                 .map(|_| b)
                         })
                     }
@@ -462,6 +464,10 @@ pub unsafe fn launch(
             drop(args);
             // Les buffers d'entrée peuvent être libérés : OpenCL les retient jusqu'à la fin du calcul.
             drop(owned);
+            if !staged.is_empty() {
+                // Entrées rapatriées d'un autre périphérique : copies locales libérées au retour.
+                d.finish().map_err(dev_err)?;
+            }
             Ok(DeviceArray {
                 device: dev.clone(),
                 storage: Storage::Cl(out),
@@ -471,6 +477,28 @@ pub unsafe fn launch(
             })
         }
         (Device::Wg(d), Imp::Wg(wk)) => {
+            // wgpu limite la taille d'un buffer lié à un kernel (1 Gio − 4 o sur certains GPU Intel).
+            if let Some(max) = d.info.max_buffer_bytes {
+                let biggest = resolved
+                    .iter()
+                    .map(|i| match i {
+                        Input::Host { bytes, .. } => *bytes,
+                        Input::Device(a) => a.bytes(),
+                    })
+                    .chain([out_bytes])
+                    .max()
+                    .unwrap_or(0);
+                if biggest as u64 > max {
+                    return Err(CoreError::Unsupported(format!(
+                        "tableau de {:.2} Gio : dépasse la taille maximale d'un buffer sur {} ({}), {:.2} Gio. \
+                         Utilisez un périphérique OpenCL, ou découpez les données (out-of-core, jalon M3)",
+                        biggest as f64 / (1u64 << 30) as f64,
+                        d.info.name,
+                        d.info.id(),
+                        max as f64 / (1u64 << 30) as f64
+                    )));
+                }
+            }
             let mut owned: Vec<WgBuffer> = Vec::new();
             for i in &resolved {
                 if let Input::Host { ptr, bytes } = i {

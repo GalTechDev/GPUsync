@@ -12,7 +12,7 @@ import pytest
 import gpusync as gs
 
 KINDS = {"discrete_gpu", "integrated_gpu", "virtual_gpu", "cpu", "other"}
-BACKENDS = {"metal", "vulkan", "dx12", "opencl"}
+BACKENDS = {"metal", "vulkan", "dx12", "opencl", "cpu"}
 
 
 def test_devices_renvoie_des_peripheriques_coherents():
@@ -33,7 +33,7 @@ def test_devices_renvoie_des_peripheriques_coherents():
 
 def test_backends_signale_chaque_backend_sans_planter():
     statuses = gs.backends()
-    assert [s.name for s in statuses] == ["wgpu", "opencl"]
+    assert [s.name for s in statuses] == ["wgpu", "opencl", "cpu"]
     for s in statuses:
         assert s.available == (s.error is None)
         if not s.available:

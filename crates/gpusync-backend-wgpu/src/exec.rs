@@ -185,6 +185,33 @@ impl WgDevice {
                 "nombre de tableaux d'entrée incohérent".into(),
             ));
         }
+        // Toute erreur de validation ou de mémoire devient une erreur Python (jamais un résultat
+        // faux silencieux, objectif O2).
+        let oom = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let submitted = self.submit(k, inputs, out, params, n);
+        let errors = [
+            pollster::block_on(validation.pop()),
+            pollster::block_on(oom.pop()),
+        ];
+        submitted?;
+        if let Some(e) = errors.into_iter().flatten().next() {
+            return Err(BackendError(format!(
+                "wgpu : lancement refusé sur {} ({e})",
+                self.info.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn submit(
+        &self,
+        k: &WgKernel,
+        inputs: &[&WgBuffer],
+        out: &WgBuffer,
+        params: &[u32],
+        n: usize,
+    ) -> Result<(), BackendError> {
         let params_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
