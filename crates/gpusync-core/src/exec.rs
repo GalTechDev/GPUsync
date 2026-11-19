@@ -73,6 +73,8 @@ pub enum Storage {
     Cl { buf: ClBuffer, done: ClEvent },
     /// Mode Résident (wgpu).
     Wg(WgBuffer),
+    /// Mode Direct (Metal, `newBufferWithBytesNoCopy`) : blocs adossés à la mémoire hôte `ptr`.
+    WgDirect { bufs: Vec<WgBuffer>, ptr: *mut u8 },
     /// Déjà en mémoire hôte (mode Flux, interpréteur).
     Host { ptr: *mut u8 },
 }
@@ -100,7 +102,9 @@ impl DeviceArray {
     /// Pointeur hôte si le résultat est (ou sera) directement dans la mémoire de l'hôte.
     pub fn host_ptr(&self) -> Option<*mut u8> {
         match &self.storage {
-            Storage::ClDirect { ptr, .. } | Storage::Host { ptr } => Some(*ptr),
+            Storage::ClDirect { ptr, .. }
+            | Storage::WgDirect { ptr, .. }
+            | Storage::Host { ptr } => Some(*ptr),
             _ => None,
         }
     }
@@ -128,6 +132,12 @@ impl DeviceArray {
             (Storage::Wg(buf), Device::Wg(d)) => unsafe {
                 d.download(buf, 0, dst, n, chunk).map_err(dev_err)?
             },
+            (Storage::WgDirect { ptr, .. }, Device::Wg(d)) => {
+                d.finish().map_err(dev_err)?;
+                if dst != *ptr {
+                    unsafe { std::ptr::copy_nonoverlapping(*ptr, dst, n) };
+                }
+            }
             (Storage::Host { ptr }, _) => {
                 if dst != *ptr {
                     unsafe { std::ptr::copy_nonoverlapping(*ptr, dst, n) };
@@ -249,7 +259,13 @@ pub unsafe fn launch(
         }
         (Device::Wg(d), Imp::Wg(wk)) => {
             let (words, fwords) = wg_params(k, scalars)?;
-            if fits(dev, &ins, &arrays, n, out_elem, &limits) {
+            if let Some(direct) = unsafe {
+                wg_direct(
+                    d, wk, &ins, &arrays, &words, &fwords, n, out_host, out_elem, &limits,
+                )?
+            } {
+                Ok(direct)
+            } else if fits(dev, &ins, &arrays, n, out_elem, &limits) {
                 let mut owned = Vec::new();
                 for (i, ty) in ins.iter().zip(&arrays) {
                     if let In::Host(p) = i {
@@ -541,6 +557,92 @@ unsafe fn cl_direct(
         Mode::Direct,
         true,
     ))
+}
+
+/// Mode Direct sur Metal : chaque bloc est un buffer `NoCopy` sur la mémoire de l'hôte (aucune copie).
+/// `None` si impossible (pas Metal, adresse non alignée sur 16 Kio, entrée restée sur un périphérique).
+#[allow(clippy::too_many_arguments)]
+unsafe fn wg_direct(
+    d: &gpusync_backend_wgpu::WgDevice,
+    wk: &gpusync_backend_wgpu::WgKernel,
+    ins: &[In],
+    arrays: &[Scalar],
+    words: &[u32],
+    fwords: &[f64],
+    n: usize,
+    out: *mut u8,
+    out_elem: usize,
+    limits: &TransferLimits,
+) -> R<Option<(Storage, Mode, bool)>> {
+    const PAGE: usize = 16384;
+    if d.info.backend != "metal" || (out as usize) % PAGE != 0 {
+        return Ok(None);
+    }
+    let mut ptrs = Vec::new();
+    for i in ins {
+        match i {
+            In::Host(p) if (*p as usize) % PAGE == 0 => ptrs.push(*p),
+            _ => return Ok(None),
+        }
+    }
+    let elem_max = arrays
+        .iter()
+        .map(|t| t.size())
+        .chain([out_elem])
+        .max()
+        .unwrap();
+    let max_buf = d
+        .info
+        .max_buffer_bytes
+        .unwrap_or(u64::MAX)
+        .min(usize::MAX as u64) as usize;
+    let chunk_bytes = limits.direct_chunk_bytes.unwrap_or(max_buf).min(max_buf);
+    let step = PAGE / 4; // débuts de blocs alignés sur une page pour des éléments de 4 ou 8 o
+    let chunk = ((chunk_bytes / elem_max) / step * step).max(step);
+    let mut outs = Vec::new();
+    let mut start = 0;
+    while start < n {
+        let len = chunk.min(n - start);
+        let mut bufs = Vec::new();
+        for (p, ty) in ptrs.iter().zip(arrays) {
+            match unsafe { d.wrap_host(p.add(start * ty.size()) as *mut u8, len * ty.size()) }
+                .map_err(dev_err)?
+            {
+                Some(b) => bufs.push(b),
+                None if start == 0 => return Ok(None),
+                None => {
+                    return Err(CoreError::Device(
+                        "Metal a refusé une partie de la mémoire hôte".into(),
+                    ));
+                }
+            }
+        }
+        let ob = match unsafe { d.wrap_host(out.add(start * out_elem), len * out_elem) }
+            .map_err(dev_err)?
+        {
+            Some(b) => b,
+            None if start == 0 => return Ok(None),
+            None => {
+                return Err(CoreError::Device(
+                    "Metal a refusé une partie de la mémoire hôte".into(),
+                ));
+            }
+        };
+        let mut w = words.to_vec();
+        w.push(len as u32);
+        let refs: Vec<&WgBuffer> = bufs.iter().collect();
+        d.launch(wk, &refs, &ob, &w, fwords, len).map_err(dev_err)?;
+        outs.push(ob);
+        start += len;
+    }
+    Ok(Some((
+        Storage::WgDirect {
+            bufs: outs,
+            ptr: out,
+        },
+        Mode::Direct,
+        true,
+    )))
 }
 
 /// Anneau de 3 tampons épinglés pour envoyer `bytes` octets de `src` vers `dst` (file de transfert).

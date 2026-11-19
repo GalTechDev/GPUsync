@@ -59,7 +59,7 @@ def expected_mode(dev_id, config):
     d = info(dev_id)
     if d.backend == "cpu":
         return "cpu"
-    if d.backend == "opencl" and d.unified_memory:
+    if (d.backend == "opencl" and d.unified_memory) or d.backend == "metal":
         return "direct"
     return "flux" if config == "flux" else "resident"
 
@@ -136,7 +136,7 @@ def test_out_of_memory_suggere_out(monkeypatch):
 def test_budget_public():
     gs.set_memory_budget(1)
     try:
-        d = next((d for d in gs.devices() if not (d.backend == "opencl" and d.unified_memory) and d.backend != "cpu"), None)
+        d = next((d for d in gs.devices() if not (d.backend == "opencl" and d.unified_memory) and d.backend not in ("cpu", "metal")), None)
         if d is None:
             pytest.skip("aucun périphérique concerné par le budget")
         x = RNG.random(N).astype(np.float32)

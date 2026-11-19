@@ -238,6 +238,8 @@ name = "gpusync-backend-wgpu"
 version = "0.1.0"
 dependencies = [
  "gpusync-runtime",
+ "objc2",
+ "objc2-metal",
  "pollster",
  "wgpu",
 ]

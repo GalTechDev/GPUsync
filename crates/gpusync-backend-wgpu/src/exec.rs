@@ -351,6 +351,64 @@ impl WgDevice {
         Ok(())
     }
 
+    /// Buffer Metal qui utilise directement la mémoire de l'hôte (zéro-copie, `newBufferWithBytesNoCopy`).
+    ///
+    /// Renvoie `Ok(None)` quand ce n'est pas possible (autre API que Metal, adresse non alignée sur une
+    /// page de 16 Kio, mémoire refusée par Metal) : l'appelant passe alors par les transferts.
+    ///
+    /// # Safety
+    /// `ptr..ptr + bytes` arrondi à la page suivante doit rester valide tant que le buffer existe.
+    pub unsafe fn wrap_host(
+        &self,
+        ptr: *mut u8,
+        bytes: usize,
+    ) -> Result<Option<WgBuffer>, BackendError> {
+        #[cfg(target_vendor = "apple")]
+        {
+            use objc2_metal::{MTLDevice, MTLResourceOptions};
+            const PAGE: usize = 16384;
+            if self.info.backend != "metal" || (ptr as usize) % PAGE != 0 || bytes == 0 {
+                return Ok(None);
+            }
+            let len = bytes.div_ceil(PAGE) * PAGE; // la dernière page entière reste dans la même page mappée
+            let Some(hal_dev) = (unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }) else {
+                return Ok(None);
+            };
+            let Some(raw) = (unsafe {
+                hal_dev
+                    .raw_device()
+                    .newBufferWithBytesNoCopy_length_options_deallocator(
+                        std::ptr::NonNull::new_unchecked(ptr.cast()),
+                        len,
+                        MTLResourceOptions::StorageModeShared,
+                        None,
+                    )
+            }) else {
+                return Ok(None);
+            };
+            let hal_buf = unsafe { wgpu::hal::metal::Device::buffer_from_raw(raw, len as u64) };
+            let buf = unsafe {
+                self.device.create_buffer_from_hal::<wgpu::hal::api::Metal>(
+                    hal_buf,
+                    &wgpu::BufferDescriptor {
+                        label: Some("gpusync-nocopy"),
+                        size: len as u64,
+                        usage: wgpu::BufferUsages::STORAGE
+                            | wgpu::BufferUsages::COPY_SRC
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    },
+                )
+            };
+            Ok(Some(WgBuffer { buf, bytes }))
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (ptr, bytes);
+            Ok(None)
+        }
+    }
+
     // ───────────────────── transferts par blocs (ARCHITECTURE.md §9) ─────────────────────
 
     fn staging(&self, bytes: usize, upload: bool) -> Staging {

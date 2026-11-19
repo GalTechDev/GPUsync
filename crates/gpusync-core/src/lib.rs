@@ -128,7 +128,7 @@ impl Device {
     pub fn zero_copy(&self) -> bool {
         match self {
             Device::Cl(d) => d.info.unified_memory,
-            Device::Wg(_) => false,
+            Device::Wg(d) => d.info.backend == "metal", // newBufferWithBytesNoCopy
             Device::Cpu => true,
         }
     }
