@@ -116,6 +116,8 @@ $R agents rm win                              # révoquer un agent (son jeton n'
 - **Code de retour** : celui de la commande distante (1 si une machine a échoué en multi-cibles).
   `Ctrl+C` arrête les tâches distantes.
 - Les sorties de Python distant sont forcées en UTF-8 et non bufferisées.
+- Sous Windows, le `PATH` est relu dans le registre avant chaque tâche, comme le ferait un nouveau terminal :
+  un outil installé après le lancement de l'agent (Rust, CUDA…) est utilisable sans le relancer.
 
 ### Chronométrage
 

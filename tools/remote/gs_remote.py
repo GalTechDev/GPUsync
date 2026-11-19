@@ -52,7 +52,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-TOOL_VERSION = 3                  # à incrémenter à chaque changement du protocole ou de l'agent
+TOOL_VERSION = 5                # à incrémenter à chaque changement du protocole ou de l'agent
 EXIT_RESTART = 75                 # code de sortie du worker d'agent : « redémarre-moi » (après mise à jour)
 HOME = Path(os.environ.get("GS_REMOTE_HOME", Path.home() / ".gpusync-remote"))
 HUB_CONFIG = HOME / "hub.json"
@@ -859,8 +859,17 @@ class AgentJob:
         if not cwd.is_dir():
             raise HttpError(400, f"dossier introuvable dans le workspace : {self.spec.get('cwd')}")
         env = os.environ.copy()
+        fresh_path = windows_registry_path()
+        if fresh_path:  # outils installés après le lancement de l'agent (ex. rustup) : visibles sans le relancer
+            env["PATH"] = fresh_path
         env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"})
         env.update({str(k): str(v) for k, v in (self.spec.get("env") or {}).items()})
+        if not shell and os.name == "nt" and not os.path.dirname(cmd[0]):
+            # Sous Windows, Popen cherche l'exécutable dans le PATH de l'AGENT, pas dans `env` :
+            # on le résout nous-mêmes avec le PATH de la tâche (ex. cargo installé après le lancement).
+            found = shutil.which(cmd[0], path=env.get("PATH"))
+            if found:
+                cmd = [found] + cmd[1:]
         timeout = float(self.spec.get("timeout") or 600)
 
         log_path = self.ws_root.parent / "logs" / f"{self.id}.log"
@@ -922,6 +931,26 @@ class AgentJob:
             except OSError:
                 pass
         return (reason or "done"), proc.returncode
+
+
+def windows_registry_path() -> str | None:
+    """PATH tel qu'un nouveau terminal Windows le verrait (système + utilisateur, relu dans le registre)."""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    parts = []
+    for root, key in ((winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                      (winreg.HKEY_CURRENT_USER, r"Environment")):
+        try:
+            with winreg.OpenKey(root, key) as k:
+                value, _ = winreg.QueryValueEx(k, "Path")
+                parts.append(os.path.expandvars(value))
+        except OSError:
+            pass
+    return ";".join(p for p in parts if p) or None
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
