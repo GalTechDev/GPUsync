@@ -52,7 +52,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-TOOL_VERSION = 5                # à incrémenter à chaque changement du protocole ou de l'agent
+TOOL_VERSION = 6                # à incrémenter à chaque changement du protocole ou de l'agent
 EXIT_RESTART = 75                 # code de sortie du worker d'agent : « redémarre-moi » (après mise à jour)
 HOME = Path(os.environ.get("GS_REMOTE_HOME", Path.home() / ".gpusync-remote"))
 HUB_CONFIG = HOME / "hub.json"
@@ -864,12 +864,17 @@ class AgentJob:
             env["PATH"] = fresh_path
         env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"})
         env.update({str(k): str(v) for k, v in (self.spec.get("env") or {}).items()})
-        if not shell and os.name == "nt" and not os.path.dirname(cmd[0]):
-            # Sous Windows, Popen cherche l'exécutable dans le PATH de l'AGENT, pas dans `env` :
-            # on le résout nous-mêmes avec le PATH de la tâche (ex. cargo installé après le lancement).
-            found = shutil.which(cmd[0], path=env.get("PATH"))
-            if found:
-                cmd = [found] + cmd[1:]
+        if not shell and os.name == "nt":
+            if not os.path.dirname(cmd[0]):
+                # Sous Windows, Popen cherche l'exécutable dans le PATH de l'AGENT, pas dans `env` :
+                # on le résout nous-mêmes avec le PATH de la tâche (ex. cargo installé après le lancement).
+                found = shutil.which(cmd[0], path=env.get("PATH"))
+                if found:
+                    cmd = [found] + cmd[1:]
+            elif not os.path.isabs(cmd[0]):
+                # Chemin relatif (.venv/Scripts/python.exe) : Windows le résout depuis le dossier de
+                # l'agent, pas depuis `cwd` comme macOS et Linux.
+                cmd = [str(cwd / cmd[0])] + cmd[1:]
         timeout = float(self.spec.get("timeout") or 600)
 
         log_path = self.ws_root.parent / "logs" / f"{self.id}.log"
