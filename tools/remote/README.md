@@ -1,108 +1,86 @@
 # gs-remote — exécution distante sur les machines de test
 
-Outil interne pour développer GPUsync en vérifiant chaque étape sur du vrai matériel :
-le **client** (sur la machine de dev) synchronise le dépôt vers des **serveurs** (les machines de test),
-y lance une commande, affiche la sortie en direct et renvoie le code de retour.
+Outil interne pour développer GPUsync en vérifiant chaque étape sur du vrai matériel.
 
 ```
-Mac (dev) ── client ──┬──► serveur Mac      Apple M5 Pro (Metal / OpenCL)
-                      └──► serveur Windows  NVIDIA (CUDA / Vulkan / OpenCL) + GPU intégré
+                 ┌───────────── Mac (dev) ─────────────┐
+                 │  CLI ──(localhost)──► HUB :8765      │
+                 └──────────────────────▲──────▲───────┘
+                     connexion sortante │      │ connexion sortante
+                ┌───────────────────────┴┐   ┌─┴──────────────────────┐
+                │ agent « mac »          │   │ agent « win »           │
+                │ Apple M5 Pro           │   │ NVIDIA + GPU intégré    │
+                │ (même Mac, localhost)  │   │ (PC Windows)            │
+                └────────────────────────┘   └─────────────────────────┘
 ```
 
-Les deux scripts n'utilisent que la bibliothèque standard de Python (≥ 3.9) : rien à installer.
+- Le **hub** tourne sur le Mac. C'est le seul programme qui écoute un port.
+- Les **agents** tournent sur les machines de test. **Ils n'écoutent aucun port** : ils se connectent au hub,
+  attendent leurs tâches, et se reconnectent tout seuls si le hub redémarre ou si le réseau coupe.
+- La **CLI** (sur le Mac) envoie les tâches au hub, affiche la sortie en direct et renvoie le code de retour.
 
-| Fichier | Rôle |
-|---|---|
-| `gs_remote_server.py` | serveur, à lancer sur chaque machine de test |
-| `gs_remote.py` | client, utilisé depuis la machine de dev |
+Tout est dans un seul fichier, `gs_remote.py`, qui n'utilise que la bibliothèque standard de Python (≥ 3.9).
 
 ---
 
-## 1. Installer un serveur
+## 1. Mise en place
 
-Seul `gs_remote_server.py` est nécessaire sur la machine de test (copie-le par clé USB, git, partage réseau…).
-
-### macOS
+### Sur le Mac : le hub
 
 ```bash
-caffeinate -i python3 gs_remote_server.py
+caffeinate -i python3 tools/remote/gs_remote.py hub
 ```
 
-- `caffeinate -i` empêche la mise en veille pendant que le serveur tourne.
-- Au premier lancement, macOS demande d'autoriser les connexions entrantes pour Python : accepte.
+À laisser tourner dans un terminal. `caffeinate -i` empêche la mise en veille. Au premier lancement,
+macOS demande d'autoriser les connexions entrantes pour Python : accepte (c'est ce qui permet au PC de joindre le hub).
 
-### Windows
+### Sur le Mac : enregistrer les agents
 
-1. Installe Python depuis python.org, avec la case « Add python.exe to PATH » cochée.
-   N'utilise pas l'alias du Microsoft Store.
-2. Vérifie que le réseau Wi-Fi ou Ethernet est en profil **Privé** (Paramètres → Réseau et Internet → propriétés du réseau).
-3. Lance le serveur :
-
-   ```powershell
-   py gs_remote_server.py
-   ```
-
-4. Quand le pare-feu Windows demande l'autorisation, coche **Réseaux privés uniquement**.
-   Ou bien, dans un PowerShell administrateur :
-
-   ```powershell
-   New-NetFirewallRule -DisplayName "gs-remote" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private
-   ```
-
-Pour les étapes suivantes du projet, la machine Windows aura aussi besoin de : `rustup` + Visual Studio Build Tools
-(charge de travail C++), le driver NVIDIA (fournit CUDA et OpenCL), le driver Intel du GPU intégré (fournit OpenCL),
-et plus tard le CUDA Toolkit. `python gs_remote.py info win` montre ce qui est déjà présent.
-
-### Au démarrage
-
-Le serveur affiche son adresse et la commande à lancer sur le client :
-
-```
-gs-remote serveur — PC-WIN (Windows AMD64, Python 3.13.1)
-  dossier   : C:\Users\toi\.gpusync-remote-server
-  écoute    : 0.0.0.0:8765
-  autorisés : IP privées et locales
-
-Sur la machine cliente, ajoute cet hôte avec :
-  python gs_remote.py hosts add <nom> http://192.168.1.42:8765 <jeton>
-```
-
-Le jeton est créé au premier lancement et conservé dans `~/.gpusync-remote-server/server.json`.
-Pour l'afficher : `python gs_remote_server.py --show-token`.
-
-Options utiles :
-
-| Option | Effet |
-|---|---|
-| `--port 8765` | port d'écoute |
-| `--allow 192.168.1.0/24` | n'accepter que ce réseau (répétable). Par défaut : toutes les IP privées et locales |
-| `--bind 127.0.0.1` | n'écouter qu'en local (utile si client et serveur sont sur la même machine) |
-| `--regen-token` | générer un nouveau jeton (l'ancien est révoqué) |
-| `--root DOSSIER` | où stocker workspaces et logs |
-
----
-
-## 2. Configurer le client
-
-Sur la machine de dev, une fois par serveur :
+Dans un autre terminal, une fois par machine de test :
 
 ```bash
-python3 tools/remote/gs_remote.py hosts add mac http://127.0.0.1:8765 <jeton-du-mac>
-python3 tools/remote/gs_remote.py hosts add win http://192.168.1.42:8765 <jeton-du-pc>
-python3 tools/remote/gs_remote.py info all
+python3 tools/remote/gs_remote.py agents add mac
+python3 tools/remote/gs_remote.py agents add win
 ```
 
-Les hôtes et jetons sont stockés hors du dépôt, dans `~/.gpusync-remote/hosts.json` (droits 600).
-Pour utiliser un autre fichier : variable `GS_REMOTE_CONFIG`.
+Chaque commande crée un jeton secret propre à l'agent et affiche la commande exacte à lancer sur la machine de test.
+
+### Sur le Mac : l'agent local
+
+Avec la commande affichée par `agents add mac`, en remplaçant l'IP par `127.0.0.1` :
+
+```bash
+python3 tools/remote/gs_remote.py agent --hub http://127.0.0.1:8765 --name mac --token <jeton>
+```
+
+### Sur le PC Windows : l'agent
+
+1. Installe Python depuis python.org, avec la case « Add python.exe to PATH » cochée
+   (pas l'alias du Microsoft Store).
+2. Copie `gs_remote.py` sur le PC (clé USB, partage réseau…).
+3. Lance la commande affichée par `agents add win` :
+
+   ```powershell
+   py gs_remote.py agent --hub http://192.168.1.113:8765 --name win --token <jeton>
+   ```
+
+**Aucune règle de pare-feu à créer sur le PC** : l'agent ne fait que des connexions sortantes.
+
+Les fois suivantes, `py gs_remote.py agent` suffit : l'URL du hub, le nom et le jeton sont mémorisés
+dans `%USERPROFILE%\.gpusync-remote\agent.json`.
+
+Pour la suite du projet, le PC aura aussi besoin de : `rustup` et Visual Studio Build Tools (charge de travail C++),
+le driver NVIDIA (qui fournit CUDA et OpenCL), le driver Intel du GPU intégré (qui fournit OpenCL),
+et plus tard le CUDA Toolkit. `gs_remote.py info` montre ce qui est déjà installé.
 
 ---
 
-## 3. Utilisation
+## 2. Utilisation (sur le Mac)
 
 ```bash
 R="python3 tools/remote/gs_remote.py"
 
-$R info all                                   # OS, Python, Rust, GPU de chaque machine
+$R info                                       # agents en ligne, OS, Python, Rust, GPU
 $R run all -- @python -c "import platform; print(platform.platform())"
 $R run win --timeout 1800 -- cargo test       # 30 min max
 $R run all --cwd GPUsync-python -- @python -m pytest tests -q
@@ -111,67 +89,93 @@ $R run win --shell -- "nvidia-smi && where python"
 $R get win bench/results.json                 # récupérer un fichier produit à distance
 $R sync all                                   # synchroniser sans exécuter
 $R reset win                                  # effacer le workspace distant
+$R agents list                                # agents enregistrés
+$R agents rm win                              # révoquer un agent (son jeton n'est plus accepté)
 ```
 
-- **Cible** : un nom, une liste (`mac,win`) ou `all`. Avec plusieurs cibles, les commandes tournent en parallèle,
-  chaque ligne est préfixée par `[nom]`, et un récapitulatif affiche le statut, le code et la durée par machine.
-- **`--`** sépare les options du client de la commande distante, qui est passée telle quelle.
-- **`@python`** est remplacé par l'interpréteur Python du serveur (évite les différences `python` / `py` / `python3`).
-- **Code de retour** : celui de la commande distante (ou 1 si une machine a échoué en multi-cibles).
-  `Ctrl+C` tue les jobs distants.
-- Les sorties de Python distant sont forcées en UTF-8 (`PYTHONUTF8=1`) et non bufferisées.
+- **Cible** : un nom, une liste (`mac,win`) ou `all`. Avec plusieurs cibles, les commandes tournent
+  en parallèle, chaque ligne est préfixée par `[nom]`, et un récapitulatif affiche statut, code et durée.
+  Avec `all`, les agents hors ligne sont signalés et ignorés.
+- **`--`** sépare les options de la commande distante, qui est passée telle quelle.
+- **`@python`** est remplacé par l'interpréteur Python de l'agent (évite les différences `python` / `py` / `python3`).
+- **Code de retour** : celui de la commande distante (1 si une machine a échoué en multi-cibles).
+  `Ctrl+C` arrête les tâches distantes.
+- Les sorties de Python distant sont forcées en UTF-8 et non bufferisées.
 
 ### Synchronisation
 
-Avant chaque `run` (sauf `--no-sync`), le dossier source est synchronisé vers un **workspace** du même nom :
+Avant chaque `run` (sauf `--no-sync`), le dépôt est synchronisé vers un **workspace** du même nom sur l'agent :
 
-- dossier source : racine git du dossier courant (ou `--src`) ; workspace : nom du dossier (ou `--ws`) ;
-- seuls les fichiers modifiés sont envoyés (comparaison par SHA-256) ; les fichiers supprimés localement sont
-  supprimés à distance ;
+- source : racine git du dossier courant (ou `--src`) ; workspace : nom du dossier (ou `--ws`) ;
+- seuls les fichiers modifiés sont transférés (comparaison SHA-256) ; les fichiers supprimés localement
+  le sont aussi à distance ;
 - **les fichiers créés à distance sont conservés** (`target/`, `.venv/`, résultats) : les compilations Rust
   restent incrémentales d'un run à l'autre ;
-- exclusions par défaut : `.git`, `target`, `__pycache__`, `.venv`, `venv`, `node_modules`, `dist`, `build`, … ;
+- exclusions par défaut : `.git`, `target`, `__pycache__`, `.venv`, `venv`, `node_modules`, `dist`, `build`… ;
   ajoute les tiennes avec `--exclude MOTIF` ou dans un fichier `.gsremoteignore` à la racine (un motif par ligne).
 
 ---
 
-## 4. Sécurité
-
-Ce serveur **exécute n'importe quelle commande** envoyée par un client qui possède le jeton. Protections en place :
+## 3. Sécurité
 
 | Risque | Protection |
 |---|---|
-| Quelqu'un sur le réseau envoie des commandes | chaque requête est signée HMAC-SHA256 avec le jeton ; sans le jeton, tout est refusé (401) |
-| Le jeton est intercepté | il ne circule jamais : seule une signature est envoyée |
-| Une requête capturée est renvoyée plus tard | horodatage (± 5 min) + nonce à usage unique → refusée |
-| Une requête est modifiée en route | la signature couvre la méthode, le chemin, l'horodatage et le hash du corps → refusée |
-| Accès depuis Internet | seules les IP privées / locales sont acceptées par défaut (`--allow` pour restreindre encore) |
-| Un fichier envoyé écrase quelque chose hors du workspace | chemins absolus, `..`, lettres de lecteur et liens symboliques sortants refusés |
-| Une commande ne s'arrête jamais | timeout (600 s par défaut) puis arrêt du processus **et de ses sous-processus** |
+| Quelqu'un contacte une machine de test pour lui faire exécuter du code | **impossible** : les agents n'écoutent aucun port |
+| Un faux hub (IP usurpée sur le réseau) envoie une tâche à un agent | chaque réponse du hub est signée HMAC-SHA256 avec le jeton de l'agent : sans le jeton, l'agent refuse tout |
+| Une ancienne tâche, capturée, est renvoyée à un agent | chaque réponse est liée au nonce unique de la requête de l'agent : une réponse rejouée est refusée |
+| Quelqu'un envoie des tâches au hub | l'API de contrôle n'accepte que des requêtes **locales au Mac**, signées avec un jeton stocké dans `~/.gpusync-remote/hub.json` (droits 600) |
+| Un agent se fait passer pour un autre | un jeton par agent ; un agent n'accède qu'à ses propres tâches |
+| Un agent lit des fichiers du Mac | il ne peut demander que les fichiers listés dans sa tâche (le dépôt synchronisé) |
+| Une requête capturée est rejouée au hub | horodatage (± 5 min) + nonce à usage unique |
+| Une requête est modifiée en route | la signature couvre l'identité, la méthode, le chemin, l'horodatage et le hash du corps |
+| Accès au hub depuis Internet | seules les IP privées et locales sont acceptées (`--allow 192.168.1.0/24` pour restreindre encore) |
+| Un fichier reçu écrase quelque chose hors du workspace | chemins absolus, `..`, lettres de lecteur et liens symboliques sortants refusés |
+| Une commande ne s'arrête jamais | timeout (600 s par défaut), puis arrêt du processus **et de ses sous-processus** |
+
+Testé : faux hub sans signature, signé avec un autre jeton, et signé avec le bon jeton mais rejoué → l'agent refuse
+dans les trois cas et n'exécute rien.
 
 Limites à connaître :
 
 - le trafic **n'est pas chiffré** : le code envoyé et les sorties sont lisibles sur le réseau local.
   À utiliser sur un réseau de confiance (chez toi), pas sur un Wi-Fi public ;
-- les horloges des machines doivent être à l'heure (± 5 min), ce que la synchronisation automatique de Windows
-  et macOS assure normalement ;
-- le serveur tourne avec les droits de l'utilisateur qui l'a lancé : ne le lance pas en administrateur.
+- **un jeton d'agent permet de faire exécuter du code à cet agent** par quiconque le détient et peut joindre l'agent
+  en se faisant passer pour le hub. Garde-le secret ; en cas de doute, `agents rm` puis `agents add` ;
+- les horloges des machines doivent être à l'heure (± 5 min) ;
+- les commandes s'exécutent avec les droits de l'utilisateur qui a lancé l'agent : ne le lance pas en administrateur.
   Arrête-le (`Ctrl+C`) quand tu ne t'en sers pas.
 
 ---
 
-## 5. API (pour référence)
+## 4. Fichiers
 
-Toutes les requêtes portent les en-têtes `X-GS-Time`, `X-GS-Nonce`, `X-GS-Sig`
-(`HMAC-SHA256(jeton, "MÉTHODE\nchemin\nhorodatage\nnonce\nsha256(corps)")`).
+| Machine | Fichier | Contenu |
+|---|---|---|
+| Mac | `~/.gpusync-remote/hub.json` | jeton de contrôle, jetons des agents, port |
+| Mac | `~/.gpusync-remote/hub/jobs/` | sorties des tâches |
+| machine de test | `~/.gpusync-remote/agent.json` | URL du hub, nom, jeton |
+| machine de test | `~/.gpusync-remote/agent/workspaces/` | dépôts synchronisés et fichiers produits |
 
-| Méthode et route | Rôle |
-|---|---|
-| `GET /info` | informations sur la machine |
-| `POST /manifest/<ws>` | `{files: {chemin: [taille, sha256]}}` → `{need, delete}` |
-| `POST /sync/<ws>` | zip des fichiers demandés + `__gs_meta__.json` |
-| `POST /run/<ws>` | `{cmd, shell, env, timeout, cwd}` → job |
-| `GET /jobs/<id>?offset=N` | statut + sortie à partir de l'octet N (base64) |
-| `POST /jobs/<id>/kill` | tuer le job |
-| `GET /files/<ws>/<chemin>` | télécharger un fichier du workspace |
-| `POST /reset/<ws>` | supprimer le workspace |
+`GS_REMOTE_HOME` permet de changer le dossier `~/.gpusync-remote`.
+
+---
+
+## 5. Protocole (pour référence)
+
+Requêtes : en-têtes `X-GS-Who` (nom d'agent, ou `@ctl` pour la CLI), `X-GS-Time`, `X-GS-Nonce`,
+`X-GS-Sig = HMAC(jeton, "req\nwho\nMÉTHODE\nchemin\nhorodatage\nnonce\nsha256(corps)")`.
+Réponses : `X-GS-Resp-Sig = HMAC(jeton, "resp\nnonce-de-la-requête\nstatut\nsha256(corps)")`.
+
+| Route | Appelant | Rôle |
+|---|---|---|
+| `POST /a/hello` | agent | annonce et infos machine |
+| `POST /a/poll` | agent | attend une tâche (long-polling, 25 s max) |
+| `POST /a/files` | agent | fichiers d'une tâche de synchronisation (zip) |
+| `POST /a/output` | agent | envoie la sortie ; la réponse indique si la tâche doit être arrêtée |
+| `POST /a/upload?job=` | agent | fichier demandé par `get` |
+| `POST /a/done` | agent | fin de tâche (statut, code) |
+| `GET /c/agents` | CLI (locale) | état des agents |
+| `POST /c/jobs` | CLI (locale) | soumettre une tâche |
+| `GET /c/jobs/<id>?offset=` | CLI (locale) | statut + sortie à partir de l'octet N |
+| `POST /c/jobs/<id>/kill` | CLI (locale) | arrêter une tâche |
+| `GET /c/jobs/<id>/result` | CLI (locale) | fichier récupéré par `get` |

@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-gs-remote — client : synchronise un dossier vers des machines de test et y exécute des commandes.
+gs-remote — exécuter des commandes sur les machines de test de GPUsync.
 
-    python gs_remote.py hosts add mac http://192.168.1.20:8765 <jeton>
-    python gs_remote.py hosts list
-    python gs_remote.py info all
-    python gs_remote.py run all -- @python -c "import platform; print(platform.platform())"
-    python gs_remote.py run win --timeout 1800 -- cargo test
-    python gs_remote.py get win bench/results.json
+Trois rôles, un seul fichier (Python >= 3.9, bibliothèque standard uniquement) :
 
-Cibles : un nom d'hôte, plusieurs séparés par des virgules (mac,win), ou `all`.
-`@python` est remplacé par l'interpréteur Python du serveur distant.
+  hub    sur la machine de dev (le Mac). Il écoute ; les agents viennent y chercher leurs tâches.
+  agent  sur chaque machine de test. Il N'ÉCOUTE RIEN : il se connecte au hub (connexion sortante),
+         se reconnecte tout seul, et n'exécute que des tâches signées par le hub.
+  CLI    sur la machine de dev : envoie les tâches au hub et affiche les résultats.
 
-Par défaut, `run` synchronise d'abord le dossier courant (racine git si possible) vers un
-workspace du même nom sur chaque machine. Seuls les fichiers modifiés sont envoyés. Les
-fichiers produits à distance (target/, .venv/, résultats) sont conservés entre deux runs.
+    python3 gs_remote.py hub                                   # sur le Mac, à laisser tourner
+    python3 gs_remote.py agents add win                        # affiche la commande à lancer sur le PC
+    py gs_remote.py agent --hub http://192.168.1.20:8765 --name win --token ...   # sur le PC
+    python3 gs_remote.py info all
+    python3 gs_remote.py run all -- @python -c "import platform; print(platform.platform())"
 
-Python >= 3.9, bibliothèque standard uniquement.
+Sécurité : chaque requête d'un agent est signée (HMAC-SHA256) avec son jeton, et chaque réponse du
+hub est signée avec le même jeton et liée au nonce de la requête. Un agent n'exécute donc rien qui ne
+vienne du vrai hub, et une ancienne tâche ne peut pas être rejouée. L'API de contrôle (CLI) n'est
+accessible que depuis la machine du hub. Le trafic n'est pas chiffré : réseau local de confiance uniquement.
 """
 
 from __future__ import annotations
@@ -24,127 +26,928 @@ from __future__ import annotations
 import argparse
 import base64
 import codecs
+import collections
 import fnmatch
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
+import platform
+import re
 import secrets
+import shutil
+import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-CONFIG_PATH = Path(os.environ.get("GS_REMOTE_CONFIG", Path.home() / ".gpusync-remote" / "hosts.json"))
-IGNORE_FILE = ".gsremoteignore"
+HOME = Path(os.environ.get("GS_REMOTE_HOME", Path.home() / ".gpusync-remote"))
+HUB_CONFIG = HOME / "hub.json"
+AGENT_CONFIG = HOME / "agent.json"
+DEFAULT_PORT = 8765
+CTL = "@ctl"                      # identité de la CLI auprès du hub
+POLL_WAIT_S = 25                  # long-polling : durée max d'attente d'une tâche
+ONLINE_TIMEOUT_S = 45             # un agent silencieux depuis plus longtemps est « hors ligne »
+HEARTBEAT_S = 5                   # un agent qui exécute une tâche donne signe de vie au moins toutes les 5 s
+MAX_CLOCK_SKEW_S = 300
+MAX_BODY = 2 * 1024 ** 3
+MAX_GET_FILE = 512 * 1024 ** 2
+LOG_CHUNK_MAX = 1024 * 1024
+SYNC_BATCH_BYTES = 200 * 1024 ** 2
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SYNC_STATE_FILE = ".gs_sync_state.json"
+PY_PLACEHOLDER = "@python"
 DEFAULT_EXCLUDES = [
     ".git", "target", "__pycache__", "*.pyc", ".venv", "venv", "node_modules", ".DS_Store",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", "*.egg-info", "dist", "build", ".gs_sync_state.json",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", "*.egg-info", "dist", "build", SYNC_STATE_FILE,
 ]
+IGNORE_FILE = ".gsremoteignore"
 
 _print_lock = threading.Lock()
 
 
-def out(line: str, stream=None) -> None:
+def out(text: str, stream=None) -> None:
+    s = stream or sys.stdout
     with _print_lock:
-        (stream or sys.stdout).write(line)
-        (stream or sys.stdout).flush()
+        s.write(text)
+        s.flush()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration des hôtes
-# ─────────────────────────────────────────────────────────────────────────────
+def log(msg: str) -> None:
+    out(f"[{time.strftime('%H:%M:%S')}] {msg}\n", sys.stderr)
 
 
-def load_config() -> dict:
-    try:
-        return json.loads(CONFIG_PATH.read_text("utf-8"))
-    except FileNotFoundError:
-        return {"hosts": {}}
+# ═════════════════════════════════════════════════════════════════════════════
+# Commun : signatures, chemins, config
+# ═════════════════════════════════════════════════════════════════════════════
 
 
-def save_config(cfg: dict) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2), "utf-8")
-    if os.name != "nt":
-        os.chmod(CONFIG_PATH, 0o600)
-
-
-def resolve_targets(spec: str) -> list[tuple[str, dict]]:
-    hosts = load_config()["hosts"]
-    if not hosts:
-        sys.exit("Aucun hôte configuré. Utilise : gs_remote.py hosts add <nom> <url> <jeton>")
-    names = list(hosts) if spec == "all" else [s.strip() for s in spec.split(",") if s.strip()]
-    unknown = [n for n in names if n not in hosts]
-    if unknown:
-        sys.exit(f"Hôte(s) inconnu(s) : {', '.join(unknown)}. Configurés : {', '.join(hosts)}")
-    return [(n, hosts[n]) for n in names]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP signé
-# ─────────────────────────────────────────────────────────────────────────────
+class HttpError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status, self.message = status, message
 
 
 class RemoteError(Exception):
     pass
 
 
-class Remote:
-    def __init__(self, name: str, host: dict):
-        self.name = name
-        self.url = host["url"].rstrip("/")
-        self.token = host["token"]
+class Unreachable(RemoteError):
+    pass
 
-    def request(self, method: str, path: str, body: bytes = b"", timeout: float = 60, raw: bool = False):
-        ts = f"{time.time():.3f}"
-        nonce = secrets.token_hex(16)
-        msg = "\n".join([method, path, ts, nonce, hashlib.sha256(body).hexdigest()]).encode()
-        sig = hmac.new(self.token.encode(), msg, hashlib.sha256).hexdigest()
-        req = urllib.request.Request(
-            self.url + path,
-            data=body if method == "POST" else None,
-            method=method,
-            headers={"X-GS-Time": ts, "X-GS-Nonce": nonce, "X-GS-Sig": sig, "Content-Type": "application/octet-stream"},
-        )
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _mac(token: str, *parts: str) -> str:
+    return hmac.new(token.encode(), "\n".join(parts).encode(), hashlib.sha256).hexdigest()
+
+
+def sign_request(token, who, method, path, ts, nonce, body: bytes) -> str:
+    return _mac(token, "req", who, method.upper(), path, ts, nonce, sha256_hex(body))
+
+
+def sign_response(token, nonce, status: int, body: bytes) -> str:
+    return _mac(token, "resp", nonce, str(status), sha256_hex(body))
+
+
+def check_name(name: str, what: str = "nom") -> str:
+    if not NAME_RE.match(name or ""):
+        raise HttpError(400, f"{what} invalide : {name!r} (lettres, chiffres, - et _ uniquement)")
+    return name
+
+
+def safe_rel_path(p: str) -> str:
+    """Chemin relatif normalisé ; refuse les chemins absolus, `..`, lettres de lecteur."""
+    if not isinstance(p, str) or not p:
+        raise HttpError(400, "chemin vide")
+    p = p.replace("\\", "/")
+    if p.startswith("/") or ":" in p or "\x00" in p:
+        raise HttpError(400, f"chemin refusé : {p!r}")
+    parts = [x for x in p.split("/") if x not in ("", ".")]
+    if not parts or ".." in parts:
+        raise HttpError(400, f"chemin refusé : {p!r}")
+    return "/".join(parts)
+
+
+def resolve_inside(base: Path, rel: str) -> Path:
+    """`base/rel`, en refusant qu'il sorte de `base` (y compris via un lien symbolique)."""
+    target = base / safe_rel_path(rel)
+    try:
+        target.resolve().relative_to(base.resolve())
+    except ValueError:
+        raise HttpError(400, f"chemin refusé (sort du workspace) : {rel!r}") from None
+    return target
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return default
+
+
+def write_private_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), "utf-8")
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def local_ips() -> list[str]:
+    ips = set()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    try:  # interface par défaut (connect UDP : aucun paquet envoyé)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            ips.add(s.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(ip for ip in ips if not ip.startswith("127."))
+
+
+class SignedClient:
+    """Client HTTP qui signe ses requêtes et n'accepte que des réponses signées par le hub."""
+
+    def __init__(self, base_url: str, who: str, token: str):
+        self.base, self.who, self.token = base_url.rstrip("/"), who, token
+
+    def call(self, method: str, path: str, payload=None, body: bytes | None = None, timeout: float = 60, raw=False):
+        if body is None:
+            body = json.dumps(payload).encode() if payload is not None else b""
+        ts, nonce = f"{time.time():.3f}", secrets.token_hex(16)
+        headers = {
+            "X-GS-Who": self.who, "X-GS-Time": ts, "X-GS-Nonce": nonce,
+            "X-GS-Sig": sign_request(self.token, self.who, method, path, ts, nonce, body),
+            "Content-Type": "application/octet-stream",
+        }
+        req = urllib.request.Request(self.base + path, data=body if method == "POST" else None, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = resp.read()
+                status, data, rsig = resp.status, resp.read(), resp.headers.get("X-GS-Resp-Sig")
         except urllib.error.HTTPError as e:
-            try:
-                msg = json.loads(e.read()).get("error", str(e))
-            except Exception:
-                msg = str(e)
-            raise RemoteError(f"{self.name}: HTTP {e.code} — {msg}") from None
+            status, data, rsig = e.code, e.read(), e.headers.get("X-GS-Resp-Sig")
         except (urllib.error.URLError, OSError) as e:
-            reason = getattr(e, "reason", e)
-            raise RemoteError(f"{self.name}: injoignable ({self.url}) — {reason}") from None
+            raise Unreachable(f"{self.base} injoignable — {getattr(e, 'reason', e)}") from None
+        authentic = bool(rsig) and hmac.compare_digest(rsig, sign_response(self.token, nonce, status, data))
+        if status != 200:
+            try:
+                msg = json.loads(data).get("error", "")
+            except ValueError:
+                msg = data[:200].decode("utf-8", "replace")
+            suffix = "" if authentic else " [réponse non authentifiée : mauvais jeton, ou ce n'est pas le bon hub]"
+            raise RemoteError(f"HTTP {status} — {msg}{suffix}")
+        if not authentic:
+            raise RemoteError("réponse NON AUTHENTIFIÉE : ce serveur n'est pas le hub attendu (ou le jeton est faux). Rien n'a été exécuté.")
         return data if raw else json.loads(data)
 
-    def get(self, path, **kw):
-        return self.request("GET", path, **kw)
 
-    def post(self, path, payload=None, body: bytes | None = None, **kw):
-        if body is None:
-            body = json.dumps(payload or {}).encode()
-        return self.request("POST", path, body=body, **kw)
+# ═════════════════════════════════════════════════════════════════════════════
+# HUB (machine de dev)
+# ═════════════════════════════════════════════════════════════════════════════
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Synchronisation
-# ─────────────────────────────────────────────────────────────────────────────
+class HubJob:
+    def __init__(self, hub: "Hub", agent: str, spec: dict, src: Path | None):
+        self.id = uuid.uuid4().hex[:12]
+        self.agent = agent
+        self.spec = dict(spec, id=self.id)
+        self.src = src
+        self.manifest: dict = spec.get("manifest") or {}
+        self.status = "queued"
+        self.exit_code: int | None = None
+        self.created = time.time()
+        self.started: float | None = None
+        self.ended: float | None = None
+        self.kill_requested = False
+        self.result: bytes | None = None
+        self.log_path = hub.jobs_dir / f"{self.id}.log"
+        self.log_path.write_bytes(b"")
+
+    def describe(self, hub: "Hub") -> dict:
+        status = self.status
+        if status == "running" and time.time() - hub.agents[self.agent].last_seen > ONLINE_TIMEOUT_S:
+            status = "lost"  # l'agent ne donne plus signe de vie
+        ref = self.started or self.created
+        return {"id": self.id, "agent": self.agent, "type": self.spec["type"], "status": status,
+                "exit_code": self.exit_code, "duration_s": round((self.ended or time.time()) - ref, 3)}
+
+
+class AgentState:
+    def __init__(self, name: str):
+        self.name = name
+        self.last_seen = 0.0
+        self.info: dict = {}
+        self.queue: collections.deque = collections.deque()
+        self.current: str | None = None
+        self.address = ""
+
+
+class Hub:
+    def __init__(self, allow: list):
+        self.allow = allow
+        self.jobs_dir = HOME / "hub" / "jobs"
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.cond = threading.Condition()
+        self.agents: dict[str, AgentState] = {}
+        self.jobs: dict[str, HubJob] = {}
+        self.nonces: dict[str, float] = {}
+
+    # --- configuration (relue à chaque requête : `agents add` n'exige pas de redémarrer) ---
+
+    def config(self) -> dict:
+        return read_json(HUB_CONFIG, {})
+
+    def token_for(self, who: str) -> str | None:
+        cfg = self.config()
+        if who == CTL:
+            return cfg.get("control_token")
+        return (cfg.get("agents") or {}).get(who, {}).get("token")
+
+    def agent(self, name: str) -> AgentState:
+        st = self.agents.get(name)
+        if st is None:
+            st = self.agents[name] = AgentState(name)
+        return st
+
+    # --- contrôle d'accès ---
+
+    def ip_allowed(self, addr: str) -> bool:
+        ip = ipaddress.ip_address(addr)
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.is_loopback:
+            return True
+        if self.allow:
+            return any(ip in net for net in self.allow)
+        return ip.is_private or ip.is_link_local
+
+    @staticmethod
+    def is_loopback(addr: str) -> bool:
+        ip = ipaddress.ip_address(addr)
+        return (ip.ipv4_mapped or ip).is_loopback if ip.version == 6 else ip.is_loopback
+
+    def verify(self, token: str, who: str, method: str, path: str, headers, body: bytes) -> None:
+        ts, nonce, sig = headers.get("X-GS-Time"), headers.get("X-GS-Nonce"), headers.get("X-GS-Sig")
+        if not (ts and nonce and sig):
+            raise HttpError(401, "requête non signée")
+        try:
+            skew = abs(time.time() - float(ts))
+        except ValueError:
+            raise HttpError(401, "horodatage invalide") from None
+        if skew > MAX_CLOCK_SKEW_S:
+            raise HttpError(401, f"horloges désynchronisées ({skew:.0f} s d'écart)")
+        if not hmac.compare_digest(sign_request(token, who, method, path, ts, nonce, body), sig):
+            raise HttpError(401, "signature invalide (mauvais jeton ?)")
+        now = time.time()
+        with self.cond:
+            for n, t in list(self.nonces.items()):
+                if now - t > 2 * MAX_CLOCK_SKEW_S:
+                    del self.nonces[n]
+            if nonce in self.nonces:
+                raise HttpError(401, "requête rejouée")
+            self.nonces[nonce] = now
+
+    # --- API agents ---
+
+    def job_of(self, agent: str, job_id: str) -> HubJob:
+        job = self.jobs.get(job_id)
+        if job is None or job.agent != agent:
+            raise HttpError(404, "tâche inconnue")
+        return job
+
+    def a_hello(self, agent: str, req: dict, address: str) -> dict:
+        with self.cond:
+            st = self.agent(agent)
+            st.info, st.last_seen, st.address = req.get("info") or {}, time.time(), address
+            for job in self.jobs.values():  # l'agent a redémarré : ses tâches en cours sont perdues
+                if job.agent == agent and job.status == "running":
+                    job.status, job.ended = "lost", time.time()
+            st.current = None
+        log(f"agent {agent} connecté depuis {address}")
+        return {"ok": True}
+
+    def a_poll(self, agent: str) -> dict:
+        with self.cond:
+            st = self.agent(agent)
+            deadline = time.time() + POLL_WAIT_S
+            while not st.queue:
+                st.last_seen = time.time()
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return {"job": None}
+                self.cond.wait(timeout=min(remaining, 5))
+            job = st.queue.popleft()
+            job.status, job.started, st.current, st.last_seen = "running", time.time(), job.id, time.time()
+            return {"job": job.spec}
+
+    def a_files(self, agent: str, req: dict) -> bytes:
+        job = self.job_of(agent, req.get("job", ""))
+        if job.src is None:
+            raise HttpError(400, "cette tâche n'a pas de fichiers")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for rel in req.get("paths") or []:
+                if rel not in job.manifest:  # l'agent ne peut demander QUE les fichiers de la tâche
+                    raise HttpError(403, f"fichier hors de la tâche : {rel!r}")
+                zf.write(resolve_inside(job.src, rel), rel)
+        self.agent(agent).last_seen = time.time()
+        return buf.getvalue()
+
+    def a_output(self, agent: str, req: dict) -> dict:
+        job = self.job_of(agent, req.get("job", ""))
+        data = base64.b64decode(req.get("data_b64") or "")
+        if data:
+            with open(job.log_path, "ab") as f:
+                f.write(data)
+        self.agent(agent).last_seen = time.time()
+        return {"kill": job.kill_requested}
+
+    def a_upload(self, agent: str, job_id: str, body: bytes) -> dict:
+        job = self.job_of(agent, job_id)
+        job.result = body
+        return {"ok": True}
+
+    def a_done(self, agent: str, req: dict) -> dict:
+        job = self.job_of(agent, req.get("job", ""))
+        with self.cond:
+            job.status = req.get("status") or "done"
+            job.exit_code = req.get("exit_code")
+            job.ended = time.time()
+            st = self.agent(agent)
+            st.current, st.last_seen = None, time.time()
+            if req.get("info"):
+                st.info = req["info"]
+        return {"ok": True}
+
+    # --- API contrôle (CLI, machine locale uniquement) ---
+
+    def c_agents(self) -> dict:
+        now = time.time()
+        known = set((self.config().get("agents") or {}).keys())
+        rows = []
+        for name in sorted(known | set(self.agents)):
+            st = self.agents.get(name)
+            rows.append({
+                "name": name,
+                "registered": name in known,
+                "online": bool(st and now - st.last_seen < ONLINE_TIMEOUT_S),
+                "last_seen_s": round(now - st.last_seen, 1) if st and st.last_seen else None,
+                "address": st.address if st else "",
+                "info": st.info if st else {},
+                "current": st.current if st else None,
+                "queued": len(st.queue) if st else 0,
+            })
+        return {"agents": rows}
+
+    def c_submit(self, req: dict) -> dict:
+        agent = check_name(req.get("agent", ""), "agent")
+        if agent not in (self.config().get("agents") or {}):
+            raise HttpError(404, f"agent inconnu : {agent}")
+        st = self.agents.get(agent)
+        if not (st and time.time() - st.last_seen < ONLINE_TIMEOUT_S):
+            raise HttpError(409, f"l'agent {agent} est hors ligne")
+        spec = req.get("spec") or {}
+        if spec.get("type") not in ("run", "sync", "get", "reset"):
+            raise HttpError(400, "type de tâche invalide")
+        check_name(spec.get("ws", ""), "workspace")
+        src = Path(req["src"]) if req.get("src") else None
+        job = HubJob(self, agent, spec, src)
+        with self.cond:
+            self.jobs[job.id] = job
+            st.queue.append(job)
+            self.cond.notify_all()
+        return job.describe(self)
+
+    def c_job(self, job_id: str, offset: int) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HttpError(404, f"tâche inconnue : {job_id}")
+        d = job.describe(self)  # lu AVANT le log : si terminé, le log est complet
+        with open(job.log_path, "rb") as f:
+            f.seek(offset)
+            data = f.read(LOG_CHUNK_MAX)
+        d.update({"next_offset": offset + len(data), "data_b64": base64.b64encode(data).decode()})
+        if d["status"] not in ("queued", "running") and len(data) == LOG_CHUNK_MAX:
+            d["status"] = "running"  # il reste de la sortie à lire
+        return d
+
+    def c_kill(self, job_id: str) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise HttpError(404, f"tâche inconnue : {job_id}")
+        with self.cond:
+            st = self.agent(job.agent)
+            if job.status == "queued":
+                try:
+                    st.queue.remove(job)
+                except ValueError:
+                    pass
+                job.status, job.ended = "killed", time.time()
+            job.kill_requested = True
+        return job.describe(self)
+
+    def c_result(self, job_id: str) -> bytes:
+        job = self.jobs.get(job_id)
+        if job is None or job.result is None:
+            raise HttpError(404, "aucun fichier pour cette tâche")
+        return job.result
+
+
+def make_hub_handler(hub: Hub):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "gs-remote-hub/2"
+
+        def log_message(self, fmt, *args):
+            pass  # le hub journalise lui-même les événements utiles
+
+        def _send(self, status: int, payload=None, raw: bytes | None = None, token=None, nonce=""):
+            body = raw if raw is not None else json.dumps(payload or {}, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/octet-stream" if raw is not None else "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if token:
+                self.send_header("X-GS-Resp-Sig", sign_response(token, nonce, status, body))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _handle(self, method: str):
+            nonce = self.headers.get("X-GS-Nonce", "")
+            token = None
+            addr = self.client_address[0]
+            try:
+                if not hub.ip_allowed(addr):
+                    raise HttpError(403, "adresse IP non autorisée")
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > MAX_BODY:
+                    raise HttpError(413, "requête trop grosse")
+                body = self.rfile.read(length) if length else b""
+                who = self.headers.get("X-GS-Who", "")
+                if who == CTL and not hub.is_loopback(addr):
+                    raise HttpError(403, "l'API de contrôle n'est accessible que depuis la machine du hub")
+                token = hub.token_for(who) if who == CTL or NAME_RE.match(who) else None
+                if not token:
+                    raise HttpError(401, f"identité inconnue : {who!r}")
+                hub.verify(token, who, method, self.path, self.headers, body)
+                result = self._route(method, who, body, addr)
+                if isinstance(result, bytes):
+                    self._send(200, raw=result, token=token, nonce=nonce)
+                else:
+                    self._send(200, result, token=token, nonce=nonce)
+            except HttpError as e:
+                if e.status in (401, 403):
+                    log(f"refusé {addr} : {e.message}")
+                self._send(e.status, {"error": e.message}, token=token, nonce=nonce)
+            except Exception as e:
+                self._send(500, {"error": f"{type(e).__name__}: {e}"}, token=token, nonce=nonce)
+
+        def _route(self, method, who, body, addr):
+            url = urlparse(self.path)
+            parts = [p for p in url.path.split("/") if p]
+            q = parse_qs(url.query)
+            js = (lambda: json.loads(body or b"{}"))
+            if who == CTL:
+                if method == "GET" and parts == ["c", "agents"]:
+                    return hub.c_agents()
+                if method == "POST" and parts == ["c", "jobs"]:
+                    return hub.c_submit(js())
+                if method == "GET" and len(parts) == 3 and parts[:2] == ["c", "jobs"]:
+                    return hub.c_job(parts[2], int(q.get("offset", ["0"])[0]))
+                if method == "POST" and len(parts) == 4 and parts[:2] == ["c", "jobs"] and parts[3] == "kill":
+                    return hub.c_kill(parts[2])
+                if method == "GET" and len(parts) == 4 and parts[:2] == ["c", "jobs"] and parts[3] == "result":
+                    return hub.c_result(parts[2])
+            else:
+                if method == "POST" and parts == ["a", "hello"]:
+                    return hub.a_hello(who, js(), addr)
+                if method == "POST" and parts == ["a", "poll"]:
+                    return hub.a_poll(who)
+                if method == "POST" and parts == ["a", "files"]:
+                    return hub.a_files(who, js())
+                if method == "POST" and parts == ["a", "output"]:
+                    return hub.a_output(who, js())
+                if method == "POST" and parts == ["a", "upload"]:
+                    return hub.a_upload(who, q.get("job", [""])[0], body)
+                if method == "POST" and parts == ["a", "done"]:
+                    return hub.a_done(who, js())
+            raise HttpError(404, f"route inconnue : {method} {url.path}")
+
+        def do_GET(self):
+            self._handle("GET")
+
+        def do_POST(self):
+            self._handle("POST")
+
+    return Handler
+
+
+def hub_config_ensure(port: int | None = None) -> dict:
+    cfg = read_json(HUB_CONFIG, {})
+    changed = False
+    if "control_token" not in cfg:
+        cfg["control_token"], changed = secrets.token_urlsafe(32), True
+    cfg.setdefault("agents", {})
+    if port is not None and cfg.get("port") != port:
+        cfg["port"], changed = port, True
+    if changed or not HUB_CONFIG.exists():
+        write_private_json(HUB_CONFIG, cfg)
+    return cfg
+
+
+def cmd_hub(args) -> int:
+    cfg = hub_config_ensure(args.port)
+    allow = [ipaddress.ip_network(c, strict=False) for c in args.allow]
+    hub = Hub(allow)
+    httpd = ThreadingHTTPServer((args.bind, args.port), make_hub_handler(hub))
+    httpd.daemon_threads = True
+    print(f"gs-remote hub — {socket.gethostname()}, écoute sur {args.bind}:{args.port}")
+    print(f"  agents autorisés : {', '.join(args.allow) if args.allow else 'IP privées et locales'}")
+    print(f"  agents enregistrés : {', '.join(cfg['agents']) or 'aucun'} (ajout : gs_remote.py agents add <nom>)")
+    print(f"  adresses de ce hub : {', '.join(local_ips()) or '?'}\n", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nHub arrêté.")
+    return 0
+
+
+def cmd_agents(args) -> int:
+    cfg = hub_config_ensure()
+    agents = cfg["agents"]
+    port = cfg.get("port", DEFAULT_PORT)
+    if args.action == "add":
+        name = args.name or sys.exit("Usage : gs_remote.py agents add <nom>")
+        try:
+            check_name(name, "nom d'agent")
+        except HttpError as e:
+            sys.exit(e.message)
+        if name in agents and not args.force:
+            sys.exit(f"L'agent {name} existe déjà (--force pour régénérer son jeton).")
+        token = secrets.token_urlsafe(32)
+        agents[name] = {"token": token, "created": time.strftime("%Y-%m-%d %H:%M")}
+        write_private_json(HUB_CONFIG, cfg)
+        ip = (local_ips() or ["<IP-du-Mac>"])[0]
+        print(f"Agent {name} enregistré. Sur la machine de test, lance (une seule fois avec ces options) :\n")
+        print(f"  Windows : py gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
+        print(f"  macOS   : python3 gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
+        print(f"  (agent sur la machine du hub : --hub http://127.0.0.1:{port})\n")
+        print("Ensuite, `gs_remote.py agent` suffit : la configuration est mémorisée sur la machine de test.")
+        print("Le jeton est secret : il permet d'exécuter du code via ce hub.")
+    elif args.action == "rm":
+        if agents.pop(args.name or "", None) is None:
+            sys.exit(f"Agent inconnu : {args.name}")
+        write_private_json(HUB_CONFIG, cfg)
+        print(f"Agent {args.name} supprimé : son jeton n'est plus accepté.")
+    else:
+        if not agents:
+            print("Aucun agent enregistré.")
+        for n, a in agents.items():
+            print(f"  {n:<12} créé le {a.get('created', '?')}")
+    return 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AGENT (machines de test)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def run_probe(cmd: list[str], timeout: float = 15) -> str | None:
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return r.stdout.decode("utf-8", "replace").strip() or None if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+_STATIC_INFO: dict | None = None
+
+
+def machine_info(ws_root: Path) -> dict:
+    """Infos matérielles (calculées une fois : certaines sondes prennent ~1 s) + workspaces actuels."""
+    global _STATIC_INFO
+    if _STATIC_INFO is None:
+        _STATIC_INFO = _probe_machine()
+    info = dict(_STATIC_INFO)
+    info["workspaces"] = sorted(p.name for p in ws_root.iterdir() if p.is_dir()) if ws_root.exists() else []
+    return info
+
+
+def _probe_machine() -> dict:
+    system = platform.system()
+    gpus: list[str] = []
+    if system == "Windows":
+        ps = run_probe(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name + ' (driver ' + $_.DriverVersion + ')' }"], 30)
+        gpus = ps.splitlines() if ps else []
+    elif system == "Darwin":
+        sp = run_probe(["system_profiler", "SPDisplaysDataType", "-json"], 30)
+        try:
+            for d in json.loads(sp or "{}").get("SPDisplaysDataType", []):
+                cores = d.get("sppci_cores")
+                gpus.append(d.get("sppci_model", "?") + (f" ({cores} cœurs)" if cores else ""))
+        except ValueError:
+            pass
+    else:
+        lspci = run_probe(["sh", "-c", "lspci | grep -Ei 'vga|3d|display'"])
+        gpus = lspci.splitlines() if lspci else []
+    nvidia = run_probe(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"])
+    return {
+        "hostname": socket.gethostname(),
+        "os": f"{system} {platform.release()}",
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "python": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "gpus": gpus,
+        "nvidia_smi": nvidia.splitlines() if nvidia else None,
+        "rustc": run_probe(["rustc", "--version"]),
+    }
+
+
+class AgentJob:
+    """Exécute une tâche reçue du hub et renvoie sa sortie au fil de l'eau."""
+
+    def __init__(self, api: SignedClient, spec: dict, ws_root: Path):
+        self.api, self.spec, self.ws_root = api, spec, ws_root
+        self.id = spec["id"]
+        self.ws = ws_root / check_name(spec["ws"], "workspace")
+
+    def _call(self, *args, **kwargs):
+        """Appel au hub, avec quelques nouvelles tentatives si le réseau coupe brièvement (~30 s)."""
+        for attempt in range(7):
+            try:
+                return self.api.call(*args, **kwargs)
+            except Unreachable:
+                if attempt == 6:
+                    raise
+                time.sleep(5)
+
+    def say(self, text: str) -> bool:
+        """Envoie de la sortie au hub. Renvoie True si le hub demande l'arrêt."""
+        r = self._call("POST", "/a/output", {"job": self.id, "data_b64": base64.b64encode(text.encode()).decode()})
+        return bool(r.get("kill"))
+
+    def done(self, status: str, code: int | None) -> None:
+        self._call("POST", "/a/done", {"job": self.id, "status": status, "exit_code": code,
+                                       "info": machine_info(self.ws_root)}, timeout=120)
+
+    def execute(self) -> None:
+        kind = self.spec["type"]
+        try:
+            if kind in ("run", "sync"):
+                self.ws.mkdir(parents=True, exist_ok=True)
+                if self.spec.get("manifest") is not None:
+                    self.sync()
+                if kind == "run":
+                    status, code = self.run_command()
+                    self.done(status, code)
+                    return
+            elif kind == "get":
+                target = resolve_inside(self.ws, self.spec["path"])
+                if not target.is_file():
+                    raise HttpError(404, f"fichier introuvable : {self.spec['path']}")
+                if target.stat().st_size > MAX_GET_FILE:
+                    raise HttpError(413, "fichier trop gros")
+                self._call("POST", f"/a/upload?job={self.id}", body=target.read_bytes(), timeout=600)
+            elif kind == "reset":
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.say(f"workspace {self.ws.name} supprimé\n")
+            self.done("done", 0)
+        except HttpError as e:
+            self.say(f"[gs-remote] erreur : {e.message}\n")
+            self.done("error", -1)
+        except RemoteError:
+            raise
+        except Exception as e:
+            self.say(f"[gs-remote] erreur : {type(e).__name__}: {e}\n")
+            self.done("error", -1)
+
+    def sync(self) -> None:
+        manifest = {safe_rel_path(k): v for k, v in self.spec["manifest"].items()}
+        state_path = self.ws / SYNC_STATE_FILE
+        state = read_json(state_path, {})
+        need = []
+        for rel, (size, sha) in manifest.items():
+            target = resolve_inside(self.ws, rel)
+            if state.get(rel) != sha or not target.is_file() or target.stat().st_size != size:
+                need.append(rel)
+        deleted = 0
+        for rel in [r for r in state if r not in manifest]:
+            try:
+                resolve_inside(self.ws, rel).unlink()
+                deleted += 1
+            except (FileNotFoundError, HttpError):
+                pass
+            state.pop(rel, None)
+        batch, batch_bytes, received = [], 0, 0
+        for i, rel in enumerate(need):
+            batch.append(rel)
+            batch_bytes += manifest[rel][0]
+            if batch_bytes >= SYNC_BATCH_BYTES or i == len(need) - 1:
+                data = self._call("POST", "/a/files", {"job": self.id, "paths": batch}, timeout=900, raw=True)
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    for member in zf.infolist():
+                        if member.filename not in batch:
+                            raise HttpError(400, f"fichier non demandé dans l'archive : {member.filename!r}")
+                        target = resolve_inside(self.ws, member.filename)
+                        if target.is_symlink():
+                            target.unlink()
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        content = zf.read(member)
+                        target.write_bytes(content)
+                        state[member.filename] = sha256_hex(content)
+                        received += 1
+                write_private_json(state_path, state)
+                batch, batch_bytes = [], 0
+        for rel in manifest:  # fichiers déjà à jour
+            state.setdefault(rel, manifest[rel][1])
+        write_private_json(state_path, state)
+        if need or deleted:
+            self.say(f"[sync] {received} fichier(s) reçu(s), {deleted} supprimé(s)\n")
+
+    def run_command(self) -> tuple[str, int | None]:
+        cmd, shell = self.spec.get("cmd"), bool(self.spec.get("shell"))
+        if shell:
+            if not isinstance(cmd, str):
+                raise HttpError(400, "avec --shell, la commande doit être une chaîne")
+            cmd = cmd.replace(PY_PLACEHOLDER, f'"{sys.executable}"')
+        else:
+            if not (isinstance(cmd, list) and cmd and all(isinstance(c, str) for c in cmd)):
+                raise HttpError(400, "commande vide")
+            cmd = [sys.executable if c == PY_PLACEHOLDER else c for c in cmd]
+        cwd = resolve_inside(self.ws, self.spec["cwd"]) if self.spec.get("cwd") else self.ws
+        if not cwd.is_dir():
+            raise HttpError(400, f"dossier introuvable dans le workspace : {self.spec.get('cwd')}")
+        env = os.environ.copy()
+        env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"})
+        env.update({str(k): str(v) for k, v in (self.spec.get("env") or {}).items()})
+        timeout = float(self.spec.get("timeout") or 600)
+
+        log_path = self.ws_root.parent / "logs" / f"{self.id}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        kwargs: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        with open(log_path, "wb") as logf:
+            try:
+                proc = subprocess.Popen(cmd, shell=shell, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                        stdout=logf, stderr=subprocess.STDOUT, **kwargs)
+            except OSError as e:
+                raise HttpError(400, f"impossible de lancer la commande : {e}") from None
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        start, last_send, reason = time.time(), 0.0, None
+        try:
+            with open(log_path, "rb") as reader:
+                while True:
+                    finished = proc.poll() is not None
+                    chunk = reader.read(LOG_CHUNK_MAX)
+                    if chunk or time.time() - last_send > HEARTBEAT_S or finished:
+                        text = decoder.decode(chunk, final=finished and not chunk)
+                        if self.say(text) and reason is None:
+                            reason = "killed"
+                            kill_tree(proc)
+                        last_send = time.time()
+                    if finished and not chunk:
+                        break
+                    if reason is None and time.time() - start > timeout:
+                        reason = "timeout"
+                        self.say(f"\n[gs-remote] timeout ({timeout:.0f} s) : arrêt de la commande\n")
+                        kill_tree(proc)
+                    if not chunk:
+                        time.sleep(0.3)
+        finally:
+            if proc.poll() is None:
+                kill_tree(proc)
+            try:
+                log_path.unlink()
+            except OSError:
+                pass
+        return (reason or "done"), proc.returncode
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def cmd_agent(args) -> int:
+    cfg = read_json(AGENT_CONFIG, {})
+    for key in ("hub", "name", "token"):
+        if getattr(args, key):
+            cfg[key] = getattr(args, key)
+    missing = [k for k in ("hub", "name", "token") if not cfg.get(k)]
+    if missing:
+        sys.exit("Première utilisation : gs_remote.py agent --hub http://<IP-du-hub>:8765 --name <nom> --token <jeton>\n"
+                 "(commande affichée par `gs_remote.py agents add <nom>` sur la machine du hub)")
+    write_private_json(AGENT_CONFIG, cfg)
+    ws_root = Path(args.root).expanduser() if args.root else HOME / "agent" / "workspaces"
+    ws_root.mkdir(parents=True, exist_ok=True)
+    api = SignedClient(cfg["hub"], cfg["name"], cfg["token"])
+    print(f"gs-remote agent « {cfg['name']} » → hub {cfg['hub']}  (workspaces : {ws_root})", flush=True)
+    print("Cet agent n'écoute aucun port : il se connecte au hub et n'exécute que des tâches signées.\n", flush=True)
+
+    backoff, connected = 2.0, False
+    while True:
+        try:
+            api.call("POST", "/a/hello", {"info": machine_info(ws_root)})
+            if not connected:
+                log("connecté au hub")
+            connected, backoff = True, 2.0
+            while True:
+                r = api.call("POST", "/a/poll", {}, timeout=POLL_WAIT_S + 20)
+                spec = r.get("job")
+                if spec:
+                    log(f"tâche {spec['id']} : {spec['type']} {spec.get('ws', '')} {spec.get('cmd') or spec.get('path') or ''}")
+                    AgentJob(api, spec, ws_root).execute()
+                    log(f"tâche {spec['id']} terminée")
+        except KeyboardInterrupt:
+            print("\nAgent arrêté.")
+            return 0
+        except Unreachable as e:
+            if connected:
+                log(f"connexion au hub perdue ({e}). Nouvelle tentative…")
+            elif backoff == 2.0:
+                log(f"hub injoignable ({e}). Nouvelle tentative régulière…")
+            connected = False
+        except RemoteError as e:
+            log(f"refusé par le hub : {e}")
+            connected = False
+            backoff = max(backoff, 30.0)
+        try:
+            time.sleep(backoff)
+        except KeyboardInterrupt:
+            print("\nAgent arrêté.")
+            return 0
+        backoff = min(backoff * 2, 30.0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CLI (machine du hub)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def ctl() -> SignedClient:
+    cfg = read_json(HUB_CONFIG, {})
+    if "control_token" not in cfg:
+        sys.exit("Aucun hub configuré sur cette machine. Lance d'abord : gs_remote.py hub")
+    return SignedClient(f"http://127.0.0.1:{cfg.get('port', DEFAULT_PORT)}", CTL, cfg["control_token"])
+
+
+def list_agents(api: SignedClient) -> list[dict]:
+    try:
+        return api.call("GET", "/c/agents")["agents"]
+    except Unreachable:
+        sys.exit("Le hub ne répond pas. Lance-le dans un autre terminal : gs_remote.py hub")
+
+
+def resolve_targets(api: SignedClient, spec: str) -> tuple[list[str], list[str]]:
+    """Renvoie (agents en ligne ciblés, agents ciblés hors ligne)."""
+    rows = {a["name"]: a for a in list_agents(api) if a["registered"]}
+    if not rows:
+        sys.exit("Aucun agent enregistré. Ajoute-en un : gs_remote.py agents add <nom>")
+    names = list(rows) if spec == "all" else [s.strip() for s in spec.split(",") if s.strip()]
+    unknown = [n for n in names if n not in rows]
+    if unknown:
+        sys.exit(f"Agent(s) inconnu(s) : {', '.join(unknown)}. Enregistrés : {', '.join(rows)}")
+    online = [n for n in names if rows[n]["online"]]
+    offline = [n for n in names if not rows[n]["online"]]
+    if not online:
+        sys.exit(f"Aucun agent en ligne parmi : {', '.join(names)}. Lance `gs_remote.py agent` sur la machine de test.")
+    return online, offline
 
 
 def default_src() -> Path:
     try:
-        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
-        if top.returncode == 0 and top.stdout.strip():
-            return Path(top.stdout.strip())
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return Path(r.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         pass
     return Path.cwd()
@@ -154,10 +957,8 @@ def load_excludes(src: Path, extra: list[str]) -> list[str]:
     patterns = list(DEFAULT_EXCLUDES) + list(extra)
     ignore = src / IGNORE_FILE
     if ignore.exists():
-        for line in ignore.read_text("utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                patterns.append(line.rstrip("/"))
+        patterns += [ln.strip().rstrip("/") for ln in ignore.read_text("utf-8").splitlines()
+                     if ln.strip() and not ln.strip().startswith("#")]
     return patterns
 
 
@@ -165,9 +966,10 @@ def is_excluded(rel: str, patterns: list[str]) -> bool:
     parts = rel.split("/")
     for pat in patterns:
         if "/" in pat:
-            if fnmatch.fnmatch(rel, pat.lstrip("/")) or rel.startswith(pat.lstrip("/") + "/"):
+            p = pat.lstrip("/")
+            if fnmatch.fnmatch(rel, p) or rel.startswith(p + "/"):
                 return True
-        elif any(fnmatch.fnmatch(p, pat) for p in parts):
+        elif any(fnmatch.fnmatch(part, pat) for part in parts):
             return True
     return False
 
@@ -179,9 +981,8 @@ def build_manifest(src: Path, patterns: list[str]) -> dict[str, list]:
         rel_dir = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = [d for d in dirnames if not is_excluded(rel_dir + d, patterns)]
         for fn in filenames:
-            rel = rel_dir + fn
-            full = Path(dirpath) / fn
-            if is_excluded(rel, patterns) or not full.is_file():
+            rel, full = rel_dir + fn, Path(dirpath) / fn
+            if is_excluded(rel, patterns) or not full.is_file() or full.is_symlink():
                 continue
             h = hashlib.sha256()
             with open(full, "rb") as f:
@@ -191,71 +992,44 @@ def build_manifest(src: Path, patterns: list[str]) -> dict[str, list]:
     return files
 
 
-def sync(remote: Remote, src: Path, ws: str, files: dict) -> str:
-    plan = remote.post(f"/manifest/{ws}", {"files": files})
-    need, delete = plan["need"], plan["delete"]
-    if not need and not delete:
-        return f"à jour ({len(files)} fichiers)"
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        zf.writestr("__gs_meta__.json", json.dumps({"files": files, "delete": delete}))
-        for rel in need:
-            zf.write(src / rel, rel)
-    payload = buf.getvalue()
-    res = remote.post(f"/sync/{ws}", body=payload, timeout=900)
-    return f"{res['written']} envoyé(s), {res['deleted']} supprimé(s), {len(payload) / 1e6:.1f} Mo"
+class Follow:
+    """Soumet une tâche à un agent et suit sa sortie."""
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Exécution
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class HostRun:
-    def __init__(self, name: str, remote: Remote, prefix: bool):
-        self.name = name
-        self.remote = remote
-        self.prefix = prefix
+    def __init__(self, api: SignedClient, agent: str, prefix: bool):
+        self.api, self.agent, self.prefix = api, agent, prefix
         self.job_id: str | None = None
         self.result: dict | None = None
         self.error: str | None = None
-        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._pending = ""
 
-    def emit(self, text: str, final: bool = False) -> None:
+    def emit(self, text: str, final=False) -> None:
         if not self.prefix:
             if text:
                 out(text)
             return
-        self._pending += text
-        lines = self._pending.split("\n")
-        last = lines.pop()  # ligne incomplète (ou "" si le texte finit par \n)
+        lines = (self._pending + text).split("\n")
+        last = lines.pop()
         if final and last:
             lines.append(last)
             last = ""
         self._pending = last
-        tag = f"[{self.name}] "
         for line in lines:
-            out(tag + line.rstrip("\r") + "\n")
+            out(f"[{self.agent}] {line.rstrip(chr(13))}\n")
 
-    def run(self, ws: str, req: dict, sync_args: tuple | None) -> None:
+    def run(self, spec: dict, src: Path | None) -> None:
         try:
-            if sync_args:
-                src, files = sync_args
-                msg = sync(self.remote, src, ws, files)
-                out(f"[{self.name}] sync : {msg}\n", sys.stderr)
-            job = self.remote.post(f"/run/{ws}", req)
-            self.job_id = job["id"]
-            offset, delay = 0, 0.2
+            job = self.api.call("POST", "/c/jobs", {"agent": self.agent, "spec": spec, "src": str(src) if src else None})
+            self.job_id, offset, delay = job["id"], 0, 0.2
             while True:
-                st = self.remote.get(f"/jobs/{self.job_id}?offset={offset}")
+                st = self.api.call("GET", f"/c/jobs/{self.job_id}?offset={offset}")
                 data = base64.b64decode(st["data_b64"])
                 offset = st["next_offset"]
                 if data:
-                    self.emit(self._decoder.decode(data))
+                    self.emit(self._dec.decode(data))
                     delay = 0.2
-                if st["status"] != "running":
-                    self.emit(self._decoder.decode(b"", final=True), final=True)
+                if st["status"] not in ("queued", "running"):
+                    self.emit(self._dec.decode(b"", final=True), final=True)
                     self.result = st
                     return
                 if not data:
@@ -263,38 +1037,23 @@ class HostRun:
                     delay = min(delay * 1.5, 1.0)
         except RemoteError as e:
             self.error = str(e)
-            out(f"[{self.name}] ERREUR : {e}\n", sys.stderr)
+            out(f"[{self.agent}] ERREUR : {e}\n", sys.stderr)
 
     def kill(self) -> None:
         if self.job_id and self.result is None:
             try:
-                self.remote.post(f"/jobs/{self.job_id}/kill")
+                self.api.call("POST", f"/c/jobs/{self.job_id}/kill")
             except RemoteError:
                 pass
 
 
-def cmd_run(args) -> int:
-    targets = resolve_targets(args.target)
-    if not args.command:
-        sys.exit("Commande manquante après `--`. Exemple : gs_remote.py run all -- @python script.py")
-    command = args.command
-    src = Path(args.src).resolve() if args.src else default_src()
-    ws = args.ws or src.name
-    req = {
-        "cmd": " ".join(command) if args.shell else command,
-        "shell": args.shell,
-        "timeout": args.timeout,
-        "env": dict(kv.split("=", 1) for kv in args.env),
-        "cwd": args.cwd,
-    }
-    sync_args = None
-    if not args.no_sync:
-        files = build_manifest(src, load_excludes(src, args.exclude))
-        sync_args = (src, files)
-
-    multi = len(targets) > 1
-    runs = [HostRun(name, Remote(name, host), prefix=multi) for name, host in targets]
-    threads = [threading.Thread(target=r.run, args=(ws, req, sync_args), daemon=True) for r in runs]
+def run_on_targets(api: SignedClient, target: str, spec: dict, src: Path | None, summary_always=False) -> tuple[int, list]:
+    online, offline = resolve_targets(api, target)
+    for n in offline:
+        out(f"[{n}] hors ligne : ignoré\n", sys.stderr)
+    multi = len(online) > 1
+    follows = [Follow(api, n, prefix=multi) for n in online]
+    threads = [threading.Thread(target=f.run, args=(spec, src), daemon=True) for f in follows]
     for t in threads:
         t.start()
     try:
@@ -302,136 +1061,141 @@ def cmd_run(args) -> int:
             for t in threads:
                 t.join(timeout=0.2)
     except KeyboardInterrupt:
-        out("\nInterruption : arrêt des jobs distants…\n", sys.stderr)
-        for r in runs:
-            r.kill()
-        return 130
+        out("\nInterruption : arrêt des tâches distantes…\n", sys.stderr)
+        for f in follows:
+            f.kill()
+        return 130, follows
 
     worst = 0
-    if multi or any(r.error for r in runs):
-        out("\n" + "─" * 60 + "\n", sys.stderr)
-    for r in runs:
-        if r.error:
-            worst = worst or 1
-            if multi:
-                out(f"  {r.name:<12} ERREUR      {r.error}\n", sys.stderr)
-            continue
-        st = r.result or {}
+    if multi or offline or summary_always:
+        out("─" * 60 + "\n", sys.stderr)
+    for f in follows:
+        st = f.result or {}
         code = st.get("exit_code")
-        if st.get("status") != "done" or code != 0:
+        ok = not f.error and st.get("status") == "done" and code == 0
+        if not ok:
             worst = worst or (code if isinstance(code, int) and code > 0 else 1)
-        if multi:
-            label = "OK" if st.get("status") == "done" and code == 0 else st.get("status", "?").upper()
-            out(f"  {r.name:<12} {label:<11} code {code}  {st.get('duration_s', 0):.1f} s\n", sys.stderr)
-        elif st.get("status") != "done":
-            out(f"[{r.name}] job terminé : {st.get('status')} (code {code})\n", sys.stderr)
-    return worst
+        if multi or offline or summary_always:
+            label = "OK" if ok else ("ERREUR" if f.error else str(st.get("status", "?")).upper())
+            out(f"  {f.agent:<12} {label:<9} code {code}  {st.get('duration_s', 0):.1f} s\n", sys.stderr)
+        elif not ok and not f.error:
+            out(f"[{f.agent}] tâche terminée : {st.get('status')} (code {code})\n", sys.stderr)
+    for n in offline:
+        out(f"  {n:<12} HORS LIGNE\n", sys.stderr)
+        worst = worst or 1
+    return worst, follows
+
+
+def sync_spec(args) -> tuple[Path, str, dict | None]:
+    src = Path(args.src).resolve() if args.src else default_src()
+    ws = args.ws or re.sub(r"[^A-Za-z0-9_-]", "_", src.name)
+    manifest = None if getattr(args, "no_sync", False) else build_manifest(src, load_excludes(src, args.exclude))
+    return src, ws, manifest
+
+
+def cmd_run(args) -> int:
+    if not args.command:
+        sys.exit("Commande manquante après `--`. Exemple : gs_remote.py run all -- @python script.py")
+    src, ws, manifest = sync_spec(args)
+    spec = {
+        "type": "run", "ws": ws, "manifest": manifest,
+        "cmd": " ".join(args.command) if args.shell else args.command, "shell": args.shell,
+        "timeout": args.timeout, "cwd": args.cwd,
+        "env": dict(kv.split("=", 1) for kv in args.env),
+    }
+    code, _ = run_on_targets(ctl(), args.target, spec, src if manifest is not None else None)
+    return code
 
 
 def cmd_sync(args) -> int:
-    src = Path(args.src).resolve() if args.src else default_src()
-    ws = args.ws or src.name
-    files = build_manifest(src, load_excludes(src, args.exclude))
-    rc = 0
-    for name, host in resolve_targets(args.target):
-        try:
-            print(f"[{name}] {sync(Remote(name, host), src, ws, files)}")
-        except RemoteError as e:
-            print(f"[{name}] ERREUR : {e}", file=sys.stderr)
-            rc = 1
-    return rc
-
-
-def cmd_info(args) -> int:
-    rc = 0
-    for name, host in resolve_targets(args.target):
-        try:
-            info = Remote(name, host).get("/info", timeout=60)
-        except RemoteError as e:
-            print(f"[{name}] ERREUR : {e}", file=sys.stderr)
-            rc = 1
-            continue
-        if args.json:
-            print(json.dumps({name: info}, indent=2, ensure_ascii=False))
-            continue
-        print(f"[{name}] {info['hostname']} — {info['os']} ({info['machine']}), {info['cpu_count']} cœurs CPU")
-        print(f"    python : {info['python']}  ({info['python_executable']})")
-        print(f"    rust   : {info.get('rustc') or 'absent'}")
-        for g in info.get("gpus") or ["(aucun GPU détecté)"]:
-            print(f"    gpu    : {g}")
-        for g in info.get("nvidia_smi") or []:
-            print(f"    nvidia : {g}")
-        if info.get("workspaces"):
-            print(f"    workspaces : {', '.join(info['workspaces'])}")
-        for j in info.get("running_jobs") or []:
-            print(f"    job en cours : {j['id']} ({j['workspace']}, {j['duration_s']:.0f} s)")
-    return rc
+    src, ws, manifest = sync_spec(args)
+    code, _ = run_on_targets(ctl(), args.target, {"type": "sync", "ws": ws, "manifest": manifest}, src, summary_always=True)
+    return code
 
 
 def cmd_get(args) -> int:
-    targets = resolve_targets(args.target)
-    if len(targets) != 1:
+    api = ctl()
+    if args.target == "all" or "," in args.target:
         sys.exit("get : une seule cible à la fois")
-    name, host = targets[0]
-    ws = args.ws or default_src().name
-    rel = args.remote_path.replace("\\", "/").lstrip("/")
-    data = Remote(name, host).get(f"/files/{ws}/{rel}", raw=True, timeout=600)
-    dest = Path(args.local or Path(rel).name)
-    dest.write_bytes(data)
-    print(f"[{name}] {rel} → {dest} ({len(data)} octets)")
-    return 0
+    ws = args.ws or re.sub(r"[^A-Za-z0-9_-]", "_", default_src().name)
+    code, follows = run_on_targets(api, args.target, {"type": "get", "ws": ws, "path": args.remote_path}, None)
+    if len(follows) != 1:
+        sys.exit("get : une seule cible à la fois")
+    f = follows[0]
+    if code == 0 and f.job_id:
+        data = api.call("GET", f"/c/jobs/{f.job_id}/result", raw=True)
+        dest = Path(args.local or Path(args.remote_path.replace("\\", "/")).name)
+        dest.write_bytes(data)
+        print(f"[{f.agent}] {args.remote_path} → {dest} ({len(data)} octets)")
+    return code
 
 
 def cmd_reset(args) -> int:
-    ws = args.ws or default_src().name
-    for name, host in resolve_targets(args.target):
-        try:
-            Remote(name, host).post(f"/reset/{ws}")
-            print(f"[{name}] workspace {ws} supprimé")
-        except RemoteError as e:
-            print(f"[{name}] ERREUR : {e}", file=sys.stderr)
+    ws = args.ws or re.sub(r"[^A-Za-z0-9_-]", "_", default_src().name)
+    code, _ = run_on_targets(ctl(), args.target, {"type": "reset", "ws": ws}, None)
+    return code
+
+
+def cmd_info(args) -> int:
+    rows = [a for a in list_agents(ctl()) if a["registered"]]
+    if args.target != "all":
+        wanted = {s.strip() for s in args.target.split(",")}
+        rows = [a for a in rows if a["name"] in wanted]
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("Aucun agent correspondant.")
+    for a in rows:
+        i = a["info"] or {}
+        state = "EN LIGNE" if a["online"] else "hors ligne"
+        busy = f", tâche {a['current']} en cours" if a.get("current") else ""
+        print(f"[{a['name']}] {state}{busy}" + (f" — {a['address']}" if a["address"] else ""))
+        if not i:
+            continue
+        print(f"    machine : {i.get('hostname')} — {i.get('os')} ({i.get('machine')}), {i.get('cpu_count')} cœurs CPU")
+        print(f"    python  : {i.get('python')}  ({i.get('python_executable')})")
+        print(f"    rust    : {i.get('rustc') or 'absent'}")
+        for g in i.get("gpus") or ["(aucun GPU détecté)"]:
+            print(f"    gpu     : {g}")
+        for g in i.get("nvidia_smi") or []:
+            print(f"    nvidia  : {g}")
+        if i.get("workspaces"):
+            print(f"    workspaces : {', '.join(i['workspaces'])}")
     return 0
 
 
-def cmd_kill(args) -> int:
-    for name, host in resolve_targets(args.target):
-        print(f"[{name}]", Remote(name, host).post(f"/jobs/{args.job}/kill"))
-    return 0
-
-
-def cmd_hosts(args) -> int:
-    cfg = load_config()
-    if args.action == "add":
-        if not (args.name and args.url and args.token):
-            sys.exit("Usage : gs_remote.py hosts add <nom> <url> <jeton>")
-        cfg["hosts"][args.name] = {"url": args.url, "token": args.token}
-        save_config(cfg)
-        print(f"Hôte {args.name} ajouté ({args.url}). Config : {CONFIG_PATH}")
-    elif args.action == "rm":
-        cfg["hosts"].pop(args.name, None)
-        save_config(cfg)
-        print(f"Hôte {args.name} supprimé.")
-    else:
-        if not cfg["hosts"]:
-            print("Aucun hôte configuré.")
-        for n, h in cfg["hosts"].items():
-            print(f"  {n:<12} {h['url']}")
-    return 0
+# ═════════════════════════════════════════════════════════════════════════════
+# Point d'entrée
+# ═════════════════════════════════════════════════════════════════════════════
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Client gs-remote : sync + exécution sur les machines de test.")
+    ap = argparse.ArgumentParser(description="gs-remote : hub, agents et CLI pour tester GPUsync sur plusieurs machines.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("hosts", help="gérer les hôtes (add / rm / list)")
+    p = sub.add_parser("hub", help="lancer le hub (machine de dev)")
+    p.add_argument("--bind", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--allow", action="append", default=[], metavar="CIDR",
+                   help="réseaux d'où les agents peuvent se connecter (répétable). Défaut : IP privées")
+    p.set_defaults(func=cmd_hub)
+
+    p = sub.add_parser("agents", help="enregistrer / supprimer / lister les agents (machine du hub)")
     p.add_argument("action", choices=["add", "rm", "list"])
     p.add_argument("name", nargs="?")
-    p.add_argument("url", nargs="?")
-    p.add_argument("token", nargs="?")
-    p.set_defaults(func=cmd_hosts)
+    p.add_argument("--force", action="store_true", help="avec add : régénérer le jeton d'un agent existant")
+    p.set_defaults(func=cmd_agents)
 
-    p = sub.add_parser("info", help="matériel et logiciels de chaque hôte")
-    p.add_argument("target")
+    p = sub.add_parser("agent", help="lancer l'agent (machine de test)")
+    p.add_argument("--hub", help="URL du hub, ex. http://192.168.1.20:8765 (mémorisée)")
+    p.add_argument("--name", help="nom de cet agent (mémorisé)")
+    p.add_argument("--token", help="jeton de cet agent (mémorisé)")
+    p.add_argument("--root", help="dossier des workspaces")
+    p.set_defaults(func=cmd_agent)
+
+    p = sub.add_parser("info", help="état et matériel des agents")
+    p.add_argument("target", nargs="?", default="all")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_info)
 
@@ -445,15 +1209,15 @@ def main() -> None:
     sync_opts(p)
     p.set_defaults(func=cmd_sync)
 
-    p = sub.add_parser("run", help="synchroniser puis exécuter une commande")
+    p = sub.add_parser("run", help="synchroniser puis exécuter la commande placée après --")
     p.add_argument("target")
     sync_opts(p)
-    p.add_argument("--no-sync", action="store_true", help="ne pas synchroniser avant")
-    p.add_argument("--timeout", type=float, default=600, help="secondes avant de tuer la commande (défaut 600)")
+    p.add_argument("--no-sync", action="store_true")
+    p.add_argument("--timeout", type=float, default=600, help="secondes avant d'arrêter la commande (défaut 600)")
     p.add_argument("--env", action="append", default=[], metavar="K=V")
     p.add_argument("--cwd", help="sous-dossier du workspace où exécuter")
-    p.add_argument("--shell", action="store_true", help="exécuter via le shell distant (cmd.exe / sh)")
-    p.set_defaults(func=cmd_run, command=[])
+    p.add_argument("--shell", action="store_true", help="passer par le shell distant (cmd.exe / sh)")
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("get", help="récupérer un fichier du workspace distant")
     p.add_argument("target")
@@ -467,23 +1231,16 @@ def main() -> None:
     p.add_argument("--ws")
     p.set_defaults(func=cmd_reset)
 
-    p = sub.add_parser("kill", help="tuer un job distant")
-    p.add_argument("target")
-    p.add_argument("job")
-    p.set_defaults(func=cmd_kill)
-
-    argv = sys.argv[1:]
-    command: list[str] = []
+    argv, command = sys.argv[1:], []
     if "--" in argv:  # tout ce qui suit `--` est la commande distante, passée telle quelle
         i = argv.index("--")
         argv, command = argv[:i], argv[i + 1:]
     args = ap.parse_args(argv)
-    if args.cmd == "run":
-        args.command = command
+    args.command = command
     try:
         sys.exit(args.func(args))
     except RemoteError as e:
-        sys.exit(str(e))
+        sys.exit(f"Erreur : {e}")
 
 
 if __name__ == "__main__":
