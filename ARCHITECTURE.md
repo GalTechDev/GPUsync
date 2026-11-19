@@ -323,6 +323,28 @@ exige (§6.2) et ce que le matériel sait faire. L'utilisateur n'a jamais à cho
 3. Si seul `cpu:0` convient (ex. f64 avec `exp` sur un Mac), le calcul s'y fait, avec un avertissement
    `gs.PerformanceWarning` émis une fois par kernel : le résultat est correct, mais lent.
 
+#### Opération indisponible : option `compat`
+
+```python
+@gs.kernel                     # compat="auto" (défaut)
+@gs.kernel(compat="strict")
+```
+
+Quand le périphérique prévu (choisi par l'utilisateur, ou premier du classement) ne sait pas exécuter une
+opération du kernel (ex. `gs.exp` en f64 sur Vulkan) :
+
+| Mode | Comportement |
+|---|---|
+| `auto` | avertissement `gs.CompatibilityWarning` (une fois par kernel, il nomme l'opération et les deux périphériques), puis **tout le kernel** s'exécute en **OpenCL**, de préférence sur le même GPU physique (ex. `vulkan:0` → `opencl:0` sur la RTX). Si aucun périphérique OpenCL ne convient : `cpu:0`, avec le même avertissement |
+| `strict` | `gs.UnsupportedFeature`, sans changer de périphérique ; le message liste les périphériques compatibles |
+
+Règles :
+- **Pas de simulation** : aucune opération n'est émulée en logiciel (ex. f64 en deux f32 sur Metal), ni
+  découpée entre deux backends au milieu d'un kernel. C'est le kernel entier qui change de périphérique.
+- Les données ne bougent qu'une fois : une entrée déjà sur le périphérique prévu (`gs.Array`) est transférée
+  vers le périphérique de repli, puis le résultat y reste.
+- `y.device` indique toujours où le calcul a réellement eu lieu.
+
 Le choix est mis en cache par kernel et visible : `y.device`, `gs.default_device(kernel)`. Exemples sur le PC :
 
 | Kernel | Choisi |
@@ -720,7 +742,7 @@ Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget �
 |---|---|---|
 | **M0** Squelette | workspace Cargo, maturin, `gs.devices()` liste wgpu + OpenCL | `pip install -e .` puis `gs.devices()` sur le Mac |
 | **M1** MVP élément par élément | frontend minimal, IR, interpréteur, émetteurs WGSL + OpenCL C, `gs.Array` synchrone, zéro-copie OpenCL sur mémoire unifiée | `normalize` correct sur Metal et OpenCL ; overhead ≤ 0,3 ms ; tests différentiels verts ; pic mémoire ×1 sur 1 Go en OpenCL sur le Mac |
-| **M1.5** Moteur de transferts et choix automatique | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM ; f64 via Vulkan (`SHADER_F64`) ; besoins `f64` / `f64_math` ; choix automatique du périphérique par kernel (§4.8) | critères du §9.8 sur le Mac et le PC ; un kernel f64 arithmétique tourne sur Vulkan (RTX), un kernel f64 avec `exp` sur OpenCL (RTX), sans `device=` |
+| **M1.5** Moteur de transferts et choix automatique | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM ; f64 via Vulkan (`SHADER_F64`) ; besoins `f64` / `f64_math` ; choix automatique du périphérique par kernel et option `compat` (`auto` : avertissement + repli OpenCL ; `strict` : erreur) (§4.8) | critères du §9.8 sur le Mac et le PC ; un kernel f64 arithmétique tourne sur Vulkan (RTX), un kernel f64 avec `exp` sur OpenCL (RTX), sans `device=` |
 | **M2** Index et formes | `gs.index()`, dimensions nommées, retours multiples, boucles, `gs.local`, réductions de `gs.Array` | `pairwise_dist` et `stats` corrects ; ta DTW portée et comparée au prototype |
 | **M3** Out-of-core avec index | découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes | `pairwise_dist` sur des données dont la sortie dépasse la VRAM |
 | **M4** Async et interop | `await`, DLPack, cache disque | même script en synchrone, async et Jupyter |
