@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M4 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M5 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -13,6 +13,38 @@
 | M2 Index et formes | ✅ `gs.index()`, dimensions nommées (`gs.f32["n", "t"]`, axes sans nom `gs.f32[:, :]`), `x.shape[k]`, `len(x)`, plusieurs sorties (`-> (gs.f32["n"], gs.i32["n"])`, `out=` en tuple), `gs.local`, réductions de `gs.Array` sur l'hôte ; moteur à plusieurs sorties ; perte du GPU par le driver (TDR) : erreur claire et réouverture | Mac : 152 tests ; PC : 228 tests ; DTW identique au prototype |
 | M3 Out-of-core avec index | ✅ grille découpée par blocs de lignes (premier axe de la sortie) dans tous les modes ; entrées lues seulement à la ligne courante découpées, les autres gardées entières ; lancements cadencés (~0,1 s chacun) | Mac : 172 tests ; PC : 263 tests ; essais à gros volume ci-dessous |
 | M4 Async et interop | ✅ `await y`, `await kernel(...)`, `mean, std = await stats(x)` ; appels depuis plusieurs threads (`asyncio.to_thread`) ; DLPack (export et import, mémoire hôte) ; `y.save("r.npy")` par blocs ; même code en script, asyncio et Jupyter (notebook exécuté par nbclient) ; cache disque étudié et écarté (mesures ci-dessous) | Mac : 196 tests ; PC : 301 tests |
+| M5 Mode explicite | ✅ `@gs.kernel(grid="x")` ou `grid=("n", "n")`, sorties `gs.Out[gs.i32[10]]` (valeur de départ : `gs.Out[gs.f32["m"], gs.inf]`), `gs.atomic_add` / `atomic_min` / `atomic_max` en i32, u32, f32 (f32 émulé par comparaison-échange en OpenCL 1.2 et en WGSL), indices multiples `(a, b)`, accumulation avec `out=` ; écriture hors limites jamais faite et signalée (`gs.OutOfBounds`) | Mac : 239 tests ; PC : 364 tests |
+
+#### Mesures M5 (`tools/bench_m5.py`, 100 M éléments, à chaud, résultat lu et vérifié)
+
+| | NumPy | `metal:0` | `opencl:0` Mac | `vulkan:0` RTX | `opencl:0` RTX | `vulkan:1` UHD | `opencl:1` UHD |
+|---|---|---|---|---|---|---|---|
+| histogramme, 16 cases (i32) | 239 ms (Mac) / 396 ms (PC) | 22 ms | 5,3 ms | 60 ms | 50 ms | 193 ms | 117 ms |
+| somme par case, 1000 cases (f32 émulé) | 104 ms (Mac) / 351 ms (PC) | 161 ms | 146 ms | 473 ms | 229 ms | 297 ms | 148 ms |
+
+Les atomiques entiers sont natifs et rapides, même très disputés (16 cases). Les atomiques flottants, émulés
+par comparaison-échange, ne battent pas NumPy sur ce cas très disputé ; sur la RTX, l'envoi de 800 Mo par PCIe
+pèse aussi (~100 ms). Pistes : atomiques flottants natifs (`cl_ext_float_atomics`, Metal `atomic_float`, CUDA
+à M6), agrégation par groupe de travail en mémoire locale.
+
+#### Décisions et constats de M5 (D7 tranchée)
+
+- **Syntaxe validée sur 5 cas réels** (histogramme, histogramme 2D, somme / min / max par case, comptage de
+  paires sur une grille `("n", "n")`) : `grid=` + `gs.Out[...]` + `gs.atomic_*`. Deux ajouts : la valeur de
+  départ (`gs.Out[gs.f32["m"], gs.inf]`, indispensable pour un minimum) et `out=` qui part du contenu donné
+  (accumulation sur plusieurs appels, ex. un flux de blocs).
+- **Écritures directes refusées**, sans exception `unsafe_writes` : toute écriture dans un `gs.Out` passe par
+  un atomique, et un `gs.Out` est en écriture seule. Aucun cas réel n'a demandé autre chose.
+- **Bornes vérifiées** : chaque atomique teste son indice ; une écriture hors limites n'est jamais faite (pas de
+  mémoire corrompue), elle est notée dans un petit tableau caché `gs_err`, et la lecture du résultat lève
+  `gs.OutOfBounds` (sortie en cause, exemple d'indice, forme). Les autres écritures sont faites. Le cas
+  classique : `int(x * 10)` pour `x = 1.0`.
+- **Moteur** : les `gs.Out` restent entiers sur le périphérique (sans copie en mode Direct) pendant que les
+  entrées sont découpées par blocs de lignes comme au M3. Un défaut corrigé au passage : sur GPU dédié en mode
+  par blocs, la réutilisation d'un emplacement n'attendait la fin du calcul qu'à travers le retour de ses
+  sorties ; sans sortie par case, des comptes se perdaient (vu sur la RTX en OpenCL). L'attente est maintenant
+  explicite.
+- **f64** : refusé pour les `gs.Out` (pas d'atomiques 64 bits portables).
 
 #### Mesures M4 (`tools/bench_m4.py`, processus neufs)
 
@@ -367,7 +399,7 @@ mean, std = stats(series)
 
 Les sorties d'un même kernel doivent avoir la même forme (une grille unique). Sinon : deux kernels, ou le mode explicite (§4.5).
 
-### 4.5 L'exception : grille explicite et écritures atomiques
+### 4.5 L'exception : grille explicite et écritures atomiques (M5)
 
 Quand le calcul part naturellement de l'entrée (histogramme, scatter) :
 
@@ -375,14 +407,26 @@ Quand le calcul part naturellement de l'entrée (histogramme, scatter) :
 @gs.kernel(grid="data")                       # un thread par élément de `data`
 def histogram(data: gs.f32["n"], counts: gs.Out[gs.i32[10]]):
     i = gs.index()
-    gs.atomic_add(counts, gs.int(data[i] * 10), 1)
+    gs.atomic_add(counts, gs.min(int(data[i] * 10), 9), 1)
 
 counts = histogram(data)                      # gs.Out : alloué et mis à zéro par la lib
+
+@gs.kernel(grid=("n",))                       # grille : la dimension « n » (pas toute la forme de xy)
+def per_bin(xy: gs.f32["n", 2], idx: gs.i32["n"], lo: gs.Out[gs.f32["m"], gs.inf], ref: gs.i32["m"]):
+    i = gs.index()
+    gs.atomic_min(lo, idx[i], xy[i, 0])       # valeur de départ gs.inf
+
+acc = np.zeros(10, np.int32)
+for bloc in blocs:
+    histogram(bloc, out=acc)                  # out= : part du contenu donné (accumulation)
 ```
 
-- `grid=` désigne une entrée (ou une forme : `grid=("n", "n")`).
-- Les sorties sont déclarées avec `gs.Out[...]` et écrites explicitement.
-- Toute écriture dans une sortie qui n'est pas « sa » case doit passer par une opération atomique. Le frontend refuse les écritures directes non atomiques dans ce mode, sauf si `gs.Out(..., unsafe_writes=True)`.
+- `grid=` désigne une entrée (toutes ses dimensions) ou un tuple de dimensions nommées (ou entières).
+- Les sorties sont des paramètres `gs.Out[type]` ou `gs.Out[type, départ]`, absents de l'appel ; leurs
+  dimensions sont des entiers ou des noms de dimensions d'entrée. Plusieurs `gs.Out` : un tuple de résultats.
+- Écriture seulement par `gs.atomic_add`, `gs.atomic_min`, `gs.atomic_max` (i32, u32, f32), indice entier ou
+  tuple ; un `gs.Out` ne se lit pas dans le kernel. `return` sans valeur termine le thread.
+- Indice hors limites : écriture non faite, `gs.OutOfBounds` à la lecture du résultat.
 
 ### 4.6 `gs.Array` : synchrone, asynchrone, chaînable
 
@@ -889,7 +933,7 @@ la taille de la grille.
 | **M2** Index et formes | `gs.index()`, dimensions nommées, retours multiples, boucles, `gs.local`, réductions de `gs.Array` | `pairwise_dist` et `stats` corrects ; ta DTW portée et comparée au prototype |
 | **M3** Out-of-core avec index | ✅ découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes ; lancements cadencés | `pairwise_dist` sur des données dont la sortie dépasse la VRAM (19,3 Gio sur la RTX, 3,8 s) |
 | **M4** Async et interop | ✅ `await`, DLPack, `y.save()`, appels multi-threads ; cache disque écarté après mesure | même script en synchrone, async et Jupyter (testé, nbclient) |
-| **M5** Mode explicite | `grid=`, `gs.Out`, atomiques (dont émulation OpenCL 1.2) | histogramme correct sur toutes les cibles |
+| **M5** Mode explicite | ✅ `grid=`, `gs.Out`, atomiques (dont émulation OpenCL 1.2 et WGSL), bornes vérifiées | histogramme correct sur toutes les cibles (6 périphériques) |
 | **M6** CUDA | émetteur CUDA C, backend `cudarc` | parité des tests avec les autres backends sur NVIDIA |
 | **M7** Avancé | multi-GPU, plusieurs streams, fusion de kernels élément par élément | à définir avec des mesures |
 
@@ -905,7 +949,7 @@ la taille de la grille.
 | D4 | Strides (vues non contiguës) | copie contiguë dans le MVP ; à mesurer |
 | D5 | Nom du projet : garder « GPUsync » ? | à décider |
 | D6 | Licence | MIT, comme le prototype |
-| D7 | Syntaxe du mode explicite (`grid=` + `gs.Out`) | à valider sur 2–3 vrais cas (histogramme, scatter) |
+| D7 | Syntaxe du mode explicite (`grid=` + `gs.Out`) | ✅ validée à M5 sur 5 cas ; ajouts : valeur de départ, accumulation avec `out=` ; `unsafe_writes` abandonné |
 | D8 | API des réductions : méthodes de `gs.Array` seulement, ou aussi des kernels de réduction écrits par l'utilisateur ? | méthodes d'abord |
 | D9 | Backend natif (Metal, Vulkan) en plus de wgpu pour le zéro-copie ? | Metal : inutile, wgpu-hal permet `NoCopy` (M1.5). Vulkan : nécessaire pour importer la mémoire hôte (absent de wgpu 30) ; à décider après M1.5 selon le coût mesuré de l'anneau de transfert, sachant que CUDA (M6) couvre la RTX |
 | D10 | Backend par défaut ? | ✅ remplacé par le choix automatique par kernel (§4.8, M1.5) : Metal sur Mac si `NoCopy` tient le critère « 0 en plus », OpenCL pour les GPU intégrés, Vulkan pour les GPU dédiés, OpenCL quand `f64_math` est requis |

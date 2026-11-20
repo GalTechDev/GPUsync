@@ -139,13 +139,15 @@ impl WgDevice {
         Ok(d)
     }
 
-    /// Compile (avec cache) un module WGSL dont le point d'entrée est `main`.
+    /// Compile (avec cache) un module WGSL dont le point d'entrée est `main`. `writable` : entrées
+    /// liées en lecture-écriture (sorties gs.Out du mode explicite).
     pub fn compile(
         &self,
         code: &str,
         n_inputs: usize,
         n_outputs: usize,
         has_fparams: bool,
+        writable: &[bool],
     ) -> Result<Arc<WgKernel>, BackendError> {
         let mut cache = self.kernels.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(k) = cache.get(code) {
@@ -163,7 +165,9 @@ impl WgDevice {
             count: None,
         };
         // Disposition explicite : un binding déclaré mais inutilisé reste valide.
-        let mut entries: Vec<_> = (0..n_inputs as u32).map(|b| storage(b, true)).collect();
+        let mut entries: Vec<_> = (0..n_inputs as u32)
+            .map(|b| storage(b, !writable.get(b as usize).copied().unwrap_or(false)))
+            .collect();
         let first_param = (n_inputs + n_outputs) as u32;
         entries.extend((n_inputs as u32..first_param).map(|b| storage(b, false)));
         entries.push(storage(first_param, true));

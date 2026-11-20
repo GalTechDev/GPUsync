@@ -102,6 +102,33 @@ pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
     set
 }
 
+/// Opérations atomiques du kernel : (opération, type de la sortie), sans doublon.
+pub(crate) fn atomics(k: &Kernel) -> Vec<(u8, Scalar)> {
+    fn walk(b: &Block, k: &Kernel, out: &mut Vec<(u8, Scalar)>) {
+        for s in b {
+            match s {
+                Stmt::Atomic { op, param, .. } => {
+                    let a = (*op as u8, k.params[*param].ty);
+                    if !out.contains(&a) {
+                        out.push(a);
+                    }
+                }
+                Stmt::If {
+                    then, otherwise, ..
+                } => {
+                    walk(then, k, out);
+                    walk(otherwise, k, out);
+                }
+                Stmt::For { body, .. } | Stmt::While { body, .. } => walk(body, k, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&k.body, k, &mut out);
+    out
+}
+
 /// Indentation simple pour un code lisible (`kernel.source("opencl")`).
 pub(crate) struct Out {
     pub buf: String,

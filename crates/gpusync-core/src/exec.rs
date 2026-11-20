@@ -127,7 +127,7 @@ impl DeviceArray {
                 }
             }
             (Storage::Cl { buf, done }, Device::Cl(d)) => unsafe {
-                cl_download(d, buf, done, dst, n, chunk)?
+                cl_download(d, buf, Some(done), dst, n, chunk)?
             },
             (Storage::Wg(buf), Device::Wg(d)) => unsafe {
                 d.download(buf, 0, dst, n, chunk).map_err(dev_err)?
@@ -399,18 +399,44 @@ pub unsafe fn launch(
         dev.finish()?;
         host_backed_io = false;
     }
+    // Résultats : les sorties (n cases chacune), puis les tableaux gs.Out du mode explicite.
+    let mut shapes: Vec<(Scalar, usize)> = k.outputs.iter().map(|t| (*t, n)).collect();
+    for (pos, (i, p)) in k.array_params().enumerate() {
+        if k.writable().contains(&i) {
+            shapes.push((p.ty, ins[pos].bytes() / p.ty.size()));
+        }
+    }
     Ok(storages
         .into_iter()
-        .zip(&k.outputs)
-        .map(|(storage, ty)| DeviceArray {
+        .zip(shapes)
+        .map(|(storage, (ty, len))| DeviceArray {
             device: dev.clone(),
             storage,
-            dtype: *ty,
-            len: n,
+            dtype: ty,
+            len,
             mode,
             host_backed_io,
         })
         .collect())
+}
+
+fn host_ptr(i: &In) -> *mut u8 {
+    match i {
+        In::Host(p, _) => *p as *mut u8,
+        In::Dev(_) => unreachable!("gs.Out : toujours en mémoire hôte"),
+    }
+}
+
+/// Stockage hôte des tableaux gs.Out (mode explicite), dans l'ordre des paramètres.
+fn writable_host(k: &Kernel, ins: &[In]) -> Vec<Storage> {
+    k.array_params()
+        .zip(ins)
+        .filter(|((i, _), _)| k.writable().contains(i))
+        .map(|(_, input)| match input {
+            In::Host(p, _) => Storage::Host { ptr: *p as *mut u8 },
+            In::Dev(_) => unreachable!("gs.Out : toujours en mémoire hôte"),
+        })
+        .collect()
 }
 
 /// Stockage de chaque sortie, mode retenu, buffers encore adossés à la mémoire hôte.
@@ -580,7 +606,12 @@ unsafe fn run_cpu(
     let args: Vec<Arg> = k
         .params
         .iter()
-        .map(|p| match p.kind {
+        .enumerate()
+        .map(|(i, p)| match p.kind {
+            ParamKind::Array if k.writable().contains(&i) => {
+                let s = sl.next().unwrap();
+                Arg::Writable(s.as_ptr() as *mut u8, s.len())
+            }
             ParamKind::Array => Arg::Array(sl.next().unwrap()),
             ParamKind::Scalar => Arg::Scalar(sc.next().unwrap()),
         })
@@ -591,11 +622,9 @@ unsafe fn run_cpu(
         .map(|(p, t)| unsafe { std::slice::from_raw_parts_mut(*p, n * t.size()) })
         .collect();
     interp::run(k, n, &args, &mut out_slices).map_err(CoreError::Device)?;
-    Ok((
-        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
-        Mode::Cpu,
-        false,
-    ))
+    let mut storages: Vec<Storage> = outs.iter().map(|p| Storage::Host { ptr: *p }).collect();
+    storages.extend(writable_host(k, ins));
+    Ok((storages, Mode::Cpu, false))
 }
 
 /// Mode Direct (OpenCL, mémoire unifiée) : chaque bloc utilise directement la mémoire de l'hôte.
@@ -836,13 +865,13 @@ unsafe fn cl_upload(
 unsafe fn cl_download(
     d: &ClDevice,
     src: &ClBuffer,
-    done: &ClEvent,
+    done: Option<&ClEvent>,
     dst: *mut u8,
     bytes: usize,
     chunk: usize,
 ) -> R<()> {
     if bytes == 0 {
-        return wait(done).map_err(dev_err);
+        return done.map_or(Ok(()), |e| wait(e).map_err(dev_err));
     }
     let chunk = chunk.min(bytes).max(4);
     let mut ring: Vec<Pinned> = Vec::new();
@@ -864,7 +893,8 @@ unsafe fn cl_download(
         }
         let len = chunk.min(bytes - off);
         let slot = i % ring.len();
-        let e = unsafe { d.read_at(src, off, ring[slot].ptr, len, &[done]) }.map_err(dev_err)?;
+        let waits: Vec<&ClEvent> = done.into_iter().collect();
+        let e = unsafe { d.read_at(src, off, ring[slot].ptr, len, &waits) }.map_err(dev_err)?;
         d.flush().map_err(dev_err)?;
         pending.push_back((slot, off, len, e));
         off += len;
@@ -1096,6 +1126,8 @@ struct Rows {
     rest: usize,
     /// Par entrée : découpée par lignes ?
     chunked: Vec<bool>,
+    /// Par entrée : tableau gs.Out (mode explicite), entier et rendu comme résultat ?
+    writable: Vec<bool>,
     /// Octets par ligne : de chaque entrée découpée (0 sinon), de chaque sortie.
     in_row: Vec<usize>,
     out_row: Vec<usize>,
@@ -1113,6 +1145,7 @@ impl Rows {
             row0,
             inrow,
             obase,
+            writable,
         } = &k.grid
         else {
             unreachable!()
@@ -1141,6 +1174,7 @@ impl Rows {
                 .collect(),
             out_row: out_elems.iter().map(|e| rest * e).collect(),
             chunked: is_chunked,
+            writable: arrays.iter().map(|(i, _)| writable.contains(i)).collect(),
             slots: [pos(*row0), pos(*inrow), pos(*obase)],
             names: arrays.into_iter().map(|(_, n)| n).collect(),
         }
@@ -1361,12 +1395,19 @@ unsafe fn rows_cl_direct(
         }
         // Les buffers d'entrée du bloc peuvent être libérés : la file garde ses références.
     }
-    // Les imports entiers doivent survivre aux calculs : ils sont rattachés à la première sortie.
     let mut storages: Vec<Storage> = out_bufs
         .into_iter()
         .zip(outs)
         .map(|(bufs, ptr)| Storage::ClDirect { bufs, ptr: *ptr })
         .collect();
+    // gs.Out : importés entiers, ils sont eux-mêmes les résultats.
+    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+        storages.push(Storage::ClDirect {
+            bufs: whole[i].take().into_iter().collect(),
+            ptr: host_ptr(&ins[i]),
+        });
+    }
+    // Les autres imports entiers doivent survivre aux calculs : rattachés au premier résultat.
     if let Some(Storage::ClDirect { bufs, .. }) = storages.first_mut() {
         bufs.extend(whole.into_iter().flatten());
     }
@@ -1460,18 +1501,23 @@ unsafe fn rows_cl(
             last = Some(e);
             Ok(())
         })?;
+        drop(refs);
+        drop(orefs);
         let done = Arc::new(last.unwrap());
-        return Ok((
-            obufs
-                .into_iter()
-                .map(|buf| Storage::Cl {
-                    buf,
-                    done: done.clone(),
-                })
-                .collect(),
-            Mode::Resident,
-            false,
-        ));
+        let mut storages: Vec<Storage> = obufs
+            .into_iter()
+            .map(|buf| Storage::Cl {
+                buf,
+                done: done.clone(),
+            })
+            .collect();
+        for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+            storages.push(Storage::Cl {
+                buf: owned[i].take().unwrap(),
+                done: done.clone(),
+            });
+        }
+        return Ok((storages, Mode::Resident, false));
     }
 
     // Par blocs de lignes : deux emplacements, chacun avec ses buffers d'entrées découpées et de sorties.
@@ -1511,13 +1557,16 @@ unsafe fn rows_cl(
     }
     let drain = |s: &mut Slot| -> R<()> {
         if let Some((r0, len, done)) = s.pending.take() {
+            // Le calcul du bloc doit être fini avant de réutiliser l'emplacement, même sans
+            // sortie à rapatrier (mode explicite : seuls les gs.Out, entiers, sont écrits).
+            wait(&done).map_err(dev_err)?;
             for (o, buf) in s.outs.iter().enumerate() {
                 let rb = rows.out_row[o];
                 unsafe {
                     cl_download(
                         d,
                         buf,
-                        &done,
+                        Some(&done),
                         outs[o].add(r0 * rb),
                         len * rb,
                         limits.chunk_bytes,
@@ -1594,11 +1643,24 @@ unsafe fn rows_cl(
     for s in &mut slots {
         drain(s)?;
     }
-    Ok((
-        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
-        Mode::Flux,
-        false,
-    ))
+    // gs.Out : gardés entiers pendant tous les blocs, rapatriés à la fin.
+    d.finish().map_err(dev_err)?;
+    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+        let buf = owned[i].as_ref().unwrap();
+        unsafe {
+            cl_download(
+                d,
+                buf,
+                None,
+                host_ptr(&ins[i]),
+                ins[i].bytes(),
+                limits.chunk_bytes,
+            )?
+        };
+    }
+    let mut storages: Vec<Storage> = outs.iter().map(|p| Storage::Host { ptr: *p }).collect();
+    storages.extend(writable_host(k, ins));
+    Ok((storages, Mode::Flux, false))
 }
 
 fn gcd(a: usize, b: usize) -> usize {
@@ -1720,6 +1782,12 @@ unsafe fn rows_wg_direct(
         .zip(outs)
         .map(|(bufs, ptr)| Storage::WgDirect { bufs, ptr: *ptr })
         .collect();
+    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+        storages.push(Storage::WgDirect {
+            bufs: whole[i].take().into_iter().collect(),
+            ptr: host_ptr(&ins[i]),
+        });
+    }
     if let Some(Storage::WgDirect { bufs, .. }) = storages.first_mut() {
         bufs.extend(keep);
         bufs.extend(whole.into_iter().flatten());
@@ -1818,11 +1886,12 @@ unsafe fn rows_wg(
         let orefs: Vec<&WgBuffer> = obufs.iter().collect();
         launch(&refs, &orefs, 0, 0, rows.total, true)?;
         drop(orefs);
-        return Ok((
-            obufs.into_iter().map(Storage::Wg).collect(),
-            Mode::Resident,
-            false,
-        ));
+        drop(refs);
+        let mut storages: Vec<Storage> = obufs.into_iter().map(Storage::Wg).collect();
+        for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+            storages.push(Storage::Wg(owned[i].take().unwrap()));
+        }
+        return Ok((storages, Mode::Resident, false));
     }
 
     let room = budget.saturating_sub(resident_bytes) as usize;
@@ -1882,9 +1951,20 @@ unsafe fn rows_wg(
             };
         }
     }
-    Ok((
-        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
-        Mode::Flux,
-        false,
-    ))
+    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+        let buf = owned[i].as_ref().unwrap();
+        unsafe {
+            d.download(
+                buf,
+                0,
+                host_ptr(&ins[i]),
+                ins[i].bytes(),
+                limits.chunk_bytes,
+            )
+            .map_err(dev_err)?
+        };
+    }
+    let mut storages: Vec<Storage> = outs.iter().map(|p| Storage::Host { ptr: *p }).collect();
+    storages.extend(writable_host(k, ins));
+    Ok((storages, Mode::Flux, false))
 }

@@ -210,6 +210,9 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
                     k.array_params().count(),
                     k.outputs.len(),
                     gpusync_codegen::has_f64_params(k),
+                    &k.array_params()
+                        .map(|(i, _)| k.writable().contains(&i))
+                        .collect::<Vec<_>>(),
                 )
                 .map_err(dev_err)?,
             )

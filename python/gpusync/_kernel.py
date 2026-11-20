@@ -31,6 +31,10 @@ from ._device import CompatibilityWarning, _by_id, capable, fallback, ranked, re
 _ALIGN = 16384  # alignement des sorties : une page sur Apple Silicon (16 Kio), 4 sur ailleurs
 
 
+class OutOfBounds(_core.GpusyncError, IndexError):
+    """Écriture atomique hors limites dans une sortie gs.Out : elle n'a pas été faite (les autres oui)."""
+
+
 class OutOfMemory(_core.GpusyncError):
     """La sortie ne peut pas être allouée en mémoire : passez une destination avec out=."""
 
@@ -65,7 +69,7 @@ def _host_array(value, name) -> np.ndarray:
 class Kernel:
     """Kernel compilé à la demande pour chaque périphérique."""
 
-    def __init__(self, func, *, cast: str | None = None, compat: str = "auto") -> None:
+    def __init__(self, func, *, cast: str | None = None, compat: str = "auto", grid=None) -> None:
         if cast not in (None, "auto"):
             raise ValueError("cast : None ou 'auto'")
         if compat not in ("auto", "strict"):
@@ -75,8 +79,11 @@ class Kernel:
         functools.update_wrapper(self, func)
         self.py_func = func
         self._cast = cast
+        if grid is not None and not (isinstance(grid, str) or (isinstance(grid, (tuple, list)) and grid)):
+            raise ValueError('grid : nom d\'une entrée (grid="x") ou tuple de dimensions (grid=("n", "n"))')
+        self._grid = grid
         try:
-            spec, self._params, self._outs, self._tuple = kernel_json(func)
+            spec, self._params, self._outs, self._tuple, self._fills = kernel_json(func, grid)
         except KernelDeclarationError as e:
             raise _core.KernelSyntaxError(f"kernel '{func.__name__}' : {e}") from None
         try:
@@ -93,9 +100,12 @@ class Kernel:
         def ty(k, d, dims):
             if k == "scalar":
                 return f"gs.{d.name}"
-            return f"gs.{d.name}[{', '.join(':' if x is None else repr(x) for x in dims)}]"
+            t = f"gs.{d.name}[{', '.join(':' if x is None else repr(x) for x in dims)}]"
+            return f"gs.Out[{t}]" if k == "out" else t
 
         sig = ", ".join(f"{n}: {ty(k, d, dims)}" for n, k, d, dims in self._params)
+        if self._grid is not None:
+            return f"<gs.kernel {self.__name__}({sig}) grid={self._grid!r}>"
         outs = [repr(o) for o in self._outs]
         ret = f"({', '.join(outs)})" if self._tuple else outs[0]
         return f"<gs.kernel {self.__name__}({sig}) -> {ret}>"
@@ -150,9 +160,14 @@ class Kernel:
             yield read(pending)
 
     def __call__(self, *args, device=None, out=None):
-        """Lance le kernel ; renvoie un gs.Array, ou un tuple de gs.Array si plusieurs sorties."""
-        if len(args) != len(self._params):
-            raise TypeError(f"{self.__name__}() attend {len(self._params)} argument(s), {len(args)} reçu(s)")
+        """Lance le kernel ; renvoie un gs.Array, ou un tuple de gs.Array si plusieurs sorties.
+
+        Avec grid= : les arguments sont les entrées (pas les gs.Out), et les résultats sont les gs.Out,
+        mis à zéro, ou partant du contenu de `out=` (accumulation sur plusieurs appels).
+        """
+        n_args = sum(k != "out" for _, k, _, _ in self._params)
+        if len(args) != n_args:
+            raise TypeError(f"{self.__name__}() attend {n_args} argument(s), {len(args)} reçu(s)")
         dev_id, warning = self._choose(device)
         if warning and warning not in self._warned:
             self._warned.add(warning)
@@ -160,7 +175,12 @@ class Kernel:
 
         arrays, keepalive, shapes = [], [], []
         scalars = []
-        for value, (name, kind, dtype, _) in zip(args, self._params):
+        it = iter(args)
+        for name, kind, dtype, _ in self._params:
+            if kind == "out":
+                arrays.append(None)  # alloué plus bas, une fois les dimensions connues
+                continue
+            value = next(it)
             if kind == "scalar":
                 if isinstance(value, (np.ndarray, Array)) and np.ndim(value) != 0:
                     raise _core.TypeMismatch(f"paramètre '{name}' : scalaire attendu (gs.{dtype.name}), reçu un tableau")
@@ -195,9 +215,12 @@ class Kernel:
                 keepalive.append(a)
             shapes.append((name, tuple(arr_shape)))
 
+        if self._grid is not None:
+            return self._call_explicit(dev_id, arrays, keepalive, shapes, scalars, out)
         if self._indexed:
-            shape, hidden = self._bind_dims(shapes)
-            scalars.extend(hidden)
+            size = self._bind_dims(shapes)
+            shape = tuple(size(d) for d in self._outs[0].dims)
+            scalars.extend(size(d) for d in self._dims)
         else:
             (first, shape), *others = shapes
             for name, s in others:
@@ -215,10 +238,83 @@ class Kernel:
             results = Results(Array(h, o, dev_id) for h, o in zip(handles, outs))
         return results if self._tuple else results[0]
 
-    def _bind_dims(self, shapes) -> tuple[tuple, list]:
+    def _call_explicit(self, dev_id, arrays, keepalive, shapes, scalars, out):
+        """Mode explicite : grille donnée par grid=, sorties gs.Out entières écrites par atomiques."""
+        size = self._bind_dims(shapes)
+        if isinstance(self._grid, str):
+            dims = next(d for n, k, _, d in self._params if n == self._grid)
+            grid = tuple(size(d if d is not None else f"{self._grid}.{a}") for a, d in enumerate(dims))
+        else:
+            grid = tuple(size(d) for d in self._grid)
+        outs_decl = [(n, d, dims) for n, k, d, dims in self._params if k == "out"]
+        shapes_out = []
+        for n, _, dims in outs_decl:
+            try:
+                shapes_out.append(tuple(size(d) for d in dims))
+            except KeyError as e:
+                raise _core.ShapeMismatch(
+                    f"{self.__name__}() : dimension {e} de la sortie '{n}' inconnue (absente des entrées)"
+                ) from None
+        if out is None:
+            results = []
+            for (n, d, _), shp in zip(outs_decl, shapes_out):
+                a = _aligned_empty(shp, d.np)
+                a.fill(self._fills.get(n, 0))
+                results.append(a)
+        else:
+            given = list(out) if isinstance(out, (tuple, list)) else [out]
+            if len(given) != len(outs_decl):
+                raise TypeError(f"out : {len(outs_decl)} tableau(x) attendu(s) (un par gs.Out), reçu {len(given)}")
+            for o, (n, d, _), shp in zip(given, outs_decl, shapes_out):
+                if not isinstance(o, np.ndarray) or o.dtype != d.np or o.shape != shp:
+                    raise _core.ShapeMismatch(
+                        f"out : pour '{n}', tableau NumPy de forme {shp} et de type {d.np} attendu"
+                    )
+                if not (o.flags.c_contiguous and o.flags.writeable):
+                    raise _core.TypeMismatch("out : le tableau doit être contigu et modifiable")
+            results = given
+        err = np.zeros(2, dtype=np.uint32)  # gs_err : écriture refusée (sortie, indice)
+        slots = iter(results)
+        for k, a in enumerate(arrays):
+            if a is None:
+                r = next(slots)
+                arrays[k] = (r.ctypes.data, r.nbytes)
+        arrays.append((err.ctypes.data, err.nbytes))
+        scalars.extend(size(d) for d in self._dims)
+        n = int(np.prod(grid, dtype=np.int64))
+        if n == 0:
+            arrs = Results(Array(None, r, dev_id) for r in results)
+            return arrs if self._tuple else arrs[0]
+        keepalive.extend(results)
+        keepalive.append(err)
+        handles = self._ir.launch(dev_id, arrays, scalars, n, [], keepalive)
+        err_arr = Array(handles[-1], err, dev_id)
+        names = [n for n, _, _ in outs_decl]
+        kname = self.__name__
+
+        def check():
+            e = err_arr.numpy()
+            if e[0]:
+                who = names[int(e[0]) - 1]
+                raise OutOfBounds(
+                    f"kernel '{kname}' : gs.atomic_*({who}, …) avec un indice hors limites (ex. indice "
+                    f"{'aplati ' if len(shapes_out[int(e[0]) - 1]) > 1 else ''}{int(e[1:2].view(np.int32)[0])} pour "
+                    f"{who} de forme {shapes_out[int(e[0]) - 1]}) ; ces écritures "
+                    "n'ont pas été faites, les autres oui. Bornez l'indice, ex. gs.min(k, n - 1)"
+                )
+
+        arrs = []
+        for h, r in zip(handles[:-1], results):
+            a = Array(h, r, dev_id)
+            a._check = check
+            arrs.append(a)
+        arrs = Results(arrs)
+        return arrs if self._tuple else arrs[0]
+
+    def _bind_dims(self, shapes):
         """Kernel avec index : taille de chaque dimension nommée, d'après la forme des entrées.
 
-        Renvoie (forme des sorties, valeurs des dimensions cachées dans l'ordre de l'IR).
+        Renvoie `size(nom)` : la taille d'une dimension (nom, ou taille entière écrite en chiffres).
         """
         sizes: dict[str, tuple[int, str]] = {}
         params = [p for p in self._params if p[1] == "array"]
@@ -229,7 +325,11 @@ class Kernel:
                     f"{self.__name__}() : '{name}' doit avoir {len(dims)} dimension(s) [{want}], reçu la forme {shape}"
                 )
             for axis, (d, size) in enumerate(zip(dims, shape)):
-                key = d if d is not None else f"{name}.{axis}"
+                key = str(d) if d is not None else f"{name}.{axis}"
+                if isinstance(d, int) and size != d:
+                    raise _core.ShapeMismatch(
+                        f"{self.__name__}() : '{name}' : l'axe {axis} doit avoir {d} éléments, reçu {size}"
+                    )
                 if key in sizes and sizes[key][0] != size:
                     prev, who = sizes[key]
                     raise _core.ShapeMismatch(
@@ -239,8 +339,16 @@ class Kernel:
         for key, (size, who) in sizes.items():
             if size >= 2**31:
                 raise _core.ShapeMismatch(f"{self.__name__}() : dimension '{key}' ({size}) au-delà de 2³¹ − 1")
-        shape = tuple(sizes[d][0] for d in self._outs[0].dims)
-        return shape, [sizes[d][0] for d in self._dims]
+
+        def size(d):
+            d = str(d)
+            if d in sizes:
+                return sizes[d][0]
+            if d.isdigit():
+                return int(d)
+            raise KeyError(f"'{d}'")
+
+        return size
 
     def _outputs(self, out, shape) -> list:
         """Destinations des sorties : allouées (alignées) ou fournies par `out=`."""
@@ -261,8 +369,9 @@ class Kernel:
         return given
 
 
-def kernel(func=None, *, cast: str | None = None, compat: str = "auto"):
-    """Décorateur : `@gs.kernel`, `@gs.kernel(cast="auto")`, `@gs.kernel(compat="strict")`."""
+def kernel(func=None, *, cast: str | None = None, compat: str = "auto", grid=None):
+    """Décorateur : `@gs.kernel`, `@gs.kernel(cast="auto")`, `@gs.kernel(compat="strict")`,
+    `@gs.kernel(grid="data")` (mode explicite : sorties gs.Out écrites par gs.atomic_*)."""
     if func is None:
-        return lambda f: Kernel(f, cast=cast, compat=compat)
-    return Kernel(func, cast=cast, compat=compat)
+        return lambda f: Kernel(f, cast=cast, compat=compat, grid=grid)
+    return Kernel(func, cast=cast, compat=compat, grid=grid)

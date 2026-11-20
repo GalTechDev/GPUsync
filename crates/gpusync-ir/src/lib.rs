@@ -149,6 +149,10 @@ pub enum Grid {
         row0: usize,
         inrow: usize,
         obase: usize,
+        /// Mode explicite (`grid=`, ARCHITECTURE.md §4.5) : tableaux `gs.Out`, écrits seulement par
+        /// des opérations atomiques, entiers sur le périphérique et rendus comme résultats. Le
+        /// dernier est `gs_err` (u32 × 2), où une écriture hors limites est signalée.
+        writable: Vec<usize>,
     },
 }
 
@@ -177,6 +181,14 @@ impl Kernel {
 
     pub fn is_engine_param(&self, i: usize) -> bool {
         self.engine_params().contains(&Some(i))
+    }
+
+    /// Tableaux `gs.Out` du mode explicite (dont `gs_err`, en dernier).
+    pub fn writable(&self) -> &[usize] {
+        match &self.grid {
+            Grid::Indexed { writable, .. } => writable,
+            Grid::Elementwise => &[],
+        }
     }
 }
 
@@ -215,6 +227,35 @@ pub enum Stmt {
     },
     /// Écrit la case courante de chaque sortie et termine le thread.
     Return(Vec<Expr>),
+    /// `gs.atomic_add(param, index, value)` (ou min, max) sur un tableau `gs.Out`. Si `in_bounds`
+    /// est faux, rien n'est écrit : `code` est signalé dans `gs_err[0]` (maximum atomique) et
+    /// l'indice dans `gs_err[1]`.
+    Atomic {
+        op: AtomicOp,
+        param: usize,
+        index: Expr,
+        in_bounds: Expr,
+        value: Expr,
+        err: usize,
+        code: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicOp {
+    Add,
+    Min,
+    Max,
+}
+
+impl AtomicOp {
+    pub fn name(self) -> &'static str {
+        match self {
+            AtomicOp::Add => "add",
+            AtomicOp::Min => "min",
+            AtomicOp::Max => "max",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -428,6 +469,16 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
             Stmt::Return(values) => values.iter().for_each(|v| expr(v, f)),
             Stmt::LocalStore { index, value, .. } => {
                 expr(index, f);
+                expr(value, f);
+            }
+            Stmt::Atomic {
+                index,
+                in_bounds,
+                value,
+                ..
+            } => {
+                expr(index, f);
+                expr(in_bounds, f);
                 expr(value, f);
             }
             Stmt::If {

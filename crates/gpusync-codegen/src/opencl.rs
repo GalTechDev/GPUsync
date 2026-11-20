@@ -193,6 +193,35 @@ impl Gen<'_> {
                 );
                 self.out.line(l);
             }
+            Stmt::Atomic {
+                op,
+                param,
+                index,
+                in_bounds,
+                value,
+                err,
+                code,
+            } => {
+                let ty = self.k.params[*param].ty;
+                let p = param_name(self.k, *param);
+                let e = param_name(self.k, *err);
+                let (idx, ok, v) = (self.expr(index), self.expr(in_bounds), self.expr(value));
+                self.out.line("{");
+                self.out.depth += 1;
+                self.out.line(format!("const int gs_ai = {idx};"));
+                self.out.line(format!("if ({ok}) {{"));
+                let call = match ty {
+                    Scalar::F32 => format!("gs_atomic_{}_f32(&{p}[gs_ai], {v});", op.name()),
+                    _ => format!("atomic_{}(&{p}[gs_ai], {v});", op.name()),
+                };
+                self.out.line(format!("    {call}"));
+                self.out.line("} else {");
+                self.out.line(format!("    atomic_max(&{e}[0], {code}u);"));
+                self.out.line(format!("    {e}[1] = (uint)gs_ai;"));
+                self.out.line("}");
+                self.out.depth -= 1;
+                self.out.line("}");
+            }
             Stmt::Return(es) => {
                 for (o, e) in es.iter().enumerate() {
                     let r = format!("gs_out{o}[{}] = {};", self.out_index(), self.expr(e));
@@ -305,11 +334,28 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
             g.out.line(*code);
         }
     }
+    // Atomiques flottants : absents d'OpenCL 1.2, émulés par une boucle de comparaison-échange.
+    for (op, ty) in crate::atomics(k) {
+        if ty == Scalar::F32 {
+            let name = ["add", "min", "max"][op as usize];
+            let combine = [
+                "as_float(prev) + v",
+                "fmin(as_float(prev), v)",
+                "fmax(as_float(prev), v)",
+            ][op as usize];
+            g.out.line(format!(
+                "inline void gs_atomic_{name}_f32(__global float* p, float v) {{\n    volatile __global uint* u = (volatile __global uint*)p;\n    uint prev, old = *u;\n    do {{\n        prev = old;\n        old = atomic_cmpxchg(u, prev, as_uint({combine}));\n    }} while (old != prev);\n}}"
+            ));
+        }
+    }
     let mut args: Vec<String> = k
         .params
         .iter()
         .enumerate()
         .map(|(i, p)| match p.kind {
+            ParamKind::Array if k.writable().contains(&i) => {
+                format!("__global {}* {}", c_type(p.ty), param_name(k, i))
+            }
             ParamKind::Array => format!(
                 "__global const {}* restrict {}",
                 c_type(p.ty),

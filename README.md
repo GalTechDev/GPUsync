@@ -4,8 +4,9 @@
 OpenCL ≥ 1.2, puis CUDA. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**État : jalon M4** — kernels élément par élément et kernels avec index (dimensions nommées, plusieurs
-sorties, tableaux locaux), sans limite de taille, sur le périphérique le plus adapté.
+**État : jalon M5** — kernels élément par élément, kernels avec index (dimensions nommées, plusieurs
+sorties, tableaux locaux) et mode explicite (opérations atomiques), sans limite de taille, sur le
+périphérique le plus adapté.
 
 ```python
 import numpy as np
@@ -33,6 +34,15 @@ for bloc in normalize.stream(generateur(), 0.0, 1.0):
     ...
 
 print(normalize.source("opencl"))            # code généré (aussi "wgsl", "ir")
+
+# Mode explicite : un thread par entrée, sorties écrites par opérations atomiques
+@gs.kernel(grid="data")
+def histogram(data: gs.f32["n"], counts: gs.Out[gs.i32[10]]):
+    i = gs.index()
+    gs.atomic_add(counts, gs.min(int(data[i] * 10), 9), 1)   # aussi atomic_min / atomic_max
+
+counts = histogram(data)                     # gs.Out alloué et mis à zéro ; out=acc pour accumuler
+# indice hors limites : écriture non faite, gs.OutOfBounds à la lecture
 
 # Async, Jupyter et interop : le même code partout
 y = await normalize(x, 0.0, 1.0)             # attend sans bloquer la boucle asyncio (ou une cellule Jupyter)
@@ -142,6 +152,7 @@ tools/bench_m15.py          essais à gros volume du jalon M1.5
 tools/bench_m2.py           DTW sur chaque périphérique (jalon M2)
 tools/bench_m3.py           kernels avec index à gros volume (jalon M3)
 tools/bench_m4.py           coût du premier appel dans un processus neuf (jalon M4)
+tools/bench_m5.py           atomiques (histogramme, somme par case) contre NumPy (jalon M5)
 tools/remote/               exécution sur les machines de test
 GPUsync-python/             prototype v1 (référence, hors dépôt)
 ```

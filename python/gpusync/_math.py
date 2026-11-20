@@ -49,6 +49,21 @@ def local(dtype, n):
     return _np.zeros(n, dtype=dtype.np)
 
 
+def atomic_add(out, index, value):
+    """Dans un kernel avec grid= : out[index] += value, sans conflit entre cases de la grille."""
+    _np.add.at(out, index, value)
+
+
+def atomic_min(out, index, value):
+    """Dans un kernel avec grid= : out[index] = min(out[index], value), sans conflit."""
+    _np.minimum.at(out, index, value)
+
+
+def atomic_max(out, index, value):
+    """Dans un kernel avec grid= : out[index] = max(out[index], value), sans conflit."""
+    _np.maximum.at(out, index, value)
+
+
 pi = _m.pi
 e = _m.e
 tau = _m.tau
@@ -57,5 +72,5 @@ nan = _m.nan
 
 __all__ = [
     "sqrt", "exp", "exp2", "log", "log2", "sin", "cos", "tan", "tanh", "atan2",
-    "floor", "ceil", "pow", "abs", "min", "max", "index", "local", "pi", "e", "tau", "inf", "nan",
+    "floor", "ceil", "pow", "abs", "min", "max", "index", "local", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
 ]

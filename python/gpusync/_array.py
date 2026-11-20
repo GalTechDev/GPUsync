@@ -17,7 +17,7 @@ import numpy as np
 
 
 class Array:
-    __slots__ = ("_handle", "_host", "_ready", "_lock", "device")
+    __slots__ = ("_handle", "_host", "_ready", "_lock", "_check", "device")
     __array_priority__ = 1000
 
     def __init__(self, handle, host: np.ndarray, device: str) -> None:
@@ -25,6 +25,7 @@ class Array:
         self._host = host  # destination finale du résultat (forme et type définitifs)
         self._ready = handle is None
         self._lock = threading.Lock()  # lecture possible depuis un thread (await) et le thread principal
+        self._check = None  # mode explicite : vérifie qu'aucune écriture n'a été refusée
         self.device = device
 
     # ── forme et type : connus sans attendre le calcul ──
@@ -67,6 +68,8 @@ class Array:
                 if not self._ready:
                     self._handle.read_into(self._host.ctypes.data)
                     self._ready = True
+        if self._check is not None:
+            self._check()
         return self._host
 
     @property
@@ -110,6 +113,8 @@ class Array:
                     self._handle.read_into(mm.ctypes.data)
         mm.flush()
         del mm
+        if self._check is not None:
+            self._check()
 
     def __array__(self, dtype=None, copy=None):
         a = self.numpy()

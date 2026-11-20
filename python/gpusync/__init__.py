@@ -11,7 +11,7 @@
     y = normalize(x, x.mean(), x.std())     # gs.Array : calcul lancé sur le GPU
     print(y[:5])                            # attend la fin et rapatrie
 
-État : jalon M4 (kernels élément par élément et avec index, sans limite de taille ; await, DLPack). Voir ARCHITECTURE.md.
+État : jalon M5 (élément par élément, avec index, mode explicite à atomiques ; sans limite de taille ; await, DLPack). Voir ARCHITECTURE.md.
 """
 
 from . import _core
@@ -30,17 +30,17 @@ from ._core import (
     devices,
 )
 from ._device import CompatibilityWarning, default_device, device, set_default_device, set_memory_budget
-from ._kernel import Kernel, OutOfMemory, kernel
+from ._kernel import Kernel, OutOfBounds, OutOfMemory, kernel
 from ._math import *  # noqa: F403  (sqrt, exp, … utilisables dans les kernels)
 from ._math import __all__ as _math_all
-from ._types import f32, f64, i32, u32
+from ._types import Out, f32, f64, i32, u32
 
 __all__ = [
     "kernel", "Kernel", "Array",
     "devices", "backends", "Device", "BackendStatus",
     "device", "default_device", "set_default_device", "set_memory_budget",
-    "f32", "f64", "i32", "u32",
-    "CompatibilityWarning", "OutOfMemory",
+    "f32", "f64", "i32", "u32", "Out",
+    "CompatibilityWarning", "OutOfMemory", "OutOfBounds",
     "GpusyncError", "KernelSyntaxError", "TypeMismatch", "ShapeMismatch", "UnsupportedFeature", "DeviceError",
     "__version__",
     *_math_all,

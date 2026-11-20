@@ -9,6 +9,9 @@ use crate::*;
 pub enum Arg<'a> {
     Array(&'a [u8]),
     Scalar(Const),
+    /// Tableau `gs.Out` (mode explicite) : écrit par les opérations atomiques. Pointeur brut :
+    /// l'interpréteur est séquentiel, et la mémoire appartient à l'appelant pendant `run`.
+    Writable(*mut u8, usize),
 }
 
 enum Flow {
@@ -112,6 +115,7 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
         };
         let values = match st.block(&kernel.body)? {
             Flow::Return(v) => v,
+            _ if kernel.outputs.is_empty() => vec![], // mode explicite : pas de return obligatoire
             _ => {
                 return Err(format!(
                     "le kernel '{}' s'est terminé sans return",
@@ -226,6 +230,50 @@ impl State<'_, '_> {
                 self.arrays[*local][idx as usize] = convert(v, self.kernel.locals[*local].ty);
                 Ok(Flow::Normal)
             }
+            Stmt::Atomic {
+                op,
+                param,
+                index,
+                in_bounds,
+                value,
+                err,
+                code,
+            } => {
+                let idx = index_of(self.eval(index)?);
+                let ok = as_bool(self.eval(in_bounds)?);
+                let ty = self.kernel.params[*param].ty;
+                let v = convert(self.eval(value)?, ty);
+                let cell = |a: &Arg, i: usize, size: usize| -> Result<*mut u8, String> {
+                    match a {
+                        Arg::Writable(p, bytes) if (i + 1) * size <= *bytes => {
+                            Ok(unsafe { p.add(i * size) })
+                        }
+                        _ => Err("tableau gs.Out invalide".into()),
+                    }
+                };
+                if ok && idx >= 0 {
+                    let c = cell(&self.args[*param], idx as usize, ty.size())?;
+                    let cur = load(ty, unsafe { std::slice::from_raw_parts(c, ty.size()) });
+                    let new = match op {
+                        AtomicOp::Add => arith(BinOp::Add, cur, v),
+                        AtomicOp::Min => intrinsic(Intrinsic::Min, &[cur, v]),
+                        AtomicOp::Max => intrinsic(Intrinsic::Max, &[cur, v]),
+                    };
+                    store(new, unsafe { std::slice::from_raw_parts_mut(c, ty.size()) });
+                } else {
+                    // Rien n'est écrit ; l'écriture refusée est signalée (comme sur GPU).
+                    let e0 = cell(&self.args[*err], 0, 4)?;
+                    let e1 = cell(&self.args[*err], 1, 4)?;
+                    unsafe {
+                        let prev = u32::from_ne_bytes(*(e0 as *const [u8; 4]));
+                        if *code > prev {
+                            *(e0 as *mut [u8; 4]) = code.to_ne_bytes();
+                        }
+                        *(e1 as *mut [u8; 4]) = (idx as u32).to_ne_bytes();
+                    }
+                }
+                Ok(Flow::Normal)
+            }
             Stmt::Return(es) => {
                 let mut vals = Vec::with_capacity(es.len());
                 for (e, t) in es.iter().zip(&self.kernel.outputs) {
@@ -274,6 +322,7 @@ impl State<'_, '_> {
                     let ty = self.kernel.params[*p].ty;
                     load(ty, &bytes[self.i * ty.size()..(self.i + 1) * ty.size()])
                 }
+                Arg::Writable(..) => return Err("lecture d'un tableau gs.Out".into()),
             },
             ExprKind::Unary(op, a) => {
                 let a = self.eval(a)?;

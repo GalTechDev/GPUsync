@@ -83,7 +83,17 @@ pub fn lower(spec: &J) -> R<Kernel> {
         })
         .unwrap_or_default();
     let body_json = spec["body"].as_array().cloned().unwrap_or_default();
-    let indexed = uses_index(&J::Array(body_json.clone()), &modules);
+    // Mode explicite (§4.5) : `grid=` (nom d'une entrée ou liste de dimensions) et sorties gs.Out.
+    let explicit = !spec["grid"].is_null();
+    let indexed = explicit || uses_index(&J::Array(body_json.clone()), &modules);
+    if explicit && !outputs.is_empty() {
+        return Err(err(
+            ErrorKind::Type,
+            "avec grid=, les résultats sont les paramètres gs.Out : retirez le type de retour (-> ...)".into(),
+            None,
+        ));
+    }
+    let mut out_params: Vec<usize> = Vec::new();
 
     let mut params = Vec::new();
     let mut dim_names: Vec<String> = Vec::new(); // dimensions nommées, dans l'ordre d'apparition
@@ -100,6 +110,26 @@ pub fn lower(spec: &J) -> R<Kernel> {
         }
         let kind = match p["kind"].as_str() {
             Some("array") => ParamKind::Array,
+            Some("out") => {
+                if !explicit {
+                    return Err(err(
+                        ErrorKind::Type,
+                        format!("paramètre '{pname}' : gs.Out s'utilise avec @gs.kernel(grid=...)"),
+                        None,
+                    ));
+                }
+                if ty == Scalar::F64 {
+                    return Err(err(
+                        ErrorKind::Type,
+                        format!(
+                            "paramètre '{pname}' : sortie gs.Out en f64 non supportée (les opérations atomiques existent en i32, u32 et f32)"
+                        ),
+                        None,
+                    ));
+                }
+                out_params.push(params.len());
+                ParamKind::Array
+            }
             _ => ParamKind::Scalar,
         };
         let mut dims = Vec::new();
@@ -107,12 +137,20 @@ pub fn lower(spec: &J) -> R<Kernel> {
             match p["dims"].as_array() {
                 Some(ds) => {
                     for (a, d) in ds.iter().enumerate() {
-                        // Axe sans nom (`gs.f32[:, :]`) : nom propre au paramètre.
-                        dims.push(
-                            d.as_str()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| format!("{pname}.{a}")),
-                        );
+                        // Axe sans nom (`gs.f32[:, :]`) : nom propre au paramètre ; taille entière
+                        // (`gs.Out[gs.i32[10]]`) : son écriture décimale, fournie par l'appelant.
+                        dims.push(match (d.as_str(), d.as_u64()) {
+                            (Some(n), _) => n.to_string(),
+                            (None, Some(v)) => v.to_string(),
+                            _ if p["kind"] == "out" => {
+                                return Err(err(
+                                    ErrorKind::Type,
+                                    format!("sortie '{pname}' : taille de chaque dimension requise, entière ou nommée d'après une entrée (ex. gs.Out[gs.i32[10]], gs.Out[gs.f32[\"n\"]])"),
+                                    None,
+                                ));
+                            }
+                            _ => format!("{pname}.{a}"),
+                        });
                     }
                 }
                 None if indexed => {
@@ -148,9 +186,63 @@ pub fn lower(spec: &J) -> R<Kernel> {
             None,
         ));
     }
+    // Dimensions de la grille en mode explicite : celles d'une entrée, ou une liste de noms.
+    let grid_dims: Option<Vec<String>> = if !explicit {
+        None
+    } else if let Some(g) = spec["grid"].as_str() {
+        let Some(p) = params.iter().position(|p| {
+            p.name == g
+                && p.kind == ParamKind::Array
+                && !out_params.contains(&params.iter().position(|q| q.name == g).unwrap())
+        }) else {
+            return Err(err(
+                ErrorKind::Type,
+                format!("grid=\"{g}\" : '{g}' n'est pas un tableau d'entrée du kernel"),
+                None,
+            ));
+        };
+        Some(param_dims[p].clone())
+    } else {
+        let names: Vec<String> = spec["grid"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|d| match (d.as_str(), d.as_u64()) {
+                (Some(n), _) => n.to_string(),
+                (None, Some(v)) => v.to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        for d in &names {
+            if d.is_empty() || (!dim_names.contains(d) && d.parse::<u64>().is_err()) {
+                return Err(err(
+                    ErrorKind::Type,
+                    format!(
+                        "grid=(…) : dimension « {d} » absente des entrées (nommez-la dans une annotation, ex. x: gs.f32[\"{d}\"])"
+                    ),
+                    None,
+                ));
+            }
+        }
+        Some(names)
+    };
+    if let Some(g) = &grid_dims {
+        if g.is_empty() {
+            return Err(err(
+                ErrorKind::Type,
+                "grid= : au moins une dimension".into(),
+                None,
+            ));
+        }
+        for d in g.iter().chain(std::iter::once(&"2".to_string())) {
+            if !dim_names.contains(d) {
+                dim_names.push(d.clone()); // tailles entières (dont celle de gs_err)
+            }
+        }
+    }
     let grid = if indexed {
         // Dimensions des sorties : nommées, toutes identiques, présentes dans les entrées.
-        let mut out_dims: Option<Vec<String>> = None;
+        let mut out_dims: Option<Vec<String>> = grid_dims.clone();
         for o in &out_specs {
             let ds: Vec<String> = match o["dims"].as_array() {
                 Some(ds) if ds.iter().all(|d| d.is_string()) => {
@@ -217,12 +309,26 @@ pub fn lower(spec: &J) -> R<Kernel> {
             });
         }
         let out_dims = out_dims.unwrap_or_default();
+        // Mode explicite : tableau des écritures refusées (hors limites), u32 × 2.
+        let mut writable = out_params.clone();
+        if explicit {
+            writable.push(params.len());
+            params.push(Param {
+                name: "gs_err".into(),
+                kind: ParamKind::Array,
+                ty: Scalar::U32,
+                dims: vec![idx(&"2".to_string())],
+                hidden: true,
+            });
+            param_dims.push(vec!["2".into()]);
+        }
         let readers = row_readers(&J::Array(body_json.clone()), &modules);
         let chunked = param_dims
             .iter()
             .enumerate()
             .filter(|(p, ds)| {
                 params[*p].kind == ParamKind::Array
+                    && !writable.contains(p)
                     && !ds.is_empty()
                     && ds.first() == out_dims.first()
                     && !readers.other.contains(&params[*p].name)
@@ -236,6 +342,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
             row0: engine,
             inrow: engine + 1,
             obase: engine + 2,
+            writable,
         }
     } else {
         Grid::Elementwise
@@ -250,14 +357,20 @@ pub fn lower(spec: &J) -> R<Kernel> {
         }
     }
     let line_offset = spec["line_offset"].as_u64().unwrap_or(0) as u32;
-    let (rank, chunked, inrow) = match &grid {
+    let (rank, chunked, inrow, writable) = match &grid {
         Grid::Indexed {
             axes,
             chunked,
             inrow,
+            writable,
             ..
-        } => (Some(axes.len()), chunked.clone(), Some(*inrow)),
-        Grid::Elementwise => (None, vec![], None),
+        } => (
+            Some(axes.len()),
+            chunked.clone(),
+            Some(*inrow),
+            writable.clone(),
+        ),
+        Grid::Elementwise => (None, vec![], None, vec![]),
     };
 
     let mut hints: HashMap<String, Scalar> = HashMap::new();
@@ -269,6 +382,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
                 rank,
                 chunked: &chunked,
                 inrow,
+                writable: &writable,
                 constants: &constants,
                 modules: &modules,
                 line_offset,
@@ -286,7 +400,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
         if restart {
             continue;
         }
-        if !always_returns(&body) {
+        if !outputs.is_empty() && !always_returns(&body) {
             return Err(err(
                 ErrorKind::Syntax,
                 "le kernel doit se terminer par `return` dans toutes les branches".into(),
@@ -495,6 +609,8 @@ struct Lowerer<'a> {
     /// Tableaux lus seulement à la ligne courante : indexés à partir de la ligne `inrow`.
     chunked: &'a [usize],
     inrow: Option<usize>,
+    /// Mode explicite : tableaux gs.Out, puis gs_err en dernier.
+    writable: &'a [usize],
     constants: &'a HashMap<String, Lit>,
     modules: &'a HashMap<String, String>,
     line_offset: u32,
@@ -737,6 +853,15 @@ impl Lowerer<'_> {
                         Stmt::Continue
                     });
                 }
+                "Return" if self.outputs.is_empty() => {
+                    if !s["value"].is_null() {
+                        return Err(self.e(
+                            ErrorKind::Syntax,
+                            "avec grid=, les résultats s'écrivent dans les gs.Out (gs.atomic_add…) : return sans valeur",
+                        ));
+                    }
+                    out.push(Stmt::Return(vec![]));
+                }
                 "Return" => {
                     if s["value"].is_null() {
                         return Err(self.e(
@@ -772,6 +897,13 @@ impl Lowerer<'_> {
                     out.push(Stmt::Return(es));
                 }
                 "Pass" => {}
+                "Expr"
+                    if ["atomic_add", "atomic_min", "atomic_max"]
+                        .iter()
+                        .any(|f| self.is_gs_call(&s["value"], f)) =>
+                {
+                    out.push(self.atomic(&s["value"])?);
+                }
                 "Expr" => {
                     return Err(self.e(
                         ErrorKind::Syntax,
@@ -869,6 +1001,115 @@ impl Lowerer<'_> {
             )?);
         }
         Ok(out)
+    }
+
+    /// `gs.atomic_add(sortie, indice, valeur)` (ou `atomic_min`, `atomic_max`) sur un gs.Out ;
+    /// indice entier, ou tuple d'indices pour une sortie à plusieurs dimensions.
+    fn atomic(&mut self, call: &J) -> R<Stmt> {
+        let fname = call["func"]["attr"].as_str().unwrap_or("").to_string();
+        let op = match fname.as_str() {
+            "atomic_add" => AtomicOp::Add,
+            "atomic_min" => AtomicOp::Min,
+            _ => AtomicOp::Max,
+        };
+        let args = call["args"].as_array().cloned().unwrap_or_default();
+        let Some(&err_param) = self.writable.last() else {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                format!("gs.{fname} : réservé aux kernels avec grid= et des sorties gs.Out (@gs.kernel(grid=\"x\"))"),
+            ));
+        };
+        if args.len() != 3 || !call["keywords"].as_array().is_none_or(|k| k.is_empty()) {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                format!("gs.{fname}(sortie, indice, valeur) : ex. gs.{fname}(counts, k, 1)"),
+            ));
+        }
+        let target = args[0]["id"].as_str().unwrap_or("");
+        let Some(p) = self
+            .params
+            .iter()
+            .position(|q| q.name == target && !q.hidden)
+            .filter(|p| self.writable.contains(p))
+        else {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!("gs.{fname} : le premier argument doit être une sortie gs.Out du kernel"),
+            ));
+        };
+        let dims = self.params[p].dims.clone();
+        let idx_nodes: Vec<J> = if args[1]["_type"] == "Tuple" {
+            args[1]["elts"].as_array().cloned().unwrap_or_default()
+        } else {
+            vec![args[1].clone()]
+        };
+        if idx_nodes.len() != dims.len() {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!(
+                    "'{target}' a {} dimension(s), {} indice(s) donné(s) (plusieurs : un tuple, ex. ({}))",
+                    dims.len(),
+                    idx_nodes.len(),
+                    (0..dims.len()).map(|k| format!("i{k}")).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+        let mut flat: Option<Expr> = None;
+        let mut ok: Option<Expr> = None;
+        for (k, n) in idx_nodes.iter().enumerate() {
+            let i = self.index_expr(n)?;
+            let d = ex(Scalar::I32, ExprKind::Param(dims[k]));
+            let zero = ex(Scalar::I32, ExprKind::Const(Const::I32(0)));
+            let ge = ex(
+                Scalar::Bool,
+                ExprKind::Compare(CmpOp::Ge, Box::new(i.clone()), Box::new(zero)),
+            );
+            let lt = ex(
+                Scalar::Bool,
+                ExprKind::Compare(CmpOp::Lt, Box::new(i.clone()), Box::new(d.clone())),
+            );
+            let both = ex(
+                Scalar::Bool,
+                ExprKind::Binary(BinOp::And, Box::new(ge), Box::new(lt)),
+            );
+            ok = Some(match ok {
+                None => both,
+                Some(a) => ex(
+                    Scalar::Bool,
+                    ExprKind::Binary(BinOp::And, Box::new(a), Box::new(both)),
+                ),
+            });
+            flat = Some(match flat {
+                None => i,
+                Some(acc) => {
+                    let mul = ex(
+                        Scalar::I32,
+                        ExprKind::Binary(BinOp::Mul, Box::new(acc), Box::new(d)),
+                    );
+                    ex(
+                        Scalar::I32,
+                        ExprKind::Binary(BinOp::Add, Box::new(mul), Box::new(i)),
+                    )
+                }
+            });
+        }
+        let ty = self.params[p].ty;
+        let v = self.expr(&args[2])?;
+        let value = self.to_ty(
+            v,
+            ty,
+            &format!("valeur de gs.{fname} sur '{target}' (gs.{ty})"),
+        )?;
+        let code = self.writable.iter().position(|w| *w == p).unwrap() as u32 + 1;
+        Ok(Stmt::Atomic {
+            op,
+            param: p,
+            index: flat.unwrap(),
+            in_bounds: ok.unwrap(),
+            value,
+            err: err_param,
+            code,
+        })
     }
 
     /// `buf = gs.local(gs.f32, N)` : tableau local de N éléments (N constant).
@@ -972,6 +1213,9 @@ impl Lowerer<'_> {
             .iter()
             .position(|p| p.name == id && p.kind == ParamKind::Array)
         {
+            if self.writable.contains(&p) {
+                return Err(self.out_only(&id));
+            }
             if self.rank.is_none() {
                 return Err(self.e(
                     ErrorKind::Syntax,
@@ -1262,8 +1506,18 @@ impl Lowerer<'_> {
         }
     }
 
+    fn out_only(&self, id: &str) -> FrontendError {
+        self.e(
+            ErrorKind::Syntax,
+            format!("'{id}' est une sortie gs.Out, en écriture seule : écrivez-la avec gs.atomic_add({id}, indice, valeur) (ou atomic_min, atomic_max)"),
+        )
+    }
+
     fn name(&self, id: &str) -> R<Val> {
         if let Some(i) = self.params.iter().position(|p| p.name == id && !p.hidden) {
+            if self.writable.contains(&i) {
+                return Err(self.out_only(id));
+            }
             if self.params[i].kind == ParamKind::Array && self.rank.is_some() {
                 return Err(self.e(
                     ErrorKind::Syntax,

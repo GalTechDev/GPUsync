@@ -138,6 +138,58 @@ impl Gen<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Atomic {
+                op,
+                param,
+                index,
+                in_bounds,
+                value,
+                err,
+                code,
+            } => {
+                let ty = self.k.params[*param].ty;
+                let p = param_name(self.k, *param);
+                let e = param_name(self.k, *err);
+                let (idx, ok, v) = (self.expr(index), self.expr(in_bounds), self.expr(value));
+                self.out.line("{");
+                self.out.depth += 1;
+                self.out.line(format!("let gs_ai = {idx};"));
+                self.out.line(format!("let gs_av = {v};"));
+                self.out.line(format!("if ({ok}) {{"));
+                let f = match op {
+                    AtomicOp::Add => "atomicAdd",
+                    AtomicOp::Min => "atomicMin",
+                    AtomicOp::Max => "atomicMax",
+                };
+                if ty == Scalar::F32 {
+                    // Pas d'atomiques flottants en WGSL : boucle de comparaison-échange sur les bits.
+                    let combine = match op {
+                        AtomicOp::Add => "bitcast<f32>(gs_old) + gs_av",
+                        AtomicOp::Min => "min(bitcast<f32>(gs_old), gs_av)",
+                        AtomicOp::Max => "max(bitcast<f32>(gs_old), gs_av)",
+                    };
+                    self.out
+                        .line(format!("    var gs_old = atomicLoad(&{p}[u32(gs_ai)]);"));
+                    self.out.line("    loop {");
+                    self.out.line(format!(
+                        "        let gs_r = atomicCompareExchangeWeak(&{p}[u32(gs_ai)], gs_old, bitcast<u32>({combine}));"
+                    ));
+                    self.out.line("        if (gs_r.exchanged) { break; }");
+                    self.out.line("        gs_old = gs_r.old_value;");
+                    self.out.line("    }");
+                } else {
+                    self.out
+                        .line(format!("    _ = {f}(&{p}[u32(gs_ai)], gs_av);"));
+                }
+                self.out.line("} else {");
+                self.out
+                    .line(format!("    _ = atomicMax(&{e}[0], {code}u);"));
+                self.out
+                    .line(format!("    atomicStore(&{e}[1], bitcast<u32>(gs_ai));"));
+                self.out.line("}");
+                self.out.depth -= 1;
+                self.out.line("}");
+            }
             Stmt::Assign { local, value } => {
                 let l = format!("{} = {};", local_name(self.k, *local), self.expr(value));
                 self.out.line(l);
@@ -281,11 +333,20 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
         .line(format!("// GPUsync — kernel « {} » (WGSL, généré)", k.name));
     let mut binding = 0;
     for (i, p) in k.array_params() {
-        g.out.line(format!(
-            "@group(0) @binding({binding}) var<storage, read> {}: array<{}>;",
-            param_name(k, i),
-            w_type(p.ty)
-        ));
+        if k.writable().contains(&i) {
+            // gs.Out : écrit seulement par des atomiques (f32 : bits dans un atomic<u32>).
+            let t = if p.ty == Scalar::I32 { "i32" } else { "u32" };
+            g.out.line(format!(
+                "@group(0) @binding({binding}) var<storage, read_write> {}: array<atomic<{t}>>;",
+                param_name(k, i)
+            ));
+        } else {
+            g.out.line(format!(
+                "@group(0) @binding({binding}) var<storage, read> {}: array<{}>;",
+                param_name(k, i),
+                w_type(p.ty)
+            ));
+        }
         binding += 1;
     }
     for (o, t) in k.outputs.iter().enumerate() {

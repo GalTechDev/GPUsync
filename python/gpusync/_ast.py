@@ -15,7 +15,7 @@ import textwrap
 import types
 import typing
 
-from ._types import ArrayType, DType
+from ._types import ArrayType, DType, OutType
 
 
 class KernelDeclarationError(Exception):
@@ -90,7 +90,7 @@ def return_types(func, ret) -> tuple[list, bool]:
     )
 
 
-def kernel_spec(func) -> tuple[dict, list]:
+def kernel_spec(func, grid=None) -> tuple[dict, list]:
     """Renvoie (spec JSON pour le frontend, liste des paramètres [(nom, kind, DType, dims)])."""
     try:
         lines, start = inspect.getsourcelines(func)
@@ -111,9 +111,17 @@ def kernel_spec(func) -> tuple[dict, list]:
         )
     annotations = inspect.get_annotations(func, eval_str=True)
     params = []
+    fills = {}  # gs.Out : valeur de départ
     for arg in a.args:
         ann = annotations.get(arg.arg)
-        if isinstance(ann, ArrayType):
+        if isinstance(ann, OutType):
+            if grid is None:
+                raise KernelDeclarationError(
+                    f"paramètre '{arg.arg}' : gs.Out s'utilise avec une grille explicite, ex. @gs.kernel(grid=\"x\")"
+                )
+            params.append((arg.arg, "out", ann.array.dtype, ann.array.dims))
+            fills[arg.arg] = ann.fill
+        elif isinstance(ann, ArrayType):
             params.append((arg.arg, "array", ann.dtype, ann.dims))
         elif isinstance(ann, DType):
             params.append((arg.arg, "scalar", ann, None))
@@ -123,7 +131,18 @@ def kernel_spec(func) -> tuple[dict, list]:
             )
         else:
             raise KernelDeclarationError(f"paramètre '{arg.arg}' : type {ann!r} non supporté (gs.f32[:], gs.f32, gs.i32…)")
-    outs, _ = return_types(func, annotations.get("return"))
+    if grid is None:
+        outs, _ = return_types(func, annotations.get("return"))
+    else:
+        outs = []
+        if annotations.get("return") is not None:
+            raise KernelDeclarationError(
+                f"'{func.__name__}' : avec grid=, les résultats sont les paramètres gs.Out ; retirez le type de retour (-> ...)"
+            )
+        if not any(k == "out" for _, k, _, _ in params):
+            raise KernelDeclarationError(
+                f"'{func.__name__}' : avec grid=, déclarez au moins une sortie, ex. counts: gs.Out[gs.i32[10]]"
+            )
 
     # Noms libres : constantes numériques globales et modules gs / math.
     import gpusync
@@ -148,19 +167,29 @@ def kernel_spec(func) -> tuple[dict, list]:
         "filename": inspect.getsourcefile(func) or "<inconnu>",
         "line_offset": start - 1,
         "params": [
-            {"name": n, "kind": k, "dtype": d.name, **({"dims": list(dims)} if k == "array" else {})}
+            {"name": n, "kind": k, "dtype": d.name, **({"dims": list(dims)} if k != "scalar" else {})}
             for n, k, d, dims in params
         ],
         "outputs": [{"dtype": o.dtype.name, "dims": list(o.dims)} for o in outs],
+        "grid": None if grid is None else (grid if isinstance(grid, str) else list(grid)),
         "body": _dump(fdef.body),
         "constants": constants,
         "modules": modules,
     }
+    spec["_fills"] = fills
     return spec, params
 
 
-def kernel_json(func) -> tuple[str, list, list, bool]:
-    """(spec JSON, paramètres, sorties [ArrayType], la sortie est-elle un tuple ?)."""
-    spec, params = kernel_spec(func)
+def kernel_json(func, grid=None) -> tuple[str, list, list, bool, dict]:
+    """(spec JSON, paramètres, sorties [ArrayType], la sortie est-elle un tuple ?, valeur de départ
+    de chaque gs.Out).
+
+    Mode explicite (`grid=`) : les sorties sont les paramètres gs.Out (tuple s'il y en a plusieurs).
+    """
+    spec, params = kernel_spec(func, grid)
+    fills = spec.pop("_fills")
+    if grid is not None:
+        outs = [ArrayType(d, dims) for _, k, d, dims in params if k == "out"]
+        return json.dumps(spec), params, outs, len(outs) > 1, fills
     outs, is_tuple = return_types(func, inspect.get_annotations(func, eval_str=True).get("return"))
-    return json.dumps(spec), params, outs, is_tuple
+    return json.dumps(spec), params, outs, is_tuple, fills
