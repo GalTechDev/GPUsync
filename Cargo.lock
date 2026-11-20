@@ -225,6 +225,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpusync-backend-cuda"
+version = "0.1.0"
+dependencies = [
+ "gpusync-runtime",
+ "libloading",
+]
+
+[[package]]
 name = "gpusync-backend-opencl"
 version = "0.1.0"
 dependencies = [
@@ -255,6 +263,7 @@ dependencies = [
 name = "gpusync-core"
 version = "0.1.0"
 dependencies = [
+ "gpusync-backend-cuda",
  "gpusync-backend-opencl",
  "gpusync-backend-wgpu",
  "gpusync-codegen",
@@ -279,6 +288,7 @@ version = "0.1.0"
 name = "gpusync-py"
 version = "0.1.0"
 dependencies = [
+ "gpusync-backend-cuda",
  "gpusync-backend-opencl",
  "gpusync-backend-wgpu",
  "gpusync-core",

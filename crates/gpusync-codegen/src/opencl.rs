@@ -1,4 +1,6 @@
-//! IR → OpenCL C, base 1.2 (`cl_khr_fp64` activée seulement si le kernel utilise f64).
+//! IR → OpenCL C, base 1.2 (`cl_khr_fp64` activée seulement si le kernel utilise f64), et IR → CUDA C
+//! (même dialecte C à quelques différences près : signature, indice du thread, fonctions f32
+//! suffixées, atomiques natifs).
 
 use gpusync_ir::*;
 
@@ -49,6 +51,8 @@ struct Gen<'a> {
     k: &'a Kernel,
     out: Out,
     tmp: usize,
+    /// CUDA C (NVRTC) plutôt qu'OpenCL C.
+    cuda: bool,
 }
 
 impl Gen<'_> {
@@ -57,6 +61,16 @@ impl Gen<'_> {
         match &self.k.grid {
             Grid::Indexed { obase, .. } => format!("gs_i + {}", param_name(self.k, *obase)),
             Grid::Elementwise => "gs_i".into(),
+        }
+    }
+
+    /// Nom d'une fonction mathématique : en CUDA, la version f32 est suffixée (`sqrtf`), ce qui
+    /// évite toute ambiguïté de surcharge et tout passage implicite en f64.
+    fn math(&self, base: &str, ty: Scalar) -> String {
+        if self.cuda && ty == Scalar::F32 {
+            format!("{base}f")
+        } else {
+            base.to_string()
         }
     }
 
@@ -75,12 +89,12 @@ impl Gen<'_> {
                 match (op, a.ty) {
                     (BinOp::FloorDiv, Scalar::I32) => format!("gs_floordiv_i32({x}, {y})"),
                     (BinOp::FloorDiv, Scalar::U32) => format!("gs_floordiv_u32({x}, {y})"),
-                    (BinOp::FloorDiv, _) => format!("floor({x} / {y})"),
+                    (BinOp::FloorDiv, t) => format!("{}({x} / {y})", self.math("floor", t)),
                     (BinOp::Mod, Scalar::I32) => format!("gs_mod_i32({x}, {y})"),
                     (BinOp::Mod, Scalar::U32) => format!("gs_mod_u32({x}, {y})"),
                     (BinOp::Mod, Scalar::F32) => format!("gs_mod_f32({x}, {y})"),
                     (BinOp::Mod, _) => format!("gs_mod_f64({x}, {y})"),
-                    (BinOp::Pow, _) => format!("pow({x}, {y})"),
+                    (BinOp::Pow, t) => format!("{}({x}, {y})", self.math("pow", t)),
                     _ => format!("({x} {} {y})", infix(*op)),
                 }
             }
@@ -94,16 +108,24 @@ impl Gen<'_> {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 let float = args[0].ty.is_float();
                 match f {
-                    Intrinsic::Abs if float => format!("fabs({})", a[0]),
+                    Intrinsic::Abs if float => {
+                        format!("{}({})", self.math("fabs", args[0].ty), a[0])
+                    }
                     Intrinsic::Abs if args[0].ty == Scalar::I32 => format!("((int)abs({}))", a[0]),
                     Intrinsic::Abs => a[0].clone(),
-                    Intrinsic::Min => {
-                        format!("{}({}, {})", if float { "fmin" } else { "min" }, a[0], a[1])
+                    Intrinsic::Min if float => {
+                        format!("{}({}, {})", self.math("fmin", args[0].ty), a[0], a[1])
                     }
-                    Intrinsic::Max => {
-                        format!("{}({}, {})", if float { "fmax" } else { "max" }, a[0], a[1])
+                    Intrinsic::Max if float => {
+                        format!("{}({}, {})", self.math("fmax", args[0].ty), a[0], a[1])
                     }
-                    _ => format!("{}({})", intrinsic_name(*f), a.join(", ")),
+                    Intrinsic::Min => format!("min({}, {})", a[0], a[1]),
+                    Intrinsic::Max => format!("max({}, {})", a[0], a[1]),
+                    _ => format!(
+                        "{}({})",
+                        self.math(intrinsic_name(*f), args[0].ty),
+                        a.join(", ")
+                    ),
                 }
             }
             ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.expr(i)),
@@ -210,13 +232,20 @@ impl Gen<'_> {
                 self.out.depth += 1;
                 self.out.line(format!("const int gs_ai = {idx};"));
                 self.out.line(format!("if ({ok}) {{"));
+                let cu = ["atomicAdd", "atomicMin", "atomicMax"][*op as usize];
                 let call = match ty {
+                    // CUDA : addition flottante atomique native ; min et max émulés.
+                    Scalar::F32 if self.cuda && *op == AtomicOp::Add => {
+                        format!("atomicAdd(&{p}[gs_ai], {v});")
+                    }
                     Scalar::F32 => format!("gs_atomic_{}_f32(&{p}[gs_ai], {v});", op.name()),
+                    _ if self.cuda => format!("{cu}(&{p}[gs_ai], {v});"),
                     _ => format!("atomic_{}(&{p}[gs_ai], {v});", op.name()),
                 };
                 self.out.line(format!("    {call}"));
                 self.out.line("} else {");
-                self.out.line(format!("    atomic_max(&{e}[0], {code}u);"));
+                let amax = if self.cuda { "atomicMax" } else { "atomic_max" };
+                self.out.line(format!("    {amax}(&{e}[0], {code}u);"));
                 self.out.line(format!("    {e}[1] = (uint)gs_ai;"));
                 self.out.line("}");
                 self.out.depth -= 1;
@@ -312,6 +341,15 @@ const HELPERS: &[(Helper, &str)] = &[
 
 /// Génère le kernel OpenCL C. Point d'entrée : `gs_<nom>`.
 pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
+    emit_c(k, false)
+}
+
+/// Génère le kernel CUDA C (compilé par NVRTC). Point d'entrée : `gs_<nom>` (`extern "C"`).
+pub fn emit_cuda(k: &Kernel) -> Result<KernelSource, CodegenError> {
+    emit_c(k, true)
+}
+
+fn emit_c(k: &Kernel, cuda: bool) -> Result<KernelSource, CodegenError> {
     let entry = format!("gs_{}", crate::sanitize(&k.name));
     let mut g = Gen {
         k,
@@ -320,23 +358,54 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
             depth: 0,
         },
         tmp: 0,
+        cuda,
     };
     g.out.line(format!(
-        "// GPUsync — kernel « {} » (OpenCL C, généré)",
-        k.name
+        "// GPUsync — kernel « {} » ({}, généré)",
+        k.name,
+        if cuda { "CUDA C" } else { "OpenCL C" }
     ));
-    if k.requirements().f64 {
+    if cuda {
+        // NVRTC sans en-têtes : types et constantes du dialecte OpenCL utilisés par l'émetteur.
+        g.out.line("typedef unsigned int uint;");
+        g.out.line("#define INFINITY __int_as_float(0x7f800000)");
+        g.out.line("#define NAN __int_as_float(0x7fffffff)");
+    } else if k.requirements().f64 {
         g.out.line("#pragma OPENCL EXTENSION cl_khr_fp64 : enable");
     }
     let used = helpers(k);
     for (h, code) in HELPERS {
         if used.contains(h) {
-            g.out.line(*code);
+            if cuda {
+                let c = code.replacen("inline ", "__device__ inline ", 1);
+                let c = if *h == Helper::ModF32 {
+                    c.replace("fmod(", "fmodf(")
+                } else {
+                    c
+                };
+                g.out.line(c);
+            } else {
+                g.out.line(*code);
+            }
         }
     }
-    // Atomiques flottants : absents d'OpenCL 1.2, émulés par une boucle de comparaison-échange.
+    // Atomiques flottants : absents d'OpenCL 1.2 (et min / max en CUDA), émulés par une boucle
+    // de comparaison-échange.
     for (op, ty) in crate::atomics(k) {
-        if ty == Scalar::F32 {
+        if ty == Scalar::F32 && cuda && op == AtomicOp::Add as u8 {
+            continue;
+        }
+        if ty == Scalar::F32 && cuda {
+            let name = ["add", "min", "max"][op as usize];
+            let combine = [
+                "",
+                "fminf(__uint_as_float(prev), v)",
+                "fmaxf(__uint_as_float(prev), v)",
+            ][op as usize];
+            g.out.line(format!(
+                "__device__ inline void gs_atomic_{name}_f32(float* p, float v) {{\n    unsigned int* u = (unsigned int*)p;\n    unsigned int prev, old = *u;\n    do {{\n        prev = old;\n        old = atomicCAS(u, prev, __float_as_uint({combine}));\n    }} while (old != prev);\n}}"
+            ));
+        } else if ty == Scalar::F32 {
             let name = ["add", "min", "max"][op as usize];
             let combine = [
                 "as_float(prev) + v",
@@ -348,16 +417,21 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
             ));
         }
     }
+    let (gq, restrict) = if cuda {
+        ("", "__restrict__")
+    } else {
+        ("__global ", "restrict")
+    };
     let mut args: Vec<String> = k
         .params
         .iter()
         .enumerate()
         .map(|(i, p)| match p.kind {
             ParamKind::Array if k.writable().contains(&i) => {
-                format!("__global {}* {}", c_type(p.ty), param_name(k, i))
+                format!("{}{}* {}", gq, c_type(p.ty), param_name(k, i))
             }
             ParamKind::Array => format!(
-                "__global const {}* restrict {}",
+                "{gq}const {}* {restrict} {}",
                 c_type(p.ty),
                 param_name(k, i)
             ),
@@ -365,15 +439,22 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
         })
         .collect();
     for (o, t) in k.outputs.iter().enumerate() {
-        args.push(format!("__global {}* restrict gs_out{o}", c_type(*t)));
+        args.push(format!("{gq}{}* {restrict} gs_out{o}", c_type(*t)));
     }
     args.push("const uint gs_n".into());
-    g.out.line(format!(
-        "__kernel void {entry}(\n    {}) {{",
-        args.join(",\n    ")
-    ));
+    let head = if cuda {
+        "extern \"C\" __global__ void"
+    } else {
+        "__kernel void"
+    };
+    g.out
+        .line(format!("{head} {entry}(\n    {}) {{", args.join(",\n    ")));
     g.out.depth = 1;
-    g.out.line("const uint gs_i = get_global_id(0);");
+    g.out.line(if cuda {
+        "const uint gs_i = blockIdx.x * blockDim.x + threadIdx.x;"
+    } else {
+        "const uint gs_i = get_global_id(0);"
+    });
     g.out.line("if (gs_i >= gs_n) return;");
     if let Grid::Indexed { axes, row0, .. } = &k.grid {
         // Coordonnées du thread dans la grille (forme de la sortie, ordre C) ; le lancement

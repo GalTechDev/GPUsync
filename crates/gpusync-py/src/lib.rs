@@ -4,6 +4,7 @@ mod kernel;
 
 use std::sync::Mutex;
 
+use gpusync_backend_cuda::CudaBackend;
 use gpusync_backend_opencl::OpenClBackend;
 use gpusync_backend_wgpu::WgpuBackend;
 use gpusync_runtime::{Backend, BackendStatus, DeviceInfo, all_devices, discover};
@@ -12,12 +13,13 @@ use pyo3::prelude::*;
 /// Résultat de la découverte, gardé en cache : créer une instance wgpu coûte ~100 ms.
 static CACHE: Mutex<Option<Vec<BackendStatus>>> = Mutex::new(None);
 
-/// Ordre de préférence des backends (§4.8 de l'architecture) : wgpu (Metal / Vulkan / DX12) puis OpenCL.
+/// Backends interrogés : CUDA, wgpu (Metal / Vulkan / DX12) puis OpenCL ; le classement des
+/// périphériques est fait côté Python (§4.8 de l'architecture).
 fn statuses(py: Python<'_>, refresh: bool) -> Vec<BackendStatus> {
     py.detach(|| {
         let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if refresh || cache.is_none() {
-            let backends: [&dyn Backend; 2] = [&WgpuBackend, &OpenClBackend];
+            let backends: [&dyn Backend; 3] = [&CudaBackend, &WgpuBackend, &OpenClBackend];
             let mut st = discover(&backends);
             // L'interpréteur de référence, toujours disponible, en dernier recours.
             st.push(BackendStatus {
@@ -36,7 +38,7 @@ fn statuses(py: Python<'_>, refresh: bool) -> Vec<BackendStatus> {
 struct PyDevice {
     /// Nom commercial du périphérique.
     name: String,
-    /// API utilisée : "metal", "vulkan", "dx12" ou "opencl".
+    /// API utilisée : "cuda", "metal", "vulkan", "dx12" ou "opencl".
     backend: String,
     /// Index parmi les périphériques du même backend.
     index: usize,

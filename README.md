@@ -1,10 +1,10 @@
 # GPUsync v2
 
-Écrire des kernels GPU en Python et les exécuter sur n'importe quel GPU : Metal, Vulkan, DX12 (via wgpu) et
-OpenCL ≥ 1.2, puis CUDA. Réécriture en Rust du prototype Python ; la conception est décrite dans
+Écrire des kernels GPU en Python et les exécuter sur n'importe quel GPU : CUDA, Metal, Vulkan, DX12 (via wgpu)
+et OpenCL ≥ 1.2. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**État : jalon M5** — kernels élément par élément, kernels avec index (dimensions nommées, plusieurs
+**État : jalon M6** — kernels élément par élément, kernels avec index (dimensions nommées, plusieurs
 sorties, tableaux locaux) et mode explicite (opérations atomiques), sans limite de taille, sur le
 périphérique le plus adapté.
 
@@ -108,6 +108,11 @@ gs.TypeMismatch: argument 'x' : gs.f32[:] attendu, reçu un tableau float64.
 Utilisez x.astype(np.float32), ou @gs.kernel(cast='auto') pour convertir
 ```
 
+**CUDA** : utilisé d'office sur un GPU NVIDIA si le driver et NVRTC sont présents. NVRTC vient du toolkit
+CUDA, ou de `pip install nvidia-cuda-nvrtc-cu12` (une bibliothèque, pas un compilateur à installer) ; sans
+lui, `gs.backends()` l'explique et Vulkan prend le relais. Le PTX compilé est gardé en cache
+(`GPUSYNC_CACHE_DIR`, `GPUSYNC_CACHE=0` pour le désactiver).
+
 `gs.devices()` liste les périphériques, `gs.backends()` explique pourquoi un backend est indisponible,
 `python -m gpusync` affiche un diagnostic complet.
 
@@ -142,6 +147,7 @@ crates/
   gpusync-runtime/          types communs (DeviceInfo, trait Backend), découverte
   gpusync-backend-wgpu/     Metal, Vulkan, DX12 : découverte et exécution
   gpusync-backend-opencl/   OpenCL (chargé dynamiquement) : découverte et exécution, zéro-copie
+  gpusync-backend-cuda/     CUDA (driver et NVRTC chargés dynamiquement) : découverte et exécution
   gpusync-core/             compilation + lancement (sans Python) ; test différentiel multi-GPU
   gpusync-py/               liaison PyO3 → module gpusync._core
 python/gpusync/             package Python : @gs.kernel, gs.Array, types, périphériques

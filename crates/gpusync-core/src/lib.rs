@@ -1,13 +1,14 @@
 //! Cœur Rust de GPUsync (sans Python) : frontend + génération de code + exécution sur un backend.
 //!
 //! - [`parse`] : AST Python (JSON) → IR typée ;
-//! - [`Device`] : périphérique ouvert (`opencl:0`, `metal:0`, `vulkan:1`, `dx12:0`, `cpu:0`) ;
+//! - [`Device`] : périphérique ouvert (`cuda:0`, `opencl:0`, `metal:0`, `vulkan:1`, `dx12:0`, `cpu:0`) ;
 //! - [`compile`] : vérifie les capacités, génère et compile le code (avec cache) ;
 //! - [`launch`] : exécute sur `n` éléments, en blocs, selon le mode choisi (moteur de transferts,
 //!   ARCHITECTURE.md §9) et renvoie un [`DeviceArray`].
 
 use std::sync::Arc;
 
+use gpusync_backend_cuda::{CuDevice, CuKernel};
 use gpusync_backend_opencl::{ClDevice, ClKernel};
 use gpusync_backend_wgpu::{WgDevice, WgKernel};
 use gpusync_ir::Kernel;
@@ -54,9 +55,12 @@ pub fn parse(spec_json: &str) -> R<Arc<Kernel>> {
         })
 }
 
-/// Code généré pour une cible : "opencl", "wgsl" ou "ir".
+/// Code généré pour une cible : "cuda", "opencl", "wgsl" ou "ir".
 pub fn source(k: &Kernel, target: &str) -> R<String> {
     match target {
+        "cuda" => gpusync_codegen::emit_cuda(k)
+            .map(|s| s.code)
+            .map_err(|e| CoreError::Unsupported(e.0)),
         "opencl" => gpusync_codegen::emit_opencl(k)
             .map(|s| s.code)
             .map_err(|e| CoreError::Unsupported(e.0)),
@@ -65,7 +69,7 @@ pub fn source(k: &Kernel, target: &str) -> R<String> {
             .map_err(|e| CoreError::Unsupported(e.0)),
         "ir" => Ok(format!("{k:#?}")),
         t => Err(CoreError::Type(format!(
-            "cible inconnue « {t} » (opencl, wgsl ou ir)"
+            "cible inconnue « {t} » (cuda, opencl, wgsl ou ir)"
         ))),
     }
 }
@@ -90,19 +94,21 @@ pub fn cpu_info() -> DeviceInfo {
 /// Un périphérique ouvert.
 #[derive(Clone)]
 pub enum Device {
+    Cu(Arc<CuDevice>),
     Cl(Arc<ClDevice>),
     Wg(Arc<WgDevice>),
     Cpu,
 }
 
 impl Device {
-    /// Ouvre `opencl:<i>`, `metal:<i>`, `vulkan:<i>`, `dx12:<i>` ou `cpu:0`.
+    /// Ouvre `cuda:<i>`, `opencl:<i>`, `metal:<i>`, `vulkan:<i>`, `dx12:<i>` ou `cpu:0`.
     pub fn open(id: &str) -> R<Device> {
         let (backend, index) = id.split_once(':').unwrap_or((id, "0"));
         let index: usize = index.parse().map_err(|_| {
             CoreError::Device(format!("identifiant de périphérique invalide : {id}"))
         })?;
         match backend {
+            "cuda" => CuDevice::open(index).map(Device::Cu).map_err(dev_err),
             "opencl" => ClDevice::open(index).map(Device::Cl).map_err(dev_err),
             "metal" | "vulkan" | "dx12" => WgDevice::open(backend, index)
                 .map(Device::Wg)
@@ -116,6 +122,7 @@ impl Device {
     /// driver est rouvert sous le même identifiant).
     pub fn same(&self, other: &Device) -> bool {
         match (self, other) {
+            (Device::Cu(a), Device::Cu(b)) => Arc::ptr_eq(a, b),
             (Device::Cl(a), Device::Cl(b)) => Arc::ptr_eq(a, b),
             (Device::Wg(a), Device::Wg(b)) => Arc::ptr_eq(a, b),
             (Device::Cpu, Device::Cpu) => true,
@@ -125,6 +132,7 @@ impl Device {
 
     pub fn info(&self) -> DeviceInfo {
         match self {
+            Device::Cu(d) => d.info.clone(),
             Device::Cl(d) => d.info.clone(),
             Device::Wg(d) => d.info.clone(),
             Device::Cpu => cpu_info(),
@@ -138,6 +146,7 @@ impl Device {
     /// Entrées et sortie en mémoire de l'hôte, sans copie ?
     pub fn zero_copy(&self) -> bool {
         match self {
+            Device::Cu(_) => false,
             Device::Cl(d) => d.info.unified_memory,
             Device::Wg(d) => d.info.backend == "metal", // newBufferWithBytesNoCopy
             Device::Cpu => true,
@@ -147,6 +156,7 @@ impl Device {
     /// Attend la fin de tous les calculs en file.
     pub fn finish(&self) -> R<()> {
         match self {
+            Device::Cu(d) => d.finish().map_err(dev_err),
             Device::Cl(d) => d.finish().map_err(dev_err),
             Device::Wg(d) => d.finish().map_err(dev_err),
             Device::Cpu => Ok(()),
@@ -163,6 +173,7 @@ pub struct Compiled {
 
 #[derive(Clone)]
 pub(crate) enum Imp {
+    Cu(Arc<CuKernel>),
     Cl(Arc<ClKernel>),
     Wg(Arc<WgKernel>),
     Cpu,
@@ -198,6 +209,10 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
         return Err(CoreError::Unsupported(msg));
     }
     let imp = match dev {
+        Device::Cu(d) => {
+            let src = gpusync_codegen::emit_cuda(k).map_err(|e| CoreError::Unsupported(e.0))?;
+            Imp::Cu(d.compile(&src.code, &src.entry).map_err(dev_err)?)
+        }
         Device::Cl(d) => {
             let src = gpusync_codegen::emit_opencl(k).map_err(|e| CoreError::Unsupported(e.0))?;
             Imp::Cl(d.compile(&src.code, &src.entry).map_err(dev_err)?)
@@ -226,6 +241,7 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
 }
 
 mod exec;
+mod gpu;
 
 pub use exec::{
     DeviceArray, Input, Mode, Storage, TransferLimits, launch, set_transfer_limits, transfer_limits,

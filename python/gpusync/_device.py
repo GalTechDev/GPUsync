@@ -7,7 +7,7 @@ du kernel décide : `"auto"` → avertissement puis repli sur OpenCL (même GPU 
 `"strict"` → `gs.UnsupportedFeature`.
 
 Un périphérique se désigne par un objet `Device`, un identifiant (`"opencl:1"`), un nom de backend
-(`"opencl"`, `"metal"`, `"vulkan"`, `"dx12"`, `"cpu"`) ou `"gpu"` (premier GPU du classement).
+(`"cuda"`, `"opencl"`, `"metal"`, `"vulkan"`, `"dx12"`, `"cpu"`) ou `"gpu"` (premier GPU du classement).
 """
 
 from __future__ import annotations
@@ -83,12 +83,12 @@ def resolve(device=None) -> str:
 
 
 def fallback(planned: str, req: dict) -> str | None:
-    """Repli pour un kernel que `planned` ne sait pas exécuter : OpenCL sur le même GPU physique,
-    puis un autre OpenCL compatible, puis cpu:0."""
+    """Repli pour un kernel que `planned` ne sait pas exécuter : CUDA ou OpenCL sur le même GPU
+    physique, puis un autre CUDA / OpenCL compatible, puis cpu:0."""
     plan = _by_id(planned)
-    opencl = [d for d in ranked() if d.backend == "opencl" and capable(d, req)]
-    same_gpu = [d for d in opencl if d.name == plan.name]
-    for d in same_gpu + opencl:
+    full = [d for d in ranked() if d.backend in ("cuda", "opencl") and capable(d, req)]
+    same_gpu = [d for d in full if d.name == plan.name]
+    for d in same_gpu + full:
         return d.id
     cpu = [d for d in ranked() if d.backend == "cpu" and capable(d, req)]
     return cpu[0].id if cpu else None

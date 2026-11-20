@@ -12,7 +12,10 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 
-use gpusync_backend_opencl::{ClArg, ClBuffer, ClDevice, ClEvent, ClKernel, Pinned, wait};
+use gpusync_backend_cuda::{CuBuffer, CuEvent};
+use gpusync_backend_opencl::{ClBuffer, ClDevice, ClEvent, ClKernel, wait};
+
+use crate::gpu::{GArg, Gpu};
 use gpusync_backend_wgpu::{FluxIn, WgBuffer};
 use gpusync_ir::interp::{self, Arg};
 use gpusync_ir::{Const, Grid, Kernel, ParamKind, Scalar};
@@ -71,6 +74,8 @@ pub enum Storage {
     ClDirect { bufs: Vec<ClBuffer>, ptr: *mut u8 },
     /// Mode Résident (OpenCL) : en mémoire du périphérique ; `done` signale la fin du calcul.
     Cl { buf: ClBuffer, done: Arc<ClEvent> },
+    /// Mode Résident (CUDA).
+    Cu { buf: CuBuffer, done: Arc<CuEvent> },
     /// Mode Résident (wgpu).
     Wg(WgBuffer),
     /// Mode Direct (Metal, `newBufferWithBytesNoCopy`) : blocs adossés à la mémoire hôte `ptr`.
@@ -127,7 +132,10 @@ impl DeviceArray {
                 }
             }
             (Storage::Cl { buf, done }, Device::Cl(d)) => unsafe {
-                cl_download(d, buf, Some(done), dst, n, chunk)?
+                q_download(&**d, buf, Some(done), dst, n, chunk)?
+            },
+            (Storage::Cu { buf, done }, Device::Cu(d)) => unsafe {
+                q_download(&**d, buf, Some(done), dst, n, chunk)?
             },
             (Storage::Wg(buf), Device::Wg(d)) => unsafe {
                 d.download(buf, 0, dst, n, chunk).map_err(dev_err)?
@@ -294,8 +302,22 @@ pub unsafe fn launch(
                 rows_cl_direct(d, ck, k, &rows, &ins, scalars, outs, &limits)
             },
             (Device::Cl(d), Imp::Cl(ck)) => unsafe {
-                rows_cl(
-                    d,
+                rows_q(
+                    &**d,
+                    ck,
+                    k,
+                    &rows,
+                    &ins,
+                    scalars,
+                    outs,
+                    &limits,
+                    fits(dev, &ins, n, &out_elems, &limits),
+                    budget(dev, &limits),
+                )
+            },
+            (Device::Cu(d), Imp::Cu(ck)) => unsafe {
+                rows_q(
+                    &**d,
                     ck,
                     k,
                     &rows,
@@ -336,9 +358,16 @@ pub unsafe fn launch(
             },
             (Device::Cl(d), Imp::Cl(ck)) => {
                 if fits(dev, &ins, n, &out_elems, &limits) {
-                    unsafe { cl_resident(d, ck, k, &ins, scalars, n, &limits) }
+                    unsafe { q_resident(&**d, ck, k, &ins, scalars, n, &limits) }
                 } else {
-                    unsafe { cl_flux(d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
+                    unsafe { q_flux(&**d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
+                }
+            }
+            (Device::Cu(d), Imp::Cu(ck)) => {
+                if fits(dev, &ins, n, &out_elems, &limits) {
+                    unsafe { q_resident(&**d, ck, k, &ins, scalars, n, &limits) }
+                } else {
+                    unsafe { q_flux(&**d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
                 }
             }
             (Device::Wg(d), Imp::Wg(wk)) => {
@@ -551,37 +580,37 @@ fn wg_params(k: &Kernel, scalars: &[Const]) -> R<(Vec<u32>, Vec<f64>)> {
     Ok((w, f))
 }
 
-fn cl_scalar(c: Const) -> ClArg<'static> {
+fn gscalar<'a, B>(c: Const) -> GArg<'a, B> {
     match c {
-        Const::I32(v) => ClArg::I32(v),
-        Const::U32(v) => ClArg::U32(v),
-        Const::F32(v) => ClArg::F32(v),
-        Const::F64(v) => ClArg::F64(v),
-        Const::Bool(v) => ClArg::I32(v as i32),
+        Const::I32(v) => GArg::I32(v),
+        Const::U32(v) => GArg::U32(v),
+        Const::F32(v) => GArg::F32(v),
+        Const::F64(v) => GArg::F64(v),
+        Const::Bool(v) => GArg::I32(v as i32),
     }
 }
 
-/// Arguments OpenCL dans l'ordre des paramètres : tableaux = `bufs` (dans l'ordre), puis les
-/// sorties et n.
-fn cl_args<'a>(
+/// Arguments de lancement (OpenCL, CUDA) dans l'ordre des paramètres : tableaux = `bufs` (dans
+/// l'ordre), puis les sorties et n.
+fn gargs<'a, B>(
     k: &Kernel,
-    bufs: &[&'a ClBuffer],
+    bufs: &[&'a B],
     scalars: &[Const],
-    outs: &[&'a ClBuffer],
+    outs: &[&'a B],
     n: u32,
-) -> Vec<ClArg<'a>> {
+) -> Vec<GArg<'a, B>> {
     let mut b = bufs.iter();
     let mut s = scalar_args(k, scalars).into_iter();
-    let mut args: Vec<ClArg> = k
+    let mut args: Vec<GArg<B>> = k
         .params
         .iter()
         .map(|p| match p.kind {
-            ParamKind::Array => ClArg::Buf(b.next().unwrap()),
-            ParamKind::Scalar => cl_scalar(s.next().unwrap()),
+            ParamKind::Array => GArg::Buf(*b.next().unwrap()),
+            ParamKind::Scalar => gscalar(s.next().unwrap()),
         })
         .collect();
-    args.extend(outs.iter().map(|o| ClArg::Buf(o)));
-    args.push(ClArg::U32(n));
+    args.extend(outs.iter().map(|o| GArg::Buf(*o)));
+    args.push(GArg::U32(n));
     args
 }
 
@@ -669,9 +698,10 @@ unsafe fn cl_direct(
         }
         let refs: Vec<&ClBuffer> = bufs.iter().collect();
         let orefs: Vec<&ClBuffer> = obs.iter().collect();
-        d.launch(
+        Gpu::launch(
+            d,
             ck,
-            &cl_args(k, &refs, scalars, &orefs, len as u32),
+            &gargs(k, &refs, scalars, &orefs, len as u32),
             len,
             &[],
         )
@@ -819,18 +849,18 @@ unsafe fn wg_resident(
 
 /// Anneau de 3 tampons épinglés pour envoyer `bytes` octets de `src` vers `dst` (file de transfert).
 /// Renvoie l'événement de la dernière écriture.
-unsafe fn cl_upload(
-    d: &ClDevice,
-    dst: &ClBuffer,
+unsafe fn q_upload<G: Gpu>(
+    d: &G,
+    dst: &G::Buf,
     src: *const u8,
     bytes: usize,
     chunk: usize,
-) -> R<Option<ClEvent>> {
+) -> R<Option<G::Ev>> {
     if bytes == 0 {
         return Ok(None);
     }
     let chunk = chunk.min(bytes).max(4);
-    let mut ring: Vec<(Pinned, Option<ClEvent>)> = Vec::new();
+    let mut ring: Vec<(G::Pin, Option<G::Ev>)> = Vec::new();
     for _ in 0..3.min(bytes.div_ceil(chunk)) {
         ring.push((d.pinned(chunk).map_err(dev_err)?, None));
     }
@@ -841,11 +871,11 @@ unsafe fn cl_upload(
         let len = chunk.min(bytes - off);
         let slot = i % ring.len();
         if let Some(e) = ring[slot].1.take() {
-            wait(&e).map_err(dev_err)?; // le tampon est réutilisable
+            G::wait(&e).map_err(dev_err)?; // le tampon est réutilisable
         }
         let p = &ring[slot].0;
-        unsafe { std::ptr::copy_nonoverlapping(src.add(off), p.ptr, len) };
-        let e = unsafe { d.write_at(dst, off, p.ptr, len, &[]) }.map_err(dev_err)?;
+        unsafe { std::ptr::copy_nonoverlapping(src.add(off), G::pin_ptr(p), len) };
+        let e = unsafe { d.write_at(dst, off, G::pin_ptr(p), len, &[]) }.map_err(dev_err)?;
         d.flush().map_err(dev_err)?;
         ring[slot].1 = Some(e);
         off += len;
@@ -853,7 +883,7 @@ unsafe fn cl_upload(
     }
     for (p, e) in ring {
         if let Some(e) = e {
-            wait(&e).map_err(dev_err)?;
+            G::wait(&e).map_err(dev_err)?;
             last = Some(e);
         }
         d.recycle(p);
@@ -862,30 +892,30 @@ unsafe fn cl_upload(
 }
 
 /// Rapatrie un résultat Résident par l'anneau épinglé, après `done`.
-unsafe fn cl_download(
-    d: &ClDevice,
-    src: &ClBuffer,
-    done: Option<&ClEvent>,
+unsafe fn q_download<G: Gpu>(
+    d: &G,
+    src: &G::Buf,
+    done: Option<&G::Ev>,
     dst: *mut u8,
     bytes: usize,
     chunk: usize,
 ) -> R<()> {
     if bytes == 0 {
-        return done.map_or(Ok(()), |e| wait(e).map_err(dev_err));
+        return done.map_or(Ok(()), |e| G::wait(e).map_err(dev_err));
     }
     let chunk = chunk.min(bytes).max(4);
-    let mut ring: Vec<Pinned> = Vec::new();
+    let mut ring: Vec<G::Pin> = Vec::new();
     for _ in 0..3.min(bytes.div_ceil(chunk)) {
         ring.push(d.pinned(chunk).map_err(dev_err)?);
     }
-    let mut pending: VecDeque<(usize, usize, usize, ClEvent)> = VecDeque::new();
+    let mut pending: VecDeque<(usize, usize, usize, G::Ev)> = VecDeque::new();
     let mut off = 0;
     let mut i = 0;
     loop {
         if pending.len() == ring.len() || (off >= bytes && !pending.is_empty()) {
             let (slot, o, len, e) = pending.pop_front().unwrap();
-            wait(&e).map_err(dev_err)?;
-            unsafe { std::ptr::copy_nonoverlapping(ring[slot].ptr, dst.add(o), len) };
+            G::wait(&e).map_err(dev_err)?;
+            unsafe { std::ptr::copy_nonoverlapping(G::pin_ptr(&ring[slot]), dst.add(o), len) };
             continue;
         }
         if off >= bytes {
@@ -893,8 +923,9 @@ unsafe fn cl_download(
         }
         let len = chunk.min(bytes - off);
         let slot = i % ring.len();
-        let waits: Vec<&ClEvent> = done.into_iter().collect();
-        let e = unsafe { d.read_at(src, off, ring[slot].ptr, len, &waits) }.map_err(dev_err)?;
+        let waits: Vec<&G::Ev> = done.into_iter().collect();
+        let e = unsafe { d.read_at(src, off, G::pin_ptr(&ring[slot]), len, &waits) }
+            .map_err(dev_err)?;
         d.flush().map_err(dev_err)?;
         pending.push_back((slot, off, len, e));
         off += len;
@@ -908,9 +939,9 @@ unsafe fn cl_download(
 
 /// Mode Résident (OpenCL, GPU dédié) : entrées envoyées par l'anneau épinglé, sorties gardées en VRAM.
 #[allow(clippy::too_many_arguments)]
-unsafe fn cl_resident(
-    d: &ClDevice,
-    ck: &ClKernel,
+unsafe fn q_resident<G: Gpu>(
+    d: &G,
+    ck: &G::Kern,
     k: &Kernel,
     ins: &[In],
     scalars: &[Const],
@@ -918,53 +949,49 @@ unsafe fn cl_resident(
     limits: &TransferLimits,
 ) -> Planned {
     let mut owned = Vec::new();
-    let mut last: Option<ClEvent> = None;
+    let mut last: Option<G::Ev> = None;
     for i in ins {
         if let In::Host(p, bytes) = i {
             let b = d.alloc(*bytes).map_err(dev_err)?;
-            if let Some(e) = unsafe { cl_upload(d, &b, *p, *bytes, limits.chunk_bytes)? } {
+            if let Some(e) = unsafe { q_upload(d, &b, *p, *bytes, limits.chunk_bytes)? } {
                 last = Some(e);
             }
             owned.push(b);
         }
     }
     let mut own = owned.iter();
-    let bufs: Vec<&ClBuffer> = ins
+    let bufs: Vec<&G::Buf> = ins
         .iter()
         .map(|i| match i {
             In::Host(..) => Ok(own.next().unwrap()),
-            In::Dev(a) => match &a.storage {
-                Storage::Cl { buf, .. } => Ok(buf),
-                _ => Err(other_kind()),
-            },
+            In::Dev(a) => G::resident(&a.storage)
+                .map(|(b, _)| b)
+                .ok_or_else(other_kind),
         })
         .collect::<R<_>>()?;
     // Entrées d'un calcul précédent sur ce périphérique : attendre qu'elles soient prêtes.
-    let mut waits: Vec<&ClEvent> = last.iter().collect();
+    let mut waits: Vec<&G::Ev> = last.iter().collect();
     for i in ins {
         if let In::Dev(a) = i {
-            if let Storage::Cl { done, .. } = &a.storage {
+            if let Some((_, done)) = G::resident(&a.storage) {
                 waits.push(done);
             }
         }
     }
-    let obufs: Vec<ClBuffer> = k
+    let obufs: Vec<G::Buf> = k
         .outputs
         .iter()
         .map(|t| d.alloc(n * t.size()).map_err(dev_err))
         .collect::<R<_>>()?;
-    let orefs: Vec<&ClBuffer> = obufs.iter().collect();
+    let orefs: Vec<&G::Buf> = obufs.iter().collect();
     let done = Arc::new(
-        d.launch(ck, &cl_args(k, &bufs, scalars, &orefs, n as u32), n, &waits)
+        d.launch(ck, &gargs(k, &bufs, scalars, &orefs, n as u32), n, &waits)
             .map_err(dev_err)?,
     );
     Ok((
         obufs
             .into_iter()
-            .map(|buf| Storage::Cl {
-                buf,
-                done: done.clone(),
-            })
+            .map(|buf| G::storage(buf, done.clone()))
             .collect(),
         Mode::Resident,
         false,
@@ -975,9 +1002,9 @@ unsafe fn cl_resident(
 /// files ; pendant le calcul du bloc k, le bloc k+1 est envoyé et le bloc k−1 revient dans sa
 /// destination finale.
 #[allow(clippy::too_many_arguments)]
-unsafe fn cl_flux(
-    d: &ClDevice,
-    ck: &ClKernel,
+unsafe fn q_flux<G: Gpu>(
+    d: &G,
+    ck: &G::Kern,
     k: &Kernel,
     ins: &[In],
     arrays: &[Scalar],
@@ -988,17 +1015,17 @@ unsafe fn cl_flux(
 ) -> Planned {
     const SLOTS: usize = 3;
     let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
-    let max_alloc = d.info.max_buffer_bytes.unwrap_or(u64::MAX) as usize;
+    let max_alloc = d.info().max_buffer_bytes.unwrap_or(u64::MAX) as usize;
     let chunk = (limits.chunk_bytes.min(max_alloc) / elem_max(arrays, &out_elems)).clamp(1, n);
-    struct Slot {
-        ins: Vec<ClBuffer>,
-        pins: Vec<Option<Pinned>>,
-        outs: Vec<ClBuffer>,
-        pin_outs: Vec<Pinned>,
+    struct Slot<G: Gpu> {
+        ins: Vec<G::Buf>,
+        pins: Vec<Option<G::Pin>>,
+        outs: Vec<G::Buf>,
+        pin_outs: Vec<G::Pin>,
         /// Bloc en cours : début, longueur, une lecture par sortie.
-        busy: Option<(usize, usize, Vec<ClEvent>)>,
+        busy: Option<(usize, usize, Vec<G::Ev>)>,
     }
-    let mut ring: Vec<Slot> = Vec::new();
+    let mut ring: Vec<Slot<G>> = Vec::new();
     for _ in 0..SLOTS.min(n.div_ceil(chunk)) {
         let mut sins = Vec::new();
         let mut pins = Vec::new();
@@ -1023,14 +1050,14 @@ unsafe fn cl_flux(
             busy: None,
         });
     }
-    let finish = |s: &mut Slot| -> R<()> {
+    let finish = |s: &mut Slot<G>| -> R<()> {
         if let Some((start, len, evs)) = s.busy.take() {
             for (o, e) in evs.iter().enumerate() {
-                wait(e).map_err(dev_err)?;
+                G::wait(e).map_err(dev_err)?;
                 let sz = out_elems[o];
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        s.pin_outs[o].ptr,
+                        G::pin_ptr(&s.pin_outs[o]),
                         outs[o].add(start * sz),
                         len * sz,
                     )
@@ -1046,39 +1073,43 @@ unsafe fn cl_flux(
         let slot = i % ring.len();
         finish(&mut ring[slot])?;
         let s = &mut ring[slot];
-        let mut writes: Vec<ClEvent> = Vec::new();
+        let mut writes: Vec<G::Ev> = Vec::new();
         for (a, (input, ty)) in ins.iter().zip(arrays).enumerate() {
             let bytes = len * ty.size();
             match input {
                 In::Host(p, _) => {
                     let pin = s.pins[a].as_ref().unwrap();
                     unsafe {
-                        std::ptr::copy_nonoverlapping(p.add(start * ty.size()), pin.ptr, bytes)
+                        std::ptr::copy_nonoverlapping(
+                            p.add(start * ty.size()),
+                            G::pin_ptr(pin),
+                            bytes,
+                        )
                     };
                     writes.push(
-                        unsafe { d.write_at(&s.ins[a], 0, pin.ptr, bytes, &[]) }
+                        unsafe { d.write_at(&s.ins[a], 0, G::pin_ptr(pin), bytes, &[]) }
                             .map_err(dev_err)?,
                     );
                 }
-                In::Dev(arr) => match &arr.storage {
-                    Storage::Cl { buf, done } => {
+                In::Dev(arr) => match G::resident(&arr.storage) {
+                    Some((buf, done)) => {
                         writes.push(
                             d.copy_at(buf, start * ty.size(), &s.ins[a], 0, bytes, &[done])
                                 .map_err(dev_err)?,
                         );
                     }
-                    _ => return Err(other_kind()),
+                    None => return Err(other_kind()),
                 },
             }
         }
         d.flush().map_err(dev_err)?;
-        let refs: Vec<&ClBuffer> = s.ins.iter().collect();
-        let orefs: Vec<&ClBuffer> = s.outs.iter().collect();
-        let wait_w: Vec<&ClEvent> = writes.iter().collect();
+        let refs: Vec<&G::Buf> = s.ins.iter().collect();
+        let orefs: Vec<&G::Buf> = s.outs.iter().collect();
+        let wait_w: Vec<&G::Ev> = writes.iter().collect();
         let ek = d
             .launch(
                 ck,
-                &cl_args(k, &refs, scalars, &orefs, len as u32),
+                &gargs(k, &refs, scalars, &orefs, len as u32),
                 len,
                 &wait_w,
             )
@@ -1086,7 +1117,7 @@ unsafe fn cl_flux(
         let mut reads = Vec::new();
         for (o, e) in out_elems.iter().enumerate() {
             reads.push(
-                unsafe { d.read_at(&s.outs[o], 0, s.pin_outs[o].ptr, len * e, &[&ek]) }
+                unsafe { d.read_at(&s.outs[o], 0, G::pin_ptr(&s.pin_outs[o]), len * e, &[&ek]) }
                     .map_err(dev_err)?,
             );
         }
@@ -1377,14 +1408,14 @@ unsafe fn rows_cl_direct(
         pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
             let cells = l * rows.rest;
-            let e = d
-                .launch(
-                    ck,
-                    &cl_args(k, &refs, &sc, &orefs, cells as u32),
-                    cells,
-                    &[],
-                )
-                .map_err(dev_err)?;
+            let e = Gpu::launch(
+                d,
+                ck,
+                &gargs(k, &refs, &sc, &orefs, cells as u32),
+                cells,
+                &[],
+            )
+            .map_err(dev_err)?;
             if sync {
                 wait(&e).map_err(dev_err)?;
             }
@@ -1417,9 +1448,9 @@ unsafe fn rows_cl_direct(
 /// Kernel avec index, OpenCL sur GPU dédié : Résident (tout tient) ou par blocs de lignes, avec
 /// deux emplacements pour recouvrir le retour d'un bloc par le calcul du suivant.
 #[allow(clippy::too_many_arguments)]
-unsafe fn rows_cl(
-    d: &ClDevice,
-    ck: &ClKernel,
+unsafe fn rows_q<G: Gpu>(
+    d: &G,
+    ck: &G::Kern,
     k: &Kernel,
     rows: &Rows,
     ins: &[In],
@@ -1429,10 +1460,10 @@ unsafe fn rows_cl(
     fits: bool,
     budget: u64,
 ) -> Planned {
-    let max_buf = max_buffer(d.info.max_buffer_bytes);
+    let max_buf = max_buffer(d.info().max_buffer_bytes);
     // Entrées entières (toutes si l'appel tient, sinon celles lues à n'importe quelle ligne).
-    let mut owned: Vec<Option<ClBuffer>> = Vec::new();
-    let mut waits_owned: Vec<ClEvent> = Vec::new();
+    let mut owned: Vec<Option<G::Buf>> = Vec::new();
+    let mut waits_owned: Vec<G::Ev> = Vec::new();
     let mut resident_bytes = 0u64;
     for (i, input) in ins.iter().enumerate() {
         let keep_whole = fits || !rows.chunked[i];
@@ -1445,11 +1476,11 @@ unsafe fn rows_cl(
                         i,
                         *bytes,
                         budget.min(max_buf as u64),
-                        &d.info.name,
+                        &d.info().name,
                     ));
                 }
                 let b = d.alloc(*bytes).map_err(dev_err)?;
-                if let Some(e) = unsafe { cl_upload(d, &b, *p, *bytes, limits.chunk_bytes)? } {
+                if let Some(e) = unsafe { q_upload(d, &b, *p, *bytes, limits.chunk_bytes)? } {
                     waits_owned.push(e);
                 }
                 Some(b)
@@ -1457,20 +1488,17 @@ unsafe fn rows_cl(
             _ => None,
         });
     }
-    let dev_buf = |i: usize| -> R<(&ClBuffer, &ClEvent)> {
+    let dev_buf = |i: usize| -> R<(&G::Buf, &G::Ev)> {
         match &ins[i] {
-            In::Dev(a) => match &a.storage {
-                Storage::Cl { buf, done } => Ok((buf, &**done)),
-                _ => Err(other_kind()),
-            },
+            In::Dev(a) => G::resident(&a.storage).ok_or_else(other_kind),
             In::Host(..) => unreachable!(),
         }
     };
     let mut pacer = Pacer::default();
 
     if fits {
-        let mut refs: Vec<&ClBuffer> = Vec::new();
-        let mut waits: Vec<&ClEvent> = waits_owned.iter().collect();
+        let mut refs: Vec<&G::Buf> = Vec::new();
+        let mut waits: Vec<&G::Ev> = waits_owned.iter().collect();
         for (i, o) in owned.iter().enumerate() {
             match o {
                 Some(b) => refs.push(b),
@@ -1481,22 +1509,22 @@ unsafe fn rows_cl(
                 }
             }
         }
-        let obufs: Vec<ClBuffer> = rows
+        let obufs: Vec<G::Buf> = rows
             .out_row
             .iter()
             .map(|rb| d.alloc(rows.total * rb).map_err(dev_err))
             .collect::<R<_>>()?;
-        let orefs: Vec<&ClBuffer> = obufs.iter().collect();
-        let mut last: Option<ClEvent> = None;
+        let orefs: Vec<&G::Buf> = obufs.iter().collect();
+        let mut last: Option<G::Ev> = None;
         pacer.run(0, rows.total, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, 0, s * rows.rest);
             let cells = l * rows.rest;
-            let w: &[&ClEvent] = if last.is_none() { &waits } else { &[] };
+            let w: &[&G::Ev] = if last.is_none() { &waits } else { &[] };
             let e = d
-                .launch(ck, &cl_args(k, &refs, &sc, &orefs, cells as u32), cells, w)
+                .launch(ck, &gargs(k, &refs, &sc, &orefs, cells as u32), cells, w)
                 .map_err(dev_err)?;
             if sync {
-                wait(&e).map_err(dev_err)?;
+                G::wait(&e).map_err(dev_err)?;
             }
             last = Some(e);
             Ok(())
@@ -1506,16 +1534,10 @@ unsafe fn rows_cl(
         let done = Arc::new(last.unwrap());
         let mut storages: Vec<Storage> = obufs
             .into_iter()
-            .map(|buf| Storage::Cl {
-                buf,
-                done: done.clone(),
-            })
+            .map(|buf| G::storage(buf, done.clone()))
             .collect();
         for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
-            storages.push(Storage::Cl {
-                buf: owned[i].take().unwrap(),
-                done: done.clone(),
-            });
+            storages.push(G::storage(owned[i].take().unwrap(), done.clone()));
         }
         return Ok((storages, Mode::Resident, false));
     }
@@ -1533,12 +1555,12 @@ unsafe fn rows_cl(
         .min(room / (2 * rows.sum_row()))
         .min(by_buf)
         .clamp(1, rows.total);
-    struct Slot {
-        ins: Vec<Option<ClBuffer>>,
-        outs: Vec<ClBuffer>,
-        pending: Option<(usize, usize, ClEvent)>,
+    struct Slot<G: Gpu> {
+        ins: Vec<Option<G::Buf>>,
+        outs: Vec<G::Buf>,
+        pending: Option<(usize, usize, G::Ev)>,
     }
-    let mut slots: Vec<Slot> = Vec::new();
+    let mut slots: Vec<Slot<G>> = Vec::new();
     for _ in 0..2.min(rows.total.div_ceil(br)) {
         slots.push(Slot {
             ins: rows
@@ -1555,15 +1577,15 @@ unsafe fn rows_cl(
             pending: None,
         });
     }
-    let drain = |s: &mut Slot| -> R<()> {
+    let drain = |s: &mut Slot<G>| -> R<()> {
         if let Some((r0, len, done)) = s.pending.take() {
             // Le calcul du bloc doit être fini avant de réutiliser l'emplacement, même sans
             // sortie à rapatrier (mode explicite : seuls les gs.Out, entiers, sont écrits).
-            wait(&done).map_err(dev_err)?;
+            G::wait(&done).map_err(dev_err)?;
             for (o, buf) in s.outs.iter().enumerate() {
                 let rb = rows.out_row[o];
                 unsafe {
-                    cl_download(
+                    q_download(
                         d,
                         buf,
                         Some(&done),
@@ -1578,7 +1600,7 @@ unsafe fn rows_cl(
     };
     for (b, (r0, len)) in rows.blocks(br).into_iter().enumerate() {
         let cur = b % slots.len();
-        let mut writes: Vec<ClEvent> = Vec::new();
+        let mut writes: Vec<G::Ev> = Vec::new();
         for (i, input) in ins.iter().enumerate() {
             if !rows.chunked[i] {
                 continue;
@@ -1588,7 +1610,7 @@ unsafe fn rows_cl(
             match input {
                 In::Host(p, _) => {
                     if let Some(e) =
-                        unsafe { cl_upload(d, dst, p.add(r0 * rb), len * rb, limits.chunk_bytes)? }
+                        unsafe { q_upload(d, dst, p.add(r0 * rb), len * rb, limits.chunk_bytes)? }
                     {
                         writes.push(e);
                     }
@@ -1603,30 +1625,30 @@ unsafe fn rows_cl(
             }
         }
         d.flush().map_err(dev_err)?;
-        let mut waits: Vec<&ClEvent> = writes.iter().chain(&waits_owned).collect();
+        let mut waits: Vec<&G::Ev> = writes.iter().chain(&waits_owned).collect();
         for i in 0..ins.len() {
             if !rows.chunked[i] && owned[i].is_none() {
                 waits.push(dev_buf(i)?.1);
             }
         }
-        let refs: Vec<&ClBuffer> = (0..ins.len())
+        let refs: Vec<&G::Buf> = (0..ins.len())
             .map(|i| match (&slots[cur].ins[i], &owned[i]) {
                 (Some(b), _) | (None, Some(b)) => Ok(b),
                 (None, None) => dev_buf(i).map(|(b, _)| b),
             })
             .collect::<R<_>>()?;
-        let orefs: Vec<&ClBuffer> = slots[cur].outs.iter().collect();
-        let mut last: Option<ClEvent> = None;
+        let orefs: Vec<&G::Buf> = slots[cur].outs.iter().collect();
+        let mut last: Option<G::Ev> = None;
         pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
             let cells = l * rows.rest;
-            let w: &[&ClEvent] = if last.is_none() { &waits } else { &[] };
+            let w: &[&G::Ev] = if last.is_none() { &waits } else { &[] };
             let e = d
-                .launch(ck, &cl_args(k, &refs, &sc, &orefs, cells as u32), cells, w)
+                .launch(ck, &gargs(k, &refs, &sc, &orefs, cells as u32), cells, w)
                 .map_err(dev_err)?;
             d.flush().map_err(dev_err)?;
             if sync {
-                wait(&e).map_err(dev_err)?;
+                G::wait(&e).map_err(dev_err)?;
             }
             last = Some(e);
             Ok(())
@@ -1648,7 +1670,7 @@ unsafe fn rows_cl(
     for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
         let buf = owned[i].as_ref().unwrap();
         unsafe {
-            cl_download(
+            q_download(
                 d,
                 buf,
                 None,

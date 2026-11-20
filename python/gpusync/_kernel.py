@@ -136,7 +136,7 @@ class Kernel:
         return target, msg
 
     def source(self, target: str = "opencl") -> str:
-        """Code généré : "opencl", "wgsl" ou "ir"."""
+        """Code généré : "cuda", "opencl", "wgsl" ou "ir"."""
         return self._ir.source(target)
 
     def stream(self, source, *rest, device=None):

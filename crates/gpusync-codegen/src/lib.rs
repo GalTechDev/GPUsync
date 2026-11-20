@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use gpusync_ir::*;
 
-pub use opencl::emit_opencl;
+pub use opencl::{emit_cuda, emit_opencl};
 pub use wgsl::{WGSL_WORKGROUP_SIZE, emit_wgsl, has_f64_params};
 
 /// Code généré, prêt à compiler.

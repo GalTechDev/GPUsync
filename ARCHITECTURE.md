@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M5 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M6 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -14,6 +14,42 @@
 | M3 Out-of-core avec index | ✅ grille découpée par blocs de lignes (premier axe de la sortie) dans tous les modes ; entrées lues seulement à la ligne courante découpées, les autres gardées entières ; lancements cadencés (~0,1 s chacun) | Mac : 172 tests ; PC : 263 tests ; essais à gros volume ci-dessous |
 | M4 Async et interop | ✅ `await y`, `await kernel(...)`, `mean, std = await stats(x)` ; appels depuis plusieurs threads (`asyncio.to_thread`) ; DLPack (export et import, mémoire hôte) ; `y.save("r.npy")` par blocs ; même code en script, asyncio et Jupyter (notebook exécuté par nbclient) ; cache disque étudié et écarté (mesures ci-dessous) | Mac : 196 tests ; PC : 301 tests |
 | M5 Mode explicite | ✅ `@gs.kernel(grid="x")` ou `grid=("n", "n")`, sorties `gs.Out[gs.i32[10]]` (valeur de départ : `gs.Out[gs.f32["m"], gs.inf]`), `gs.atomic_add` / `atomic_min` / `atomic_max` en i32, u32, f32 (f32 émulé par comparaison-échange en OpenCL 1.2 et en WGSL), indices multiples `(a, b)`, accumulation avec `out=` ; écriture hors limites jamais faite et signalée (`gs.OutOfBounds`) | Mac : 239 tests ; PC : 364 tests |
+| M6 CUDA | ✅ émetteur CUDA C (même générateur qu'OpenCL C, autre dialecte), backend CUDA à liaisons dynamiques maison (driver + NVRTC), moteur de transferts commun à OpenCL et CUDA (trait `Gpu`), réserve de buffers, cache disque du PTX, NVRTC par le toolkit ou `pip install nvidia-cuda-nvrtc-cu12` | PC : 430 tests, dont les 61 tests différentiels par périphérique sur `cuda:0` (parité) ; Mac : 240 tests (CUDA absent, signalé) |
+
+#### Mesures M6 (RTX 4080 SUPER, à chaud ; mêmes scripts qu'aux jalons précédents)
+
+| | `cuda:0` | `opencl:0` | `vulkan:0` |
+|---|---|---|---|
+| surcoût par appel, 1000 éléments (`tools/probe/cuda_bench.py`) | **0,097 ms** | 0,140 ms | 0,164 ms |
+| 10 M éléments, aller-retour | 11,3 ms | 13,9 ms | 11,2 ms |
+| DTW 4000 × 4000, t = 64 | 419 ms | 423 ms | 1129 ms |
+| 24 Gio en RAM, mode par blocs (`bench_m15`) | 7,1 s, 0,60 Gio en plus | 5,9 s, 0,57 Gio | 7,3 s, 0,31 Gio |
+| `pairwise_dist` 72 000², sortie 19,3 Gio (`bench_m3`) | 3,9 s, 0,18 Gio en plus | 3,9 s | 3,8 s |
+| somme par case f32, 100 M (`bench_m5`) | **66 ms** (atomique natif) | 363 ms | 472 ms |
+| histogramme 16 cases, 100 M | 48 ms | 50 ms | 59 ms |
+| 1er appel d'un processus (`bench_m4`) : sans cache / avec cache PTX | 152 ms / 62 ms | 58 ms / 68 ms | 44 ms / 48 ms |
+
+#### Décisions et constats de M6
+
+- **Liaisons maison plutôt que `cudarc`** (écart au plan) : `cudarc` panique quand une bibliothèque manque,
+  fige à la compilation les noms de bibliothèques d'une version de CUDA, et ne cherche ni dans `CUDA_PATH` ni
+  dans les roues pip. Une trentaine de fonctions suffisent (driver et NVRTC), chargées par `libloading` :
+  aucune panique, une erreur claire, rien à installer à la compilation (le crate compile aussi sur macOS).
+- **NVRTC** n'est pas dans le driver. Recherche : `GPUSYNC_NVRTC`, roues pip (`nvidia-cuda-nvrtc-cu12`,
+  dossiers transmis par le package Python), toolkit (`CUDA_PATH*`), PATH. S'il manque, le backend CUDA est
+  indisponible avec la commande `pip install` à lancer, et le choix automatique passe à Vulkan. Testé : sans
+  toolkit, avec la roue seule.
+- **Moteur commun** : les modes Résident, par blocs et par blocs de lignes sont écrits une fois, pour OpenCL et
+  CUDA (trait interne `Gpu` : allocation, tampons épinglés, copies et lancements chaînés par événements).
+- **Surcoût par appel** : 0,325 ms au départ, à cause de `cuMemAlloc` / `cuMemFree` (qui synchronise tout le
+  GPU) à chaque appel. Une réserve de buffers (rendus avec un événement par stream, réutilisés une fois ces
+  événements passés) le ramène à 0,097 ms, le plus bas des trois backends sur la RTX.
+- **Cache disque du PTX** : la compilation NVRTC coûte ~90 ms par kernel et par processus ; le PTX est gardé
+  dans le cache utilisateur (`GPUSYNC_CACHE_DIR`, `GPUSYNC_CACHE=0` pour le couper), le driver mettant déjà
+  en cache la suite. Fichier abîmé : recompilé sans erreur.
+- **Non fait à M6** : mode Direct pour CUDA (Jetson, mémoire partagée : traité comme un GPU dédié, aucun
+  matériel pour tester) ; export DLPack de buffers CUDA (le résultat est exporté depuis la mémoire hôte) ;
+  `cuMemHostRegister` sur les tableaux NumPy (le `memcpy` vers l'anneau épinglé reste, comme en OpenCL).
 
 #### Mesures M5 (`tools/bench_m5.py`, 100 M éléments, à chaud, résultat lu et vérifié)
 
@@ -65,7 +101,7 @@ l'UHD 770 passe de 506 ms à 7,8 ms dans un deuxième processus, NVIDIA de même
 
 - **Cache disque des kernels : non fait.** Les mesures ci-dessus montrent qu'il ne ferait rien gagner :
   la compilation est déjà mise en cache par les drivers, et le reste du premier appel est l'ouverture du
-  périphérique. À reprendre avec CUDA (M6) si NVRTC s'avère lent.
+  périphérique. Repris à M6 pour CUDA : NVRTC coûte ~90 ms par kernel, d'où un cache disque du PTX.
 - **`await`** : un appel met toujours le travail en file de façon synchrone (les erreurs arrivent à l'appel,
   y compris dans Jupyter) ; `await y` attend la fin et la lecture sur un thread de l'exécuteur asyncio (GIL
   libéré), puis rend `y`. Plusieurs sorties : un tuple attendable (`Results`). Ce qui s'exécute dans l'appel
@@ -708,7 +744,7 @@ trait Backend {
 Bibliothèques Rust envisagées (versions et fonctionnalités à vérifier au démarrage du projet) :
 - wgpu : `wgpu`.
 - OpenCL : `opencl3` / `cl3`, avec **chargement dynamique** de la bibliothèque OpenCL : si elle est absente, le backend est juste indisponible.
-- CUDA : `cudarc` (chargement dynamique de `libcuda` et NVRTC).
+- CUDA : liaisons maison, chargement dynamique de `libcuda` / `nvcuda` et de NVRTC (M6 : `cudarc` écarté).
 
 ### 8.3 Exécution d'un appel
 
@@ -782,8 +818,8 @@ Mesuré à M1 : wgpu copie et consomme 3 à 5 fois la taille des données. La r�
 ### 8.6 Cache de compilation
 
 - En mémoire, par processus.
-- Sur disque : écarté à M4 après mesure (les drivers mettent déjà les binaires en cache ; compilation de 0,1
-  à 2 ms). À reconsidérer pour CUDA (M6).
+- Sur disque : écarté à M4 pour OpenCL et wgpu après mesure (les drivers mettent déjà les binaires en cache ;
+  compilation de 0,1 à 2 ms). CUDA (M6) : cache du PTX produit par NVRTC (152 → 62 ms au premier appel).
 
 ---
 
@@ -934,7 +970,7 @@ la taille de la grille.
 | **M3** Out-of-core avec index | ✅ découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes ; lancements cadencés | `pairwise_dist` sur des données dont la sortie dépasse la VRAM (19,3 Gio sur la RTX, 3,8 s) |
 | **M4** Async et interop | ✅ `await`, DLPack, `y.save()`, appels multi-threads ; cache disque écarté après mesure | même script en synchrone, async et Jupyter (testé, nbclient) |
 | **M5** Mode explicite | ✅ `grid=`, `gs.Out`, atomiques (dont émulation OpenCL 1.2 et WGSL), bornes vérifiées | histogramme correct sur toutes les cibles (6 périphériques) |
-| **M6** CUDA | émetteur CUDA C, backend `cudarc` | parité des tests avec les autres backends sur NVIDIA |
+| **M6** CUDA | ✅ émetteur CUDA C, backend CUDA (liaisons maison, NVRTC), moteur commun avec OpenCL, cache PTX | parité des tests avec les autres backends sur NVIDIA (61 tests différentiels sur `cuda:0`) |
 | **M7** Avancé | multi-GPU, plusieurs streams, fusion de kernels élément par élément | à définir avec des mesures |
 
 ---

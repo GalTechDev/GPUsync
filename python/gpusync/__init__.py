@@ -11,10 +11,31 @@
     y = normalize(x, x.mean(), x.std())     # gs.Array : calcul lancé sur le GPU
     print(y[:5])                            # attend la fin et rapatrie
 
-État : jalon M5 (élément par élément, avec index, mode explicite à atomiques ; sans limite de taille ; await, DLPack). Voir ARCHITECTURE.md.
+État : jalon M6 (élément par élément, avec index, mode explicite à atomiques ; sans limite de taille ; await, DLPack ; CUDA). Voir ARCHITECTURE.md.
 """
 
-from . import _core
+def _nvrtc_dirs() -> None:
+    """Dossiers des roues pip NVIDIA (`nvidia-cuda-nvrtc-cu12`…) où le backend CUDA cherche NVRTC,
+    en plus du toolkit CUDA et du PATH. Lu au premier kernel compilé en CUDA."""
+    import glob
+    import os
+    import sys
+
+    if "GPUSYNC_NVRTC_DIRS" in os.environ:  # choisi par l'utilisateur (vide : aucune roue)
+        return
+    found = []
+    for base in sys.path:
+        for pattern in ("nvidia/*/bin", "nvidia/*/lib", "nvidia/*/bin/*", "nvidia/*/lib/*"):
+            for d in glob.glob(os.path.join(base or ".", pattern)):
+                if os.path.isdir(d) and glob.glob(os.path.join(d, "*nvrtc*")):
+                    found.append(d)
+    if found:
+        os.environ["GPUSYNC_NVRTC_DIRS"] = os.pathsep.join(found)
+
+
+_nvrtc_dirs()
+
+from . import _core  # noqa: E402
 from ._array import Array
 from ._core import (
     BackendStatus,

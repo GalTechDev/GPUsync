@@ -13,6 +13,7 @@ repository = "https://github.com/GalTechDev/GPUsync"
 gpusync-runtime = { path = "crates/gpusync-runtime" }
 gpusync-backend-opencl = { path = "crates/gpusync-backend-opencl" }
 gpusync-backend-wgpu = { path = "crates/gpusync-backend-wgpu" }
+gpusync-backend-cuda = { path = "crates/gpusync-backend-cuda" }
 gpusync-ir = { path = "crates/gpusync-ir" }
 gpusync-frontend = { path = "crates/gpusync-frontend" }
 gpusync-codegen = { path = "crates/gpusync-codegen" }
