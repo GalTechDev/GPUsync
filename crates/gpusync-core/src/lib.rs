@@ -112,6 +112,17 @@ impl Device {
         }
     }
 
+    /// Même périphérique ouvert (pas seulement le même identifiant : un périphérique perdu par le
+    /// driver est rouvert sous le même identifiant).
+    pub fn same(&self, other: &Device) -> bool {
+        match (self, other) {
+            (Device::Cl(a), Device::Cl(b)) => Arc::ptr_eq(a, b),
+            (Device::Wg(a), Device::Wg(b)) => Arc::ptr_eq(a, b),
+            (Device::Cpu, Device::Cpu) => true,
+            _ => false,
+        }
+    }
+
     pub fn info(&self) -> DeviceInfo {
         match self {
             Device::Cl(d) => d.info.clone(),
@@ -197,6 +208,7 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
                 d.compile(
                     &src.code,
                     k.array_params().count(),
+                    k.outputs.len(),
                     gpusync_codegen::has_f64_params(k),
                 )
                 .map_err(dev_err)?,

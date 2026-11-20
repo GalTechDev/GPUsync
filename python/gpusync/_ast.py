@@ -12,6 +12,7 @@ import json
 import math
 import textwrap
 import types
+import typing
 
 from ._types import ArrayType, DType
 
@@ -56,8 +57,25 @@ def _const_json(value):
     return None
 
 
+def return_types(func, ret) -> tuple[list, bool]:
+    """Sorties déclarées : ([ArrayType], tuple ?) pour `-> gs.f32[:]` ou `-> (gs.f32[:], gs.i32[:])`."""
+    if isinstance(ret, ArrayType):
+        return [ret], False
+    items = None
+    if isinstance(ret, tuple):
+        items = ret
+    elif typing.get_origin(ret) is tuple:
+        items = typing.get_args(ret)
+    if items and all(isinstance(r, ArrayType) for r in items):
+        return list(items), True
+    raise KernelDeclarationError(
+        f"'{func.__name__}' : précisez le type de sortie, ex. -> gs.f32[:] (élément par élément), "
+        '-> gs.f32["n", "n"] (avec gs.index()) ou -> (gs.f32[:], gs.f32[:]) (plusieurs sorties)'
+    )
+
+
 def kernel_spec(func) -> tuple[dict, list]:
-    """Renvoie (spec JSON pour le frontend, liste des paramètres [(nom, kind, DType)])."""
+    """Renvoie (spec JSON pour le frontend, liste des paramètres [(nom, kind, DType, dims)])."""
     try:
         lines, start = inspect.getsourcelines(func)
     except (OSError, TypeError) as e:
@@ -80,20 +98,16 @@ def kernel_spec(func) -> tuple[dict, list]:
     for arg in a.args:
         ann = annotations.get(arg.arg)
         if isinstance(ann, ArrayType):
-            params.append((arg.arg, "array", ann.dtype))
+            params.append((arg.arg, "array", ann.dtype, ann.dims))
         elif isinstance(ann, DType):
-            params.append((arg.arg, "scalar", ann))
+            params.append((arg.arg, "scalar", ann, None))
         elif ann is None:
             raise KernelDeclarationError(
                 f"paramètre '{arg.arg}' sans type : annotez-le, ex. {arg.arg}: gs.f32[:] (tableau) ou {arg.arg}: gs.f32 (scalaire)"
             )
         else:
             raise KernelDeclarationError(f"paramètre '{arg.arg}' : type {ann!r} non supporté (gs.f32[:], gs.f32, gs.i32…)")
-    ret = annotations.get("return")
-    if not isinstance(ret, ArrayType):
-        raise KernelDeclarationError(
-            f"'{func.__name__}' : précisez le type de sortie, ex. -> gs.f32[:] (kernel élément par élément)"
-        )
+    outs, _ = return_types(func, annotations.get("return"))
 
     # Noms libres : constantes numériques globales et modules gs / math.
     import gpusync
@@ -118,8 +132,11 @@ def kernel_spec(func) -> tuple[dict, list]:
         "name": func.__name__,
         "filename": inspect.getsourcefile(func) or "<inconnu>",
         "line_offset": start - 1,
-        "params": [{"name": n, "kind": k, "dtype": d.name} for n, k, d in params],
-        "output": ret.dtype.name,
+        "params": [
+            {"name": n, "kind": k, "dtype": d.name, **({"dims": list(dims)} if k == "array" else {})}
+            for n, k, d, dims in params
+        ],
+        "outputs": [{"dtype": o.dtype.name, "dims": list(o.dims)} for o in outs],
         "body": _dump(fdef.body),
         "constants": constants,
         "modules": modules,
@@ -127,7 +144,8 @@ def kernel_spec(func) -> tuple[dict, list]:
     return spec, params
 
 
-def kernel_json(func) -> tuple[str, list, DType]:
+def kernel_json(func) -> tuple[str, list, list, bool]:
+    """(spec JSON, paramètres, sorties [ArrayType], la sortie est-elle un tuple ?)."""
     spec, params = kernel_spec(func)
-    ret = inspect.get_annotations(func, eval_str=True)["return"]
-    return json.dumps(spec), params, ret.dtype
+    outs, is_tuple = return_types(func, inspect.get_annotations(func, eval_str=True).get("return"))
+    return json.dumps(spec), params, outs, is_tuple

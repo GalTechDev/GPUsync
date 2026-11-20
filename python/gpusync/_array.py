@@ -75,6 +75,22 @@ class Array:
     def __iter__(self):
         return iter(self.numpy())
 
+    # ── réductions : calculées sur l'hôte par NumPy, après lecture (§4.6) ──
+    def sum(self, axis=None, **kw):
+        return self.numpy().sum(axis=axis, **kw)
+
+    def mean(self, axis=None, **kw):
+        return self.numpy().mean(axis=axis, **kw)
+
+    def min(self, axis=None, **kw):
+        return self.numpy().min(axis=axis, **kw)
+
+    def max(self, axis=None, **kw):
+        return self.numpy().max(axis=axis, **kw)
+
+    def std(self, axis=None, **kw):
+        return self.numpy().std(axis=axis, **kw)
+
     def __repr__(self) -> str:
         body = np.array2string(self.numpy(), separator=", ", prefix="gs.Array(")
         return f"gs.Array({body}, dtype={self.dtype}, device='{self.device}')"

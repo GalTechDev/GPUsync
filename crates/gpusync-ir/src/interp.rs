@@ -15,11 +15,11 @@ enum Flow {
     Normal,
     Break,
     Continue,
-    Return(Const),
+    Return(Vec<Const>),
 }
 
-/// Exécute `kernel` sur `n` éléments ; `out` reçoit `n` valeurs du type de sortie.
-pub fn run(kernel: &Kernel, n: usize, args: &[Arg], out: &mut [u8]) -> Result<(), String> {
+/// Exécute `kernel` sur une grille de `n` threads ; `outs[k]` reçoit `n` valeurs de la sortie `k`.
+pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> Result<(), String> {
     if args.len() != kernel.params.len() {
         return Err(format!(
             "{} argument(s) attendu(s), {} reçu(s)",
@@ -27,26 +27,66 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], out: &mut [u8]) -> Result<()
             args.len()
         ));
     }
-    for (p, a) in kernel.params.iter().zip(args) {
-        if let (ParamKind::Array, Arg::Array(bytes)) = (p.kind, a) {
-            if bytes.len() < n * p.ty.size() {
-                return Err(format!("tableau '{}' trop court", p.name));
+    if outs.len() != kernel.outputs.len() {
+        return Err(format!(
+            "{} sortie(s) attendue(s), {} reçue(s)",
+            kernel.outputs.len(),
+            outs.len()
+        ));
+    }
+    if kernel.grid == Grid::Elementwise {
+        for (p, a) in kernel.params.iter().zip(args) {
+            if let (ParamKind::Array, Arg::Array(bytes)) = (p.kind, a) {
+                if bytes.len() < n * p.ty.size() {
+                    return Err(format!("tableau '{}' trop court", p.name));
+                }
             }
         }
     }
-    let osize = kernel.output.size();
-    if out.len() < n * osize {
-        return Err("tableau de sortie trop court".into());
+    for (o, t) in outs.iter().zip(&kernel.outputs) {
+        if o.len() < n * t.size() {
+            return Err("tableau de sortie trop court".into());
+        }
     }
+    // Taille des axes de la grille (kernels avec index).
+    let axes: Vec<usize> = match &kernel.grid {
+        Grid::Elementwise => vec![],
+        Grid::Indexed { axes } => axes
+            .iter()
+            .map(|p| match args[*p] {
+                Arg::Scalar(c) => match convert(c, Scalar::I32) {
+                    Const::I32(v) => Ok(v.max(0) as usize),
+                    _ => Err("dimension invalide".to_string()),
+                },
+                _ => Err("dimension invalide".to_string()),
+            })
+            .collect::<Result<_, _>>()?,
+    };
     let mut locals: Vec<Const> = kernel.locals.iter().map(|l| zero(l.ty)).collect();
+    let mut arrays: Vec<Vec<Const>> = kernel
+        .locals
+        .iter()
+        .map(|l| vec![zero(l.ty); l.len.unwrap_or(0) as usize])
+        .collect();
     for i in 0..n {
+        for (a, l) in arrays.iter_mut().zip(&kernel.locals) {
+            a.fill(zero(l.ty)); // tableaux locaux remis à zéro pour chaque thread
+        }
+        let mut coords = vec![0usize; axes.len()];
+        let mut rest = i;
+        for a in (0..axes.len()).rev() {
+            coords[a] = rest % axes[a].max(1);
+            rest /= axes[a].max(1);
+        }
         let mut st = State {
             kernel,
             args,
             i,
+            coords,
             locals: &mut locals,
+            arrays: &mut arrays,
         };
-        let value = match st.block(&kernel.body)? {
+        let values = match st.block(&kernel.body)? {
             Flow::Return(v) => v,
             _ => {
                 return Err(format!(
@@ -55,7 +95,9 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], out: &mut [u8]) -> Result<()
                 ));
             }
         };
-        store(value, &mut out[i * osize..(i + 1) * osize]);
+        for ((v, o), t) in values.into_iter().zip(outs.iter_mut()).zip(&kernel.outputs) {
+            store(v, &mut o[i * t.size()..(i + 1) * t.size()]);
+        }
     }
     Ok(())
 }
@@ -64,7 +106,17 @@ struct State<'a, 'b> {
     kernel: &'a Kernel,
     args: &'a [Arg<'a>],
     i: usize,
+    coords: Vec<usize>,
     locals: &'b mut Vec<Const>,
+    arrays: &'b mut Vec<Vec<Const>>,
+}
+
+fn index_of(c: Const) -> i64 {
+    match c {
+        Const::I32(v) => v as i64,
+        Const::U32(v) => v as i64,
+        _ => -1,
+    }
 }
 
 impl State<'_, '_> {
@@ -133,12 +185,62 @@ impl State<'_, '_> {
             }
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::Continue),
-            Stmt::Return(e) => Ok(Flow::Return(convert(self.eval(e)?, self.kernel.output))),
+            Stmt::LocalStore {
+                local,
+                index,
+                value,
+            } => {
+                let (idx, v) = (index_of(self.eval(index)?), self.eval(value)?);
+                let len = self.arrays[*local].len();
+                if idx < 0 || idx as usize >= len {
+                    return Err(format!(
+                        "indice {idx} hors limites pour le tableau local '{}' ({len} éléments)",
+                        self.kernel.locals[*local].name
+                    ));
+                }
+                self.arrays[*local][idx as usize] = convert(v, self.kernel.locals[*local].ty);
+                Ok(Flow::Normal)
+            }
+            Stmt::Return(es) => {
+                let mut vals = Vec::with_capacity(es.len());
+                for (e, t) in es.iter().zip(&self.kernel.outputs) {
+                    vals.push(convert(self.eval(e)?, *t));
+                }
+                Ok(Flow::Return(vals))
+            }
         }
     }
 
     fn eval(&mut self, e: &Expr) -> Result<Const, String> {
         Ok(match &e.kind {
+            ExprKind::GridIndex(a) => Const::I32(self.coords[*a] as i32),
+            ExprKind::Load(p, index) => {
+                let idx = index_of(self.eval(index)?);
+                let Arg::Array(bytes) = &self.args[*p] else {
+                    return Err("lecture indexée d'un scalaire".into());
+                };
+                let ty = self.kernel.params[*p].ty;
+                let len = bytes.len() / ty.size();
+                if idx < 0 || idx as usize >= len {
+                    return Err(format!(
+                        "indice {idx} hors limites pour '{}' ({len} éléments) — thread {}",
+                        self.kernel.params[*p].name, self.i
+                    ));
+                }
+                let o = idx as usize * ty.size();
+                load(ty, &bytes[o..o + ty.size()])
+            }
+            ExprKind::LocalLoad(l, index) => {
+                let idx = index_of(self.eval(index)?);
+                let len = self.arrays[*l].len();
+                if idx < 0 || idx as usize >= len {
+                    return Err(format!(
+                        "indice {idx} hors limites pour le tableau local '{}' ({len} éléments)",
+                        self.kernel.locals[*l].name
+                    ));
+                }
+                self.arrays[*l][idx as usize]
+            }
             ExprKind::Const(c) => *c,
             ExprKind::Local(l) => self.locals[*l],
             ExprKind::Param(p) => match &self.args[*p] {
@@ -382,6 +484,10 @@ pub fn store(c: Const, out: &mut [u8]) {
 mod tests {
     use super::*;
 
+    pub(crate) fn ret(e: Expr) -> Stmt {
+        Stmt::Return(vec![e])
+    }
+
     fn e(ty: Scalar, kind: ExprKind) -> Expr {
         Expr { ty, kind }
     }
@@ -397,22 +503,29 @@ mod tests {
                     name: "x".into(),
                     kind: ParamKind::Array,
                     ty: Scalar::F32,
+                    dims: vec![],
+                    hidden: false,
                 },
                 Param {
                     name: "s".into(),
                     kind: ParamKind::Scalar,
                     ty: Scalar::F32,
+                    dims: vec![],
+                    hidden: false,
                 },
             ],
-            output: Scalar::F32,
+            outputs: vec![Scalar::F32],
+            grid: Grid::Elementwise,
             locals: vec![
                 Local {
                     name: "acc".into(),
                     ty: Scalar::F32,
+                    len: None,
                 },
                 Local {
                     name: "i".into(),
                     ty: Scalar::I32,
+                    len: None,
                 },
             ],
             body: vec![
@@ -444,7 +557,7 @@ mod tests {
                         ),
                     }],
                 },
-                Stmt::Return(e(
+                ret(e(
                     Scalar::F32,
                     ExprKind::Select(
                         Box::new(e(
@@ -470,12 +583,12 @@ mod tests {
             .iter()
             .flat_map(|v| v.to_ne_bytes())
             .collect();
-        let mut out = vec![0u8; 12];
+        let mut out = [0u8; 12];
         run(
             &k,
             3,
             &[Arg::Array(&xs), Arg::Scalar(Const::F32(2.0))],
-            &mut out,
+            &mut [&mut out[..]],
         )
         .unwrap();
         let got: Vec<f32> = out
@@ -496,15 +609,18 @@ mod tests {
             let k = Kernel {
                 name: "r".into(),
                 params: vec![],
-                output: Scalar::I32,
+                outputs: vec![Scalar::I32],
+                grid: Grid::Elementwise,
                 locals: vec![
                     Local {
                         name: "n".into(),
                         ty: Scalar::I32,
+                        len: None,
                     },
                     Local {
                         name: "i".into(),
                         ty: Scalar::I32,
+                        len: None,
                     },
                 ],
                 body: vec![
@@ -529,11 +645,11 @@ mod tests {
                             ),
                         }],
                     },
-                    Stmt::Return(e(Scalar::I32, ExprKind::Local(0))),
+                    ret(e(Scalar::I32, ExprKind::Local(0))),
                 ],
             };
             let mut out = [0u8; 4];
-            run(&k, 1, &[], &mut out).unwrap();
+            run(&k, 1, &[], &mut [&mut out[..]]).unwrap();
             assert_eq!(
                 i32::from_ne_bytes(out),
                 expected,

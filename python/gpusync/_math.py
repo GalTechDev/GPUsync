@@ -34,6 +34,21 @@ def max(*values):
     """Maximum élément par élément de 2 valeurs ou plus (np.maximum n'en prend que 2)."""
     return _functools.reduce(_np.maximum, values)
 
+
+
+def index():
+    """Dans un kernel avec index : coordonnées de la case de sortie calculée (`i, j = gs.index()`).
+
+    Hors kernel, il n'y a pas de case courante : appelez le kernel, pas la fonction Python.
+    """
+    raise RuntimeError("gs.index() n'a de sens que dans un kernel (@gs.kernel) avec des dimensions nommées")
+
+
+def local(dtype, n):
+    """Tableau local à chaque case (`buf = gs.local(gs.f32, 64)`), mis à zéro, de taille constante."""
+    return _np.zeros(n, dtype=dtype.np)
+
+
 pi = _m.pi
 e = _m.e
 tau = _m.tau
@@ -42,5 +57,5 @@ nan = _m.nan
 
 __all__ = [
     "sqrt", "exp", "exp2", "log", "log2", "sin", "cos", "tan", "tanh", "atan2",
-    "floor", "ceil", "pow", "abs", "min", "max", "pi", "e", "tau", "inf", "nan",
+    "floor", "ceil", "pow", "abs", "min", "max", "index", "local", "pi", "e", "tau", "inf", "nan",
 ]

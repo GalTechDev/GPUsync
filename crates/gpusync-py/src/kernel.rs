@@ -11,7 +11,7 @@ use gpusync_core::{
     Compiled, CoreError, Device, DeviceArray, Input, TransferLimits, compile, launch, parse,
     set_transfer_limits, source, transfer_limits,
 };
-use gpusync_ir::{Const, Kernel, ParamKind, Scalar};
+use gpusync_ir::{Const, Grid, Kernel, ParamKind, Scalar};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::{create_exception, types::PyList};
@@ -67,25 +67,28 @@ fn to_py(e: CoreError) -> PyErr {
 #[pyclass(module = "gpusync._core", frozen)]
 pub struct KernelIR {
     ir: Arc<Kernel>,
-    compiled: Mutex<HashMap<String, Compiled>>,
+    compiled: Mutex<HashMap<String, (Device, Compiled)>>,
 }
 
 impl KernelIR {
+    /// Version compilée pour `dev` (cache par identifiant, invalidé si le périphérique a été rouvert).
     fn compiled_for(&self, dev: &Device) -> Result<Compiled, CoreError> {
         let id = dev.id();
-        if let Some(c) = self
+        if let Some((d, c)) = self
             .compiled
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&id)
         {
-            return Ok(c.clone());
+            if d.same(dev) {
+                return Ok(c.clone());
+            }
         }
         let c = compile(dev, &self.ir)?;
         self.compiled
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(id, c.clone());
+            .insert(id, (dev.clone(), c.clone()));
         Ok(c)
     }
 }
@@ -95,6 +98,33 @@ impl KernelIR {
     #[getter]
     fn name(&self) -> String {
         self.ir.name.clone()
+    }
+
+    /// Grille : "elementwise" (une case de sortie par élément d'entrée) ou "indexed" (`gs.index()`).
+    #[getter]
+    fn grid(&self) -> &'static str {
+        match self.ir.grid {
+            Grid::Elementwise => "elementwise",
+            Grid::Indexed { .. } => "indexed",
+        }
+    }
+
+    /// Noms des dimensions passées en paramètres cachés (kernel avec index), dans l'ordre des
+    /// scalaires à ajouter après les scalaires visibles.
+    #[getter]
+    fn dims(&self) -> Vec<String> {
+        self.ir
+            .params
+            .iter()
+            .filter(|p| p.hidden)
+            .map(|p| p.name.trim_start_matches("gs_dim_").to_string())
+            .collect()
+    }
+
+    /// Nombre de sorties.
+    #[getter]
+    fn n_outputs(&self) -> usize {
+        self.ir.outputs.len()
     }
 
     /// Code généré : "opencl", "wgsl" ou "ir".
@@ -122,14 +152,15 @@ impl KernelIR {
         .map_err(to_py)
     }
 
-    /// Lance le kernel sur `n` éléments.
+    /// Lance le kernel sur une grille de `n` éléments (taille de chaque sortie).
     ///
     /// - `arrays` : un élément par paramètre tableau, `(adresse, octets)` d'un tableau NumPy
     ///   contigu, ou un `DeviceArray` ;
-    /// - `scalars` : un nombre Python par paramètre scalaire ;
-    /// - `out_ptr` : adresse d'un tableau NumPy de sortie (utilisé directement en zéro-copie) ;
+    /// - `scalars` : un nombre Python par paramètre scalaire (dimensions cachées comprises, en
+    ///   dernier) ;
+    /// - `out_ptrs` : adresse d'un tableau NumPy par sortie (utilisé directement en zéro-copie) ;
     /// - `keepalive` : objets à garder en vie jusqu'à la fin du calcul.
-    #[pyo3(signature = (device_id, arrays, scalars, n, out_ptr, keepalive))]
+    #[pyo3(signature = (device_id, arrays, scalars, n, out_ptrs, keepalive))]
     #[allow(clippy::too_many_arguments)] // signature imposée par l'appel Python
     fn launch(
         &self,
@@ -138,9 +169,9 @@ impl KernelIR {
         arrays: &Bound<'_, PyList>,
         scalars: &Bound<'_, PyList>,
         n: usize,
-        out_ptr: usize,
+        out_ptrs: Vec<usize>,
         keepalive: Vec<Py<PyAny>>,
-    ) -> PyResult<DeviceArrayPy> {
+    ) -> PyResult<Vec<DeviceArrayPy>> {
         // Scalaires : convertis et vérifiés selon le type déclaré.
         let scalar_params: Vec<_> = self
             .ir
@@ -215,7 +246,7 @@ impl KernelIR {
                 A::Host(..) => None,
             })
             .collect();
-        let result = py.detach(|| -> Result<DeviceArray, CoreError> {
+        let result = py.detach(|| -> Result<Vec<DeviceArray>, CoreError> {
             let dev = Device::open(device_id)?;
             let c = self.compiled_for(&dev)?;
             let inputs: Vec<Input> = items
@@ -230,9 +261,10 @@ impl KernelIR {
                     _ => unreachable!(),
                 })
                 .collect();
-            unsafe { launch(&dev, &c, &inputs, &consts, n, out_ptr as *mut u8) }
+            let outs: Vec<*mut u8> = out_ptrs.iter().map(|p| *p as *mut u8).collect();
+            unsafe { launch(&dev, &c, &inputs, &consts, n, &outs) }
         });
-        let array = result.map_err(to_py)?;
+        let arrays = result.map_err(to_py)?;
         // Les DeviceArray d'entrée doivent aussi rester en vie (leurs buffers sont lus).
         let mut keep = keepalive;
         for i in items {
@@ -240,10 +272,15 @@ impl KernelIR {
                 keep.push(d.into_any());
             }
         }
-        Ok(DeviceArrayPy {
-            array,
-            keepalive: Mutex::new(keep),
-        })
+        // Chaque sortie garde ses propres références : les entrées vivent tant qu'une sortie
+        // peut encore être calculée.
+        Ok(arrays
+            .into_iter()
+            .map(|array| DeviceArrayPy {
+                array,
+                keepalive: Mutex::new(keep.iter().map(|o| o.clone_ref(py)).collect()),
+            })
+            .collect())
     }
 }
 

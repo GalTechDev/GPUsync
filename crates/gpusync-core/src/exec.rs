@@ -10,12 +10,12 @@
 //! complète des données n'est faite en RAM.
 
 use std::collections::VecDeque;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use gpusync_backend_opencl::{ClArg, ClBuffer, ClDevice, ClEvent, ClKernel, Pinned, wait};
 use gpusync_backend_wgpu::{FluxIn, WgBuffer};
 use gpusync_ir::interp::{self, Arg};
-use gpusync_ir::{Const, Kernel, ParamKind, Scalar};
+use gpusync_ir::{Const, Grid, Kernel, ParamKind, Scalar};
 use gpusync_runtime::Backend;
 
 use crate::{Compiled, CoreError, Device, Imp, R, dev_err};
@@ -70,7 +70,7 @@ pub enum Storage {
     /// Mode Direct (OpenCL, mémoire unifiée) : blocs adossés à la mémoire hôte `ptr`.
     ClDirect { bufs: Vec<ClBuffer>, ptr: *mut u8 },
     /// Mode Résident (OpenCL) : en mémoire du périphérique ; `done` signale la fin du calcul.
-    Cl { buf: ClBuffer, done: ClEvent },
+    Cl { buf: ClBuffer, done: Arc<ClEvent> },
     /// Mode Résident (wgpu).
     Wg(WgBuffer),
     /// Mode Direct (Metal, `newBufferWithBytesNoCopy`) : blocs adossés à la mémoire hôte `ptr`.
@@ -171,23 +171,36 @@ pub enum Input<'a> {
 
 /// Entrée résolue pour le périphérique cible.
 enum In<'a> {
-    Host(*const u8),
+    Host(*const u8, usize),
     Dev(&'a DeviceArray),
 }
 
-/// Lance `c` sur `n` éléments ; `out_host` est la destination finale du résultat (`n` éléments).
+impl In<'_> {
+    fn bytes(&self) -> usize {
+        match self {
+            In::Host(_, b) => *b,
+            In::Dev(a) => a.bytes(),
+        }
+    }
+}
+
+/// Lance `c` sur une grille de `n` éléments (taille de chaque sortie) ; `outs` sont les
+/// destinations finales des sorties (`n` éléments chacune), dans l'ordre du kernel.
+///
+/// Kernel élément par élément : chaque entrée a `n` éléments. Kernel avec index : les entrées ont
+/// leur propre taille (les dimensions sont passées en paramètres cachés, dans `scalars`).
 ///
 /// # Safety
-/// Les pointeurs hôte doivent rester valides jusqu'à la fin du calcul (lecture du résultat ou
-/// destruction du `DeviceArray` renvoyé).
+/// Les pointeurs hôte doivent rester valides jusqu'à la fin du calcul (lecture des résultats ou
+/// destruction des `DeviceArray` renvoyés).
 pub unsafe fn launch(
     dev: &Device,
     c: &Compiled,
     inputs: &[Input],
     scalars: &[Const],
     n: usize,
-    out_host: *mut u8,
-) -> R<DeviceArray> {
+    outs: &[*mut u8],
+) -> R<Vec<DeviceArray>> {
     let k = &c.kernel;
     let arrays: Vec<_> = k.array_params().map(|(_, p)| p.ty).collect();
     let n_scalars = k.params.len() - arrays.len();
@@ -199,15 +212,35 @@ pub unsafe fn launch(
             n_scalars
         )));
     }
+    if outs.len() != k.outputs.len() {
+        return Err(CoreError::Type(format!(
+            "'{}' a {} sortie(s), {} destination(s) fournie(s)",
+            k.name,
+            k.outputs.len(),
+            outs.len()
+        )));
+    }
+    let indexed = matches!(k.grid, Grid::Indexed { .. });
     for (input, (_, p)) in inputs.iter().zip(k.array_params()) {
         let bytes = match input {
             Input::Host { bytes, .. } => *bytes,
             Input::Device(a) => a.bytes(),
         };
-        if bytes != n * p.ty.size() {
+        let ok = if indexed {
+            bytes % p.ty.size() == 0
+        } else {
+            bytes == n * p.ty.size()
+        };
+        if !ok {
             return Err(CoreError::Shape(format!(
-                "tableau '{}' : {bytes} octets pour {n} éléments de type {}",
-                p.name, p.ty
+                "tableau '{}' : {bytes} octets pour {} éléments de type {}",
+                p.name,
+                if indexed {
+                    "des".to_string()
+                } else {
+                    n.to_string()
+                },
+                p.ty
             )));
         }
     }
@@ -231,12 +264,12 @@ pub unsafe fn launch(
     let mut ins: Vec<In> = Vec::with_capacity(inputs.len());
     for (i, st) in inputs.iter().zip(&idx_staged) {
         ins.push(match (i, st) {
-            (_, Some(s)) => In::Host(staged[*s].as_ptr()),
-            (Input::Host { ptr, .. }, None) => In::Host(*ptr),
+            (_, Some(s)) => In::Host(staged[*s].as_ptr(), staged[*s].len()),
+            (Input::Host { ptr, bytes }, None) => In::Host(*ptr, *bytes),
             (Input::Device(a), None) => match a.host_ptr() {
                 Some(p) => {
                     unsafe { a.read_into(p)? }; // synchronisation seulement
-                    In::Host(p)
+                    In::Host(p, a.bytes())
                 }
                 None => In::Dev(a),
             },
@@ -244,63 +277,39 @@ pub unsafe fn launch(
     }
 
     let limits = transfer_limits();
-    let out_elem = k.output.size();
-    let result = match (dev, &c.imp) {
-        (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, &arrays, scalars, n, out_host) },
+    let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
+    let result: Planned = match (dev, &c.imp) {
+        (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
         (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
-            cl_direct(d, ck, k, &ins, &arrays, scalars, n, out_host, &limits)
+            cl_direct(d, ck, k, &ins, &arrays, scalars, n, outs, &limits)
         },
         (Device::Cl(d), Imp::Cl(ck)) => {
-            if fits(dev, &ins, &arrays, n, out_elem, &limits) {
-                unsafe { cl_resident(d, ck, k, &ins, &arrays, scalars, n, &limits) }
+            if fits(dev, &ins, n, &out_elems, &limits) {
+                unsafe { cl_resident(d, ck, k, &ins, scalars, n, &limits) }
+            } else if indexed {
+                Err(too_big_indexed(k))
             } else {
-                unsafe { cl_flux(d, ck, k, &ins, &arrays, scalars, n, out_host, &limits) }
+                unsafe { cl_flux(d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
             }
         }
         (Device::Wg(d), Imp::Wg(wk)) => {
             let (words, fwords) = wg_params(k, scalars)?;
             if let Some(direct) = unsafe {
                 wg_direct(
-                    d, wk, &ins, &arrays, &words, &fwords, n, out_host, out_elem, &limits,
+                    d, wk, &ins, &arrays, &words, &fwords, n, outs, &out_elems, indexed, &limits,
                 )?
             } {
                 Ok(direct)
-            } else if fits(dev, &ins, &arrays, n, out_elem, &limits) {
-                let mut owned = Vec::new();
-                for (i, ty) in ins.iter().zip(&arrays) {
-                    if let In::Host(p) = i {
-                        let b = d.alloc(n * ty.size()).map_err(dev_err)?;
-                        unsafe {
-                            d.upload(&b, 0, *p, n * ty.size(), limits.chunk_bytes)
-                                .map_err(dev_err)?
-                        };
-                        owned.push(b);
-                    }
-                }
-                let mut own = owned.iter();
-                let bufs: Vec<&WgBuffer> = ins
-                    .iter()
-                    .map(|i| match i {
-                        In::Host(_) => Ok(own.next().unwrap()),
-                        In::Dev(a) => match &a.storage {
-                            Storage::Wg(b) => Ok(b),
-                            _ => Err(CoreError::Device(
-                                "entrée sur un autre type de périphérique".into(),
-                            )),
-                        },
-                    })
-                    .collect::<R<_>>()?;
-                let out = d.alloc(n * out_elem).map_err(dev_err)?;
-                let mut w = words.clone();
-                w.push(n as u32);
-                d.launch(wk, &bufs, &out, &w, &fwords, n).map_err(dev_err)?;
-                Ok((Storage::Wg(out), Mode::Resident, false))
+            } else if fits(dev, &ins, n, &out_elems, &limits) {
+                unsafe { wg_resident(d, wk, &ins, &words, &fwords, n, &out_elems, &limits) }
+            } else if indexed {
+                Err(too_big_indexed(k))
             } else {
                 let flux_in: Vec<FluxIn> = ins
                     .iter()
                     .zip(&arrays)
                     .map(|(i, ty)| match i {
-                        In::Host(p) => Ok(FluxIn::Host {
+                        In::Host(p, _) => Ok(FluxIn::Host {
                             ptr: *p,
                             elem: ty.size(),
                         }),
@@ -309,56 +318,77 @@ pub unsafe fn launch(
                                 buf: b,
                                 elem: ty.size(),
                             }),
-                            _ => Err(CoreError::Device(
-                                "entrée sur un autre type de périphérique".into(),
-                            )),
+                            _ => Err(other_kind()),
                         },
                     })
                     .collect::<R<_>>()?;
-                let elem_max = arrays
-                    .iter()
-                    .map(|t| t.size())
-                    .chain([out_elem])
-                    .max()
-                    .unwrap();
+                let elem_max = elem_max(&arrays, &out_elems);
                 let max_buf = d.info.max_buffer_bytes.unwrap_or(u64::MAX) as usize;
                 let chunk_elems = (limits.chunk_bytes.min(max_buf) / elem_max).max(1);
+                let fouts: Vec<(*mut u8, usize)> = outs
+                    .iter()
+                    .copied()
+                    .zip(out_elems.iter().copied())
+                    .collect();
                 unsafe {
-                    d.flux(
-                        wk,
-                        &flux_in,
-                        out_host,
-                        out_elem,
-                        &words,
-                        &fwords,
-                        n,
-                        chunk_elems,
-                    )
-                    .map_err(dev_err)?
+                    d.flux(wk, &flux_in, &fouts, &words, &fwords, n, chunk_elems)
+                        .map_err(dev_err)?
                 };
-                Ok((Storage::Host { ptr: out_host }, Mode::Flux, false))
+                Ok((
+                    outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+                    Mode::Flux,
+                    false,
+                ))
             }
         }
         _ => Err(CoreError::Device(
             "kernel compilé pour un autre périphérique".into(),
         )),
     };
-    let (storage, mode, host_backed_io) = result?;
+    let (storages, mode, mut host_backed_io) = result?;
     // Entrées rapatriées d'un autre périphérique : copies locales libérées au retour.
     if !staged.is_empty() && host_backed_io {
         dev.finish()?;
+        host_backed_io = false;
     }
-    Ok(DeviceArray {
-        device: dev.clone(),
-        storage,
-        dtype: k.output,
-        len: n,
-        mode,
-        host_backed_io: host_backed_io && staged.is_empty(),
-    })
+    Ok(storages
+        .into_iter()
+        .zip(&k.outputs)
+        .map(|(storage, ty)| DeviceArray {
+            device: dev.clone(),
+            storage,
+            dtype: *ty,
+            len: n,
+            mode,
+            host_backed_io,
+        })
+        .collect())
 }
 
-type Planned = R<(Storage, Mode, bool)>;
+/// Stockage de chaque sortie, mode retenu, buffers encore adossés à la mémoire hôte.
+type Planned = R<(Vec<Storage>, Mode, bool)>;
+
+fn other_kind() -> CoreError {
+    CoreError::Device("entrée sur un autre type de périphérique".into())
+}
+
+fn too_big_indexed(k: &Kernel) -> CoreError {
+    CoreError::Unsupported(format!(
+        "'{}' : les données ne tiennent pas en une fois sur le périphérique ; le découpage des \
+         kernels avec index arrive au jalon M3 (en attendant : gs.set_memory_budget() plus grand, \
+         un autre périphérique, ou device=\"cpu:0\")",
+        k.name
+    ))
+}
+
+fn elem_max(arrays: &[Scalar], out_elems: &[usize]) -> usize {
+    arrays
+        .iter()
+        .map(|t| t.size())
+        .chain(out_elems.iter().copied())
+        .max()
+        .unwrap_or(4)
+}
 
 /// Mémoire du périphérique pour le budget : connue en OpenCL ; pour wgpu, celle du même GPU vu
 /// par OpenCL s'il existe, sinon 4 Gio (prudent).
@@ -379,30 +409,46 @@ fn device_memory(dev: &Device) -> u64 {
 }
 
 /// L'appel tient-il en mode Résident (budget, taille max d'un buffer, une seule grille) ?
-fn fits(
-    dev: &Device,
-    ins: &[In],
-    arrays: &[Scalar],
-    n: usize,
-    out_elem: usize,
-    limits: &TransferLimits,
-) -> bool {
+fn fits(dev: &Device, ins: &[In], n: usize, out_elems: &[usize], limits: &TransferLimits) -> bool {
     let budget = limits.budget_bytes.unwrap_or(device_memory(dev) / 2);
     let max_buf = dev.info().max_buffer_bytes.unwrap_or(u64::MAX);
-    let sizes: Vec<u64> = ins
+    let outs = out_elems.iter().map(|e| (n * e) as u64);
+    let biggest = ins
         .iter()
-        .zip(arrays)
-        .map(|(_, t)| (n * t.size()) as u64)
-        .chain([(n * out_elem) as u64])
-        .collect();
+        .map(|i| i.bytes() as u64)
+        .chain(outs.clone())
+        .max()
+        .unwrap_or(0);
     let new_bytes: u64 = ins
         .iter()
-        .zip(arrays)
-        .filter(|(i, _)| matches!(i, In::Host(_)))
-        .map(|(_, t)| (n * t.size()) as u64)
+        .filter(|i| matches!(i, In::Host(..)))
+        .map(|i| i.bytes() as u64)
         .sum::<u64>()
-        + (n * out_elem) as u64;
-    n <= u32::MAX as usize && new_bytes <= budget && sizes.iter().all(|s| *s <= max_buf)
+        + outs.sum::<u64>();
+    n <= u32::MAX as usize && new_bytes <= budget && biggest <= max_buf
+}
+
+/// Blocs `(début, longueur)` de la grille : un seul pour un kernel avec index (M3 : découpage).
+fn blocks(n: usize, chunk: usize, indexed: bool) -> Vec<(usize, usize)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if indexed {
+        return vec![(0, n)];
+    }
+    (0..n)
+        .step_by(chunk)
+        .map(|s| (s, chunk.min(n - s)))
+        .collect()
+}
+
+/// Partie `(décalage, octets)` d'une entrée lue par le bloc : tout le tableau avec index.
+fn region(input: &In, ty: Scalar, start: usize, len: usize, indexed: bool) -> (usize, usize) {
+    if indexed {
+        (0, input.bytes())
+    } else {
+        (start * ty.size(), len * ty.size())
+    }
 }
 
 fn scalar_args(k: &Kernel, scalars: &[Const]) -> Vec<Const> {
@@ -438,12 +484,13 @@ fn cl_scalar(c: Const) -> ClArg<'static> {
     }
 }
 
-/// Arguments OpenCL dans l'ordre des paramètres : tableaux = `bufs` (dans l'ordre), puis sortie et n.
+/// Arguments OpenCL dans l'ordre des paramètres : tableaux = `bufs` (dans l'ordre), puis les
+/// sorties et n.
 fn cl_args<'a>(
     k: &Kernel,
     bufs: &[&'a ClBuffer],
     scalars: &[Const],
-    out: &'a ClBuffer,
+    outs: &[&'a ClBuffer],
     n: u32,
 ) -> Vec<ClArg<'a>> {
     let mut b = bufs.iter();
@@ -456,7 +503,7 @@ fn cl_args<'a>(
             ParamKind::Scalar => cl_scalar(s.next().unwrap()),
         })
         .collect();
-    args.push(ClArg::Buf(out));
+    args.extend(outs.iter().map(|o| ClArg::Buf(o)));
     args.push(ClArg::U32(n));
     args
 }
@@ -464,16 +511,14 @@ fn cl_args<'a>(
 unsafe fn run_cpu(
     k: &Kernel,
     ins: &[In],
-    arrays: &[Scalar],
     scalars: &[Const],
     n: usize,
-    out: *mut u8,
+    outs: &[*mut u8],
 ) -> Planned {
     let slices: Vec<&[u8]> = ins
         .iter()
-        .zip(arrays)
-        .map(|(i, t)| match i {
-            In::Host(p) => Ok(unsafe { std::slice::from_raw_parts(*p, n * t.size()) }),
+        .map(|i| match i {
+            In::Host(p, b) => Ok(unsafe { std::slice::from_raw_parts(*p, *b) }),
             In::Dev(_) => Err(CoreError::Device(
                 "cpu:0 : entrée restée sur un périphérique".into(),
             )),
@@ -489,11 +534,17 @@ unsafe fn run_cpu(
             ParamKind::Scalar => Arg::Scalar(sc.next().unwrap()),
         })
         .collect();
-    interp::run(k, n, &args, unsafe {
-        std::slice::from_raw_parts_mut(out, n * k.output.size())
-    })
-    .map_err(CoreError::Device)?;
-    Ok((Storage::Host { ptr: out }, Mode::Cpu, false))
+    let mut out_slices: Vec<&mut [u8]> = outs
+        .iter()
+        .zip(&k.outputs)
+        .map(|(p, t)| unsafe { std::slice::from_raw_parts_mut(*p, n * t.size()) })
+        .collect();
+    interp::run(k, n, &args, &mut out_slices).map_err(CoreError::Device)?;
+    Ok((
+        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+        Mode::Cpu,
+        false,
+    ))
 }
 
 /// Mode Direct (OpenCL, mémoire unifiée) : chaque bloc utilise directement la mémoire de l'hôte.
@@ -506,61 +557,70 @@ unsafe fn cl_direct(
     arrays: &[Scalar],
     scalars: &[Const],
     n: usize,
-    out: *mut u8,
+    outs: &[*mut u8],
     limits: &TransferLimits,
 ) -> Planned {
-    let elem_max = arrays
-        .iter()
-        .map(|t| t.size())
-        .chain([k.output.size()])
-        .max()
-        .unwrap();
+    let indexed = matches!(k.grid, Grid::Indexed { .. });
+    let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
     let max_alloc = d
         .info
         .max_buffer_bytes
         .unwrap_or(u64::MAX)
         .min(usize::MAX as u64) as usize;
+    if indexed
+        && (ins.iter().any(|i| i.bytes() > max_alloc)
+            || out_elems.iter().any(|e| n * e > max_alloc))
+    {
+        return Err(too_big_indexed(k));
+    }
     let chunk_bytes = limits
         .direct_chunk_bytes
         .unwrap_or(max_alloc)
         .min(max_alloc);
-    let chunk = (chunk_bytes / elem_max).clamp(1, u32::MAX as usize);
-    let mut outs = Vec::new();
-    let mut start = 0;
-    while start < n {
-        let len = chunk.min(n - start);
+    let chunk = (chunk_bytes / elem_max(arrays, &out_elems)).clamp(1, u32::MAX as usize);
+    let mut out_bufs: Vec<Vec<ClBuffer>> = outs.iter().map(|_| Vec::new()).collect();
+    for (start, len) in blocks(n, chunk, indexed) {
         let mut bufs = Vec::new();
         for (i, ty) in ins.iter().zip(arrays) {
-            let In::Host(p) = i else {
+            let In::Host(p, _) = i else {
                 return Err(CoreError::Device(
                     "mode Direct : entrée restée sur un périphérique".into(),
                 ));
             };
-            bufs.push(
-                unsafe { d.wrap_host(p.add(start * ty.size()) as *mut u8, len * ty.size()) }
-                    .map_err(dev_err)?,
-            );
+            let (off, bytes) = region(i, *ty, start, len, indexed);
+            bufs.push(unsafe { d.wrap_host(p.add(off) as *mut u8, bytes) }.map_err(dev_err)?);
         }
-        let ob = unsafe { d.wrap_host(out.add(start * k.output.size()), len * k.output.size()) }
-            .map_err(dev_err)?;
+        let mut obs = Vec::new();
+        for (p, e) in outs.iter().zip(&out_elems) {
+            obs.push(unsafe { d.wrap_host(p.add(start * e), len * e) }.map_err(dev_err)?);
+        }
         let refs: Vec<&ClBuffer> = bufs.iter().collect();
-        d.launch(ck, &cl_args(k, &refs, scalars, &ob, len as u32), len, &[])
-            .map_err(dev_err)?;
-        outs.push(ob);
-        start += len;
+        let orefs: Vec<&ClBuffer> = obs.iter().collect();
+        d.launch(
+            ck,
+            &cl_args(k, &refs, scalars, &orefs, len as u32),
+            len,
+            &[],
+        )
+        .map_err(dev_err)?;
+        for (dst, ob) in out_bufs.iter_mut().zip(obs) {
+            dst.push(ob);
+        }
     }
     Ok((
-        Storage::ClDirect {
-            bufs: outs,
-            ptr: out,
-        },
+        out_bufs
+            .into_iter()
+            .zip(outs)
+            .map(|(bufs, ptr)| Storage::ClDirect { bufs, ptr: *ptr })
+            .collect(),
         Mode::Direct,
         true,
     ))
 }
 
 /// Mode Direct sur Metal : chaque bloc est un buffer `NoCopy` sur la mémoire de l'hôte (aucune copie).
-/// `None` si impossible (pas Metal, adresse non alignée sur 16 Kio, entrée restée sur un périphérique).
+/// `None` si impossible (pas Metal, adresse non alignée sur 16 Kio, entrée restée sur un
+/// périphérique, kernel avec index trop gros pour un seul buffer).
 #[allow(clippy::too_many_arguments)]
 unsafe fn wg_direct(
     d: &gpusync_backend_wgpu::WgDevice,
@@ -570,79 +630,124 @@ unsafe fn wg_direct(
     words: &[u32],
     fwords: &[f64],
     n: usize,
-    out: *mut u8,
-    out_elem: usize,
+    outs: &[*mut u8],
+    out_elems: &[usize],
+    indexed: bool,
     limits: &TransferLimits,
-) -> R<Option<(Storage, Mode, bool)>> {
+) -> R<Option<(Vec<Storage>, Mode, bool)>> {
     const PAGE: usize = 16384;
-    if d.info.backend != "metal" || (out as usize) % PAGE != 0 {
+    if d.info.backend != "metal" || outs.iter().any(|p| !(*p as usize).is_multiple_of(PAGE)) {
         return Ok(None);
     }
-    let mut ptrs = Vec::new();
     for i in ins {
         match i {
-            In::Host(p) if (*p as usize) % PAGE == 0 => ptrs.push(*p),
+            In::Host(p, _) if (*p as usize).is_multiple_of(PAGE) => {}
             _ => return Ok(None),
         }
     }
-    let elem_max = arrays
-        .iter()
-        .map(|t| t.size())
-        .chain([out_elem])
-        .max()
-        .unwrap();
     let max_buf = d
         .info
         .max_buffer_bytes
         .unwrap_or(u64::MAX)
         .min(usize::MAX as u64) as usize;
+    if indexed
+        && (ins.iter().any(|i| i.bytes() > max_buf) || out_elems.iter().any(|e| n * e > max_buf))
+    {
+        return Ok(None);
+    }
     let chunk_bytes = limits.direct_chunk_bytes.unwrap_or(max_buf).min(max_buf);
     let step = PAGE / 4; // débuts de blocs alignés sur une page pour des éléments de 4 ou 8 o
-    let chunk = ((chunk_bytes / elem_max) / step * step).max(step);
-    let mut outs = Vec::new();
-    let mut start = 0;
-    while start < n {
-        let len = chunk.min(n - start);
+    let chunk = ((chunk_bytes / elem_max(arrays, out_elems)) / step * step).max(step);
+    let refused = || CoreError::Device("Metal a refusé une partie de la mémoire hôte".into());
+    let mut out_bufs: Vec<Vec<WgBuffer>> = outs.iter().map(|_| Vec::new()).collect();
+    for (start, len) in blocks(n, chunk, indexed) {
         let mut bufs = Vec::new();
-        for (p, ty) in ptrs.iter().zip(arrays) {
-            match unsafe { d.wrap_host(p.add(start * ty.size()) as *mut u8, len * ty.size()) }
-                .map_err(dev_err)?
-            {
+        for (i, ty) in ins.iter().zip(arrays) {
+            let In::Host(p, _) = i else { unreachable!() };
+            let (off, bytes) = region(i, *ty, start, len, indexed);
+            match unsafe { d.wrap_host(p.add(off) as *mut u8, bytes) }.map_err(dev_err)? {
                 Some(b) => bufs.push(b),
                 None if start == 0 => return Ok(None),
-                None => {
-                    return Err(CoreError::Device(
-                        "Metal a refusé une partie de la mémoire hôte".into(),
-                    ));
-                }
+                None => return Err(refused()),
             }
         }
-        let ob = match unsafe { d.wrap_host(out.add(start * out_elem), len * out_elem) }
-            .map_err(dev_err)?
-        {
-            Some(b) => b,
-            None if start == 0 => return Ok(None),
-            None => {
-                return Err(CoreError::Device(
-                    "Metal a refusé une partie de la mémoire hôte".into(),
-                ));
+        let mut obs = Vec::new();
+        for (p, e) in outs.iter().zip(out_elems) {
+            match unsafe { d.wrap_host(p.add(start * e), len * e) }.map_err(dev_err)? {
+                Some(b) => obs.push(b),
+                None if start == 0 => return Ok(None),
+                None => return Err(refused()),
             }
-        };
+        }
         let mut w = words.to_vec();
         w.push(len as u32);
         let refs: Vec<&WgBuffer> = bufs.iter().collect();
-        d.launch(wk, &refs, &ob, &w, fwords, len).map_err(dev_err)?;
-        outs.push(ob);
-        start += len;
+        let orefs: Vec<&WgBuffer> = obs.iter().collect();
+        d.launch(wk, &refs, &orefs, &w, fwords, len)
+            .map_err(dev_err)?;
+        for (dst, ob) in out_bufs.iter_mut().zip(obs) {
+            dst.push(ob);
+        }
     }
     Ok(Some((
-        Storage::WgDirect {
-            bufs: outs,
-            ptr: out,
-        },
+        out_bufs
+            .into_iter()
+            .zip(outs)
+            .map(|(bufs, ptr)| Storage::WgDirect { bufs, ptr: *ptr })
+            .collect(),
         Mode::Direct,
         true,
     )))
+}
+
+/// Mode Résident (wgpu) : entrées envoyées par blocs, sorties gardées sur le périphérique.
+#[allow(clippy::too_many_arguments)]
+unsafe fn wg_resident(
+    d: &gpusync_backend_wgpu::WgDevice,
+    wk: &gpusync_backend_wgpu::WgKernel,
+    ins: &[In],
+    words: &[u32],
+    fwords: &[f64],
+    n: usize,
+    out_elems: &[usize],
+    limits: &TransferLimits,
+) -> Planned {
+    let mut owned = Vec::new();
+    for i in ins {
+        if let In::Host(p, bytes) = i {
+            let b = d.alloc(*bytes).map_err(dev_err)?;
+            unsafe {
+                d.upload(&b, 0, *p, *bytes, limits.chunk_bytes)
+                    .map_err(dev_err)?
+            };
+            owned.push(b);
+        }
+    }
+    let mut own = owned.iter();
+    let bufs: Vec<&WgBuffer> = ins
+        .iter()
+        .map(|i| match i {
+            In::Host(..) => Ok(own.next().unwrap()),
+            In::Dev(a) => match &a.storage {
+                Storage::Wg(b) => Ok(b),
+                _ => Err(other_kind()),
+            },
+        })
+        .collect::<R<_>>()?;
+    let obufs: Vec<WgBuffer> = out_elems
+        .iter()
+        .map(|e| d.alloc(n * e).map_err(dev_err))
+        .collect::<R<_>>()?;
+    let orefs: Vec<&WgBuffer> = obufs.iter().collect();
+    let mut w = words.to_vec();
+    w.push(n as u32);
+    d.launch(wk, &bufs, &orefs, &w, fwords, n)
+        .map_err(dev_err)?;
+    Ok((
+        obufs.into_iter().map(Storage::Wg).collect(),
+        Mode::Resident,
+        false,
+    ))
 }
 
 /// Anneau de 3 tampons épinglés pour envoyer `bytes` octets de `src` vers `dst` (file de transfert).
@@ -654,6 +759,9 @@ unsafe fn cl_upload(
     bytes: usize,
     chunk: usize,
 ) -> R<Option<ClEvent>> {
+    if bytes == 0 {
+        return Ok(None);
+    }
     let chunk = chunk.min(bytes).max(4);
     let mut ring: Vec<(Pinned, Option<ClEvent>)> = Vec::new();
     for _ in 0..3.min(bytes.div_ceil(chunk)) {
@@ -695,6 +803,9 @@ unsafe fn cl_download(
     bytes: usize,
     chunk: usize,
 ) -> R<()> {
+    if bytes == 0 {
+        return wait(done).map_err(dev_err);
+    }
     let chunk = chunk.min(bytes).max(4);
     let mut ring: Vec<Pinned> = Vec::new();
     for _ in 0..3.min(bytes.div_ceil(chunk)) {
@@ -727,24 +838,23 @@ unsafe fn cl_download(
     Ok(())
 }
 
-/// Mode Résident (OpenCL, GPU dédié) : entrées envoyées par l'anneau épinglé, résultat gardé en VRAM.
+/// Mode Résident (OpenCL, GPU dédié) : entrées envoyées par l'anneau épinglé, sorties gardées en VRAM.
 #[allow(clippy::too_many_arguments)]
 unsafe fn cl_resident(
     d: &ClDevice,
     ck: &ClKernel,
     k: &Kernel,
     ins: &[In],
-    arrays: &[Scalar],
     scalars: &[Const],
     n: usize,
     limits: &TransferLimits,
 ) -> Planned {
     let mut owned = Vec::new();
     let mut last: Option<ClEvent> = None;
-    for (i, ty) in ins.iter().zip(arrays) {
-        if let In::Host(p) = i {
-            let b = d.alloc(n * ty.size()).map_err(dev_err)?;
-            if let Some(e) = unsafe { cl_upload(d, &b, *p, n * ty.size(), limits.chunk_bytes)? } {
+    for i in ins {
+        if let In::Host(p, bytes) = i {
+            let b = d.alloc(*bytes).map_err(dev_err)?;
+            if let Some(e) = unsafe { cl_upload(d, &b, *p, *bytes, limits.chunk_bytes)? } {
                 last = Some(e);
             }
             owned.push(b);
@@ -754,25 +864,48 @@ unsafe fn cl_resident(
     let bufs: Vec<&ClBuffer> = ins
         .iter()
         .map(|i| match i {
-            In::Host(_) => Ok(own.next().unwrap()),
+            In::Host(..) => Ok(own.next().unwrap()),
             In::Dev(a) => match &a.storage {
                 Storage::Cl { buf, .. } => Ok(buf),
-                _ => Err(CoreError::Device(
-                    "entrée sur un autre type de périphérique".into(),
-                )),
+                _ => Err(other_kind()),
             },
         })
         .collect::<R<_>>()?;
-    let out = d.alloc(n * k.output.size()).map_err(dev_err)?;
-    let waits: Vec<&ClEvent> = last.iter().collect();
-    let done = d
-        .launch(ck, &cl_args(k, &bufs, scalars, &out, n as u32), n, &waits)
-        .map_err(dev_err)?;
-    Ok((Storage::Cl { buf: out, done }, Mode::Resident, false))
+    // Entrées d'un calcul précédent sur ce périphérique : attendre qu'elles soient prêtes.
+    let mut waits: Vec<&ClEvent> = last.iter().collect();
+    for i in ins {
+        if let In::Dev(a) = i {
+            if let Storage::Cl { done, .. } = &a.storage {
+                waits.push(done);
+            }
+        }
+    }
+    let obufs: Vec<ClBuffer> = k
+        .outputs
+        .iter()
+        .map(|t| d.alloc(n * t.size()).map_err(dev_err))
+        .collect::<R<_>>()?;
+    let orefs: Vec<&ClBuffer> = obufs.iter().collect();
+    let done = Arc::new(
+        d.launch(ck, &cl_args(k, &bufs, scalars, &orefs, n as u32), n, &waits)
+            .map_err(dev_err)?,
+    );
+    Ok((
+        obufs
+            .into_iter()
+            .map(|buf| Storage::Cl {
+                buf,
+                done: done.clone(),
+            })
+            .collect(),
+        Mode::Resident,
+        false,
+    ))
 }
 
-/// Mode Flux (OpenCL, GPU dédié) : pipeline à 3 emplacements sur deux files ; pendant le calcul du
-/// bloc k, le bloc k+1 est envoyé et le bloc k−1 revient dans sa destination finale.
+/// Mode Flux (OpenCL, GPU dédié, kernels élément par élément) : pipeline à 3 emplacements sur deux
+/// files ; pendant le calcul du bloc k, le bloc k+1 est envoyé et le bloc k−1 revient dans sa
+/// destination finale.
 #[allow(clippy::too_many_arguments)]
 unsafe fn cl_flux(
     d: &ClDevice,
@@ -782,25 +915,20 @@ unsafe fn cl_flux(
     arrays: &[Scalar],
     scalars: &[Const],
     n: usize,
-    out: *mut u8,
+    outs: &[*mut u8],
     limits: &TransferLimits,
 ) -> Planned {
     const SLOTS: usize = 3;
-    let out_elem = k.output.size();
-    let elem_max = arrays
-        .iter()
-        .map(|t| t.size())
-        .chain([out_elem])
-        .max()
-        .unwrap();
+    let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
     let max_alloc = d.info.max_buffer_bytes.unwrap_or(u64::MAX) as usize;
-    let chunk = (limits.chunk_bytes.min(max_alloc) / elem_max).clamp(1, n);
+    let chunk = (limits.chunk_bytes.min(max_alloc) / elem_max(arrays, &out_elems)).clamp(1, n);
     struct Slot {
         ins: Vec<ClBuffer>,
         pins: Vec<Option<Pinned>>,
-        out: ClBuffer,
-        pin_out: Pinned,
-        busy: Option<(usize, usize, ClEvent)>,
+        outs: Vec<ClBuffer>,
+        pin_outs: Vec<Pinned>,
+        /// Bloc en cours : début, longueur, une lecture par sortie.
+        busy: Option<(usize, usize, Vec<ClEvent>)>,
     }
     let mut ring: Vec<Slot> = Vec::new();
     for _ in 0..SLOTS.min(n.div_ceil(chunk)) {
@@ -809,28 +937,37 @@ unsafe fn cl_flux(
         for (i, ty) in ins.iter().zip(arrays) {
             sins.push(d.alloc(chunk * ty.size()).map_err(dev_err)?);
             pins.push(match i {
-                In::Host(_) => Some(d.pinned(chunk * ty.size()).map_err(dev_err)?),
+                In::Host(..) => Some(d.pinned(chunk * ty.size()).map_err(dev_err)?),
                 In::Dev(_) => None,
             });
+        }
+        let mut souts = Vec::new();
+        let mut pouts = Vec::new();
+        for e in &out_elems {
+            souts.push(d.alloc(chunk * e).map_err(dev_err)?);
+            pouts.push(d.pinned(chunk * e).map_err(dev_err)?);
         }
         ring.push(Slot {
             ins: sins,
             pins,
-            out: d.alloc(chunk * out_elem).map_err(dev_err)?,
-            pin_out: d.pinned(chunk * out_elem).map_err(dev_err)?,
+            outs: souts,
+            pin_outs: pouts,
             busy: None,
         });
     }
     let finish = |s: &mut Slot| -> R<()> {
-        if let Some((start, len, e)) = s.busy.take() {
-            wait(&e).map_err(dev_err)?;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    s.pin_out.ptr,
-                    out.add(start * out_elem),
-                    len * out_elem,
-                )
-            };
+        if let Some((start, len, evs)) = s.busy.take() {
+            for (o, e) in evs.iter().enumerate() {
+                wait(e).map_err(dev_err)?;
+                let sz = out_elems[o];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        s.pin_outs[o].ptr,
+                        outs[o].add(start * sz),
+                        len * sz,
+                    )
+                };
+            }
         }
         Ok(())
     };
@@ -845,7 +982,7 @@ unsafe fn cl_flux(
         for (a, (input, ty)) in ins.iter().zip(arrays).enumerate() {
             let bytes = len * ty.size();
             match input {
-                In::Host(p) => {
+                In::Host(p, _) => {
                     let pin = s.pins[a].as_ref().unwrap();
                     unsafe {
                         std::ptr::copy_nonoverlapping(p.add(start * ty.size()), pin.ptr, bytes)
@@ -862,29 +999,31 @@ unsafe fn cl_flux(
                                 .map_err(dev_err)?,
                         );
                     }
-                    _ => {
-                        return Err(CoreError::Device(
-                            "entrée sur un autre type de périphérique".into(),
-                        ));
-                    }
+                    _ => return Err(other_kind()),
                 },
             }
         }
         d.flush().map_err(dev_err)?;
         let refs: Vec<&ClBuffer> = s.ins.iter().collect();
+        let orefs: Vec<&ClBuffer> = s.outs.iter().collect();
         let wait_w: Vec<&ClEvent> = writes.iter().collect();
         let ek = d
             .launch(
                 ck,
-                &cl_args(k, &refs, scalars, &s.out, len as u32),
+                &cl_args(k, &refs, scalars, &orefs, len as u32),
                 len,
                 &wait_w,
             )
             .map_err(dev_err)?;
-        let er = unsafe { d.read_at(&s.out, 0, s.pin_out.ptr, len * out_elem, &[&ek]) }
-            .map_err(dev_err)?;
+        let mut reads = Vec::new();
+        for (o, e) in out_elems.iter().enumerate() {
+            reads.push(
+                unsafe { d.read_at(&s.outs[o], 0, s.pin_outs[o].ptr, len * e, &[&ek]) }
+                    .map_err(dev_err)?,
+            );
+        }
         d.flush().map_err(dev_err)?;
-        s.busy = Some((start, len, er));
+        s.busy = Some((start, len, reads));
         start += len;
         i += 1;
     }
@@ -896,7 +1035,13 @@ unsafe fn cl_flux(
         for p in s.pins.into_iter().flatten() {
             d.recycle(p);
         }
-        d.recycle(s.pin_out);
+        for p in s.pin_outs {
+            d.recycle(p);
+        }
     }
-    Ok((Storage::Host { ptr: out }, Mode::Flux, false))
+    Ok((
+        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+        Mode::Flux,
+        false,
+    ))
 }

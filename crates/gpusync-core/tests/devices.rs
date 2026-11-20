@@ -49,7 +49,7 @@ fn meme_resultat_sur_tous_les_peripheriques() {
         let c = compile(&dev, &k).unwrap_or_else(|e| panic!("{id} : {e}"));
         let mut out = vec![0u8; n * 4];
         unsafe {
-            let arr = launch(
+            let mut arrs = launch(
                 &dev,
                 &c,
                 &[
@@ -64,9 +64,10 @@ fn meme_resultat_sur_tous_les_peripheriques() {
                 ],
                 &[Const::F32(0.5)],
                 n,
-                out.as_mut_ptr(),
+                &[out.as_mut_ptr()],
             )
             .unwrap_or_else(|e| panic!("{id} : {e}"));
+            let arr = arrs.pop().unwrap();
             if dev.zero_copy() {
                 assert_eq!(
                     arr.host_ptr(),

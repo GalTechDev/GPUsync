@@ -57,15 +57,37 @@ pub fn lower_json(spec: &str) -> R<Kernel> {
 
 pub fn lower(spec: &J) -> R<Kernel> {
     let name = spec["name"].as_str().unwrap_or("kernel").to_string();
-    let output = parse_dtype(&spec["output"], "type de retour")?;
-    if !output.is_numeric() {
-        return Err(err(
-            ErrorKind::Type,
-            "le type de retour doit être numérique (f32, f64, i32, u32)".into(),
-            None,
-        ));
+    // Sorties : liste {"dtype", "dims"} (ou ancien champ "output" : une sortie).
+    let out_specs: Vec<J> = match spec["outputs"].as_array() {
+        Some(o) => o.clone(),
+        None => vec![serde_json::json!({ "dtype": spec["output"].clone(), "dims": null })],
+    };
+    let mut outputs = Vec::new();
+    for o in &out_specs {
+        let t = parse_dtype(&o["dtype"], "type de retour")?;
+        if !t.is_numeric() {
+            return Err(err(
+                ErrorKind::Type,
+                "le type de retour doit être numérique (f32, f64, i32, u32)".into(),
+                None,
+            ));
+        }
+        outputs.push(t);
     }
+    let modules: HashMap<String, String> = spec["modules"]
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let body_json = spec["body"].as_array().cloned().unwrap_or_default();
+    let indexed = uses_index(&J::Array(body_json.clone()), &modules);
+
     let mut params = Vec::new();
+    let mut dim_names: Vec<String> = Vec::new(); // dimensions nommées, dans l'ordre d'apparition
+    let mut param_dims: Vec<Vec<String>> = Vec::new();
     for p in spec["params"].as_array().cloned().unwrap_or_default() {
         let pname = p["name"].as_str().unwrap_or("?").to_string();
         let ty = parse_dtype(&p["dtype"], &format!("paramètre '{pname}'"))?;
@@ -80,19 +102,112 @@ pub fn lower(spec: &J) -> R<Kernel> {
             Some("array") => ParamKind::Array,
             _ => ParamKind::Scalar,
         };
+        let mut dims = Vec::new();
+        if kind == ParamKind::Array {
+            match p["dims"].as_array() {
+                Some(ds) => {
+                    for (a, d) in ds.iter().enumerate() {
+                        // Axe sans nom (`gs.f32[:, :]`) : nom propre au paramètre.
+                        dims.push(
+                            d.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| format!("{pname}.{a}")),
+                        );
+                    }
+                }
+                None if indexed => {
+                    return Err(err(
+                        ErrorKind::Type,
+                        format!(
+                            "paramètre '{pname}' : dans un kernel avec gs.index(), précisez les dimensions, ex. {pname}: gs.f32[\"n\", \"t\"]"
+                        ),
+                        None,
+                    ));
+                }
+                None => {}
+            }
+        }
+        for d in &dims {
+            if !dim_names.contains(d) {
+                dim_names.push(d.clone());
+            }
+        }
+        param_dims.push(dims);
         params.push(Param {
             name: pname,
             kind,
             ty,
+            dims: vec![],
+            hidden: false,
         });
     }
     if !params.iter().any(|p| p.kind == ParamKind::Array) {
         return Err(err(
             ErrorKind::Type,
-            "un kernel élément par élément a besoin d'au moins un tableau en paramètre (ex. x: gs.f32[:])".into(),
+            "un kernel a besoin d'au moins un tableau en paramètre (ex. x: gs.f32[:])".into(),
             None,
         ));
     }
+    let grid = if indexed {
+        // Dimensions des sorties : nommées, toutes identiques, présentes dans les entrées.
+        let mut out_dims: Option<Vec<String>> = None;
+        for o in &out_specs {
+            let ds: Vec<String> = match o["dims"].as_array() {
+                Some(ds) if ds.iter().all(|d| d.is_string()) => {
+                    ds.iter().map(|d| d.as_str().unwrap().to_string()).collect()
+                }
+                _ => {
+                    return Err(err(
+                        ErrorKind::Type,
+                        "dans un kernel avec gs.index(), nommez les dimensions de la sortie, ex. -> gs.f32[\"n\", \"n\"]".into(),
+                        None,
+                    ));
+                }
+            };
+            for d in &ds {
+                if !dim_names.contains(d) {
+                    return Err(err(
+                        ErrorKind::Type,
+                        format!(
+                            "dimension « {d} » de la sortie absente des entrées : sa taille est inconnue"
+                        ),
+                        None,
+                    ));
+                }
+            }
+            match &out_dims {
+                Some(prev) if prev != &ds => {
+                    return Err(err(
+                        ErrorKind::Type,
+                        "toutes les sorties doivent avoir les mêmes dimensions".into(),
+                        None,
+                    ));
+                }
+                _ => out_dims = Some(ds),
+            }
+        }
+        // Paramètres cachés : taille de chaque dimension (i32), fournis par le runtime.
+        let base = params.len();
+        for d in &dim_names {
+            params.push(Param {
+                name: format!("gs_dim_{d}"),
+                kind: ParamKind::Scalar,
+                ty: Scalar::I32,
+                dims: vec![],
+                hidden: true,
+            });
+        }
+        let idx = |d: &String| base + dim_names.iter().position(|x| x == d).unwrap();
+        for (p, ds) in params.iter_mut().zip(&param_dims) {
+            p.dims = ds.iter().map(idx).collect();
+        }
+        Grid::Indexed {
+            axes: out_dims.unwrap_or_default().iter().map(idx).collect(),
+        }
+    } else {
+        Grid::Elementwise
+    };
+
     let mut constants = HashMap::new();
     if let Some(obj) = spec["constants"].as_object() {
         for (k, v) in obj {
@@ -101,23 +216,19 @@ pub fn lower(spec: &J) -> R<Kernel> {
             }
         }
     }
-    let modules = spec["modules"]
-        .as_object()
-        .map(|o| {
-            o.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let body_json = spec["body"].as_array().cloned().unwrap_or_default();
     let line_offset = spec["line_offset"].as_u64().unwrap_or(0) as u32;
+    let rank = match &grid {
+        Grid::Indexed { axes } => Some(axes.len()),
+        Grid::Elementwise => None,
+    };
 
     let mut hints: HashMap<String, Scalar> = HashMap::new();
     for _pass in 0..16 {
         let (body, locals, restart) = {
             let mut lw = Lowerer {
                 params: &params,
-                output,
+                outputs: &outputs,
+                rank,
                 constants: &constants,
                 modules: &modules,
                 line_offset,
@@ -145,9 +256,10 @@ pub fn lower(spec: &J) -> R<Kernel> {
         return Ok(Kernel {
             name,
             params,
-            output,
+            outputs,
             locals,
             body,
+            grid,
         });
     }
     Err(err(
@@ -155,6 +267,30 @@ pub fn lower(spec: &J) -> R<Kernel> {
         "impossible de déterminer le type des variables locales".into(),
         None,
     ))
+}
+
+/// Le corps appelle-t-il `gs.index()` ?
+fn uses_index(node: &J, modules: &HashMap<String, String>) -> bool {
+    match node {
+        J::Object(o) => {
+            if o.get("_type").and_then(|t| t.as_str()) == Some("Call") {
+                let f = &node["func"];
+                if f["_type"] == "Attribute"
+                    && f["attr"] == "index"
+                    && f["value"]["_type"] == "Name"
+                    && modules
+                        .get(f["value"]["id"].as_str().unwrap_or(""))
+                        .map(String::as_str)
+                        == Some("gpusync")
+                {
+                    return true;
+                }
+            }
+            o.values().any(|v| uses_index(v, modules))
+        }
+        J::Array(a) => a.iter().any(|v| uses_index(v, modules)),
+        _ => false,
+    }
 }
 
 fn err(kind: ErrorKind, message: String, line: Option<u32>) -> FrontendError {
@@ -229,7 +365,9 @@ fn cast(e: Expr, to: Scalar) -> Expr {
 
 struct Lowerer<'a> {
     params: &'a [Param],
-    output: Scalar,
+    outputs: &'a [Scalar],
+    /// Rang de la grille pour un kernel avec index ; `None` : élément par élément.
+    rank: Option<usize>,
     constants: &'a HashMap<String, Lit>,
     modules: &'a HashMap<String, String>,
     line_offset: u32,
@@ -374,14 +512,30 @@ impl Lowerer<'_> {
             match t {
                 "Assign" => {
                     let targets = s["targets"].as_array().cloned().unwrap_or_default();
-                    if targets.len() != 1 || targets[0]["_type"] != "Name" {
+                    if targets.len() != 1 {
                         return Err(self.e(
                             ErrorKind::Syntax,
-                            "affectation non supportée : une seule variable à gauche (a = ..., pas a, b = ... ni a[i] = ...)",
+                            "affectation multiple a = b = ... non supportée",
                         ));
                     }
-                    let v = self.expr(&s["value"])?;
-                    out.push(self.assign(targets[0]["id"].as_str().unwrap_or(""), v, None)?);
+                    let target = &targets[0];
+                    let value = &s["value"];
+                    if self.is_gs_call(value, "index") {
+                        out.extend(self.assign_index(target)?);
+                    } else if self.is_gs_call(value, "local") {
+                        self.declare_local_array(target, value)?;
+                    } else if target["_type"] == "Subscript" {
+                        let v = self.expr(value)?;
+                        out.push(self.store(target, v)?);
+                    } else if target["_type"] == "Name" {
+                        let v = self.expr(value)?;
+                        out.push(self.assign(target["id"].as_str().unwrap_or(""), v, None)?);
+                    } else {
+                        return Err(self.e(
+                            ErrorKind::Syntax,
+                            "affectation non supportée : une variable (a = ...) ou une case de tableau local (buf[k] = ...) à gauche ; a, b = ... seulement avec gs.index()",
+                        ));
+                    }
                 }
                 "AnnAssign" => {
                     if s["target"]["_type"] != "Name" || s["value"].is_null() {
@@ -393,6 +547,12 @@ impl Lowerer<'_> {
                     let ty = self.annotation_type(&s["annotation"])?;
                     let v = self.expr(&s["value"])?;
                     out.push(self.assign(s["target"]["id"].as_str().unwrap_or(""), v, Some(ty))?);
+                }
+                "AugAssign" if s["target"]["_type"] == "Subscript" => {
+                    let current = self.expr(&s["target"])?;
+                    let rhs = self.expr(&s["value"])?;
+                    let v = self.binop(op_name(&s["op"]), current, rhs)?;
+                    out.push(self.store(&s["target"], v)?);
                 }
                 "AugAssign" => {
                     if s["target"]["_type"] != "Name" {
@@ -457,15 +617,32 @@ impl Lowerer<'_> {
                             "return sans valeur : le kernel doit renvoyer l'élément de sortie",
                         ));
                     }
-                    if s["value"]["_type"] == "Tuple" {
+                    let values: Vec<J> = if s["value"]["_type"] == "Tuple" {
+                        s["value"]["elts"].as_array().cloned().unwrap_or_default()
+                    } else {
+                        vec![s["value"].clone()]
+                    };
+                    if values.len() != self.outputs.len() {
                         return Err(self.e(
-                            ErrorKind::Syntax,
-                            "plusieurs valeurs de retour : prévu au jalon M2",
+                            ErrorKind::Type,
+                            format!(
+                                "{} valeur(s) renvoyée(s) pour {} sortie(s) déclarée(s) (-> ({})…)",
+                                values.len(),
+                                self.outputs.len(),
+                                self.outputs
+                                    .iter()
+                                    .map(|t| format!("gs.{t}[...]"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
                         ));
                     }
-                    let v = self.expr(&s["value"])?;
-                    let e = self.to_ty(v, self.output, "valeur renvoyée")?;
-                    out.push(Stmt::Return(e));
+                    let mut es = Vec::new();
+                    for (v, t) in values.iter().zip(self.outputs.to_vec()) {
+                        let v = self.expr(v)?;
+                        es.push(self.to_ty(v, t, "valeur renvoyée")?);
+                    }
+                    out.push(Stmt::Return(es));
                 }
                 "Pass" => {}
                 "Expr" => {
@@ -509,6 +686,263 @@ impl Lowerer<'_> {
         }
     }
 
+    /// `node` est-il un appel `gs.<fname>(...)` ?
+    fn is_gs_call(&self, node: &J, fname: &str) -> bool {
+        node["_type"] == "Call"
+            && node["func"]["_type"] == "Attribute"
+            && node["func"]["attr"] == fname
+            && self.module_of(&node["func"]["value"]) == Some("gpusync")
+    }
+
+    /// `i, j = gs.index()` : une locale i32 par axe de la grille.
+    fn assign_index(&mut self, target: &J) -> R<Vec<Stmt>> {
+        let Some(rank) = self.rank else {
+            unreachable!("gs.index() implique une grille indexée")
+        };
+        let names: Vec<String> = match target["_type"].as_str() {
+            Some("Name") => vec![target["id"].as_str().unwrap_or("").to_string()],
+            Some("Tuple") => target["elts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .map(|e| {
+                    if e["_type"] == "Name" {
+                        Ok(e["id"].as_str().unwrap_or("").to_string())
+                    } else {
+                        Err(())
+                    }
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|_| {
+                    self.e(
+                        ErrorKind::Syntax,
+                        "gs.index() s'affecte à des variables : i, j = gs.index()",
+                    )
+                })?,
+            _ => {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    "gs.index() s'affecte à des variables : i, j = gs.index()",
+                ));
+            }
+        };
+        if names.len() != rank {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!("gs.index() renvoie {rank} coordonnée(s) (une par dimension de la sortie), {} variable(s) à gauche", names.len()),
+            ));
+        }
+        let mut out = Vec::new();
+        for (a, n) in names.iter().enumerate() {
+            out.push(self.assign(
+                n,
+                Val::E(ex(Scalar::I32, ExprKind::GridIndex(a))),
+                Some(Scalar::I32),
+            )?);
+        }
+        Ok(out)
+    }
+
+    /// `buf = gs.local(gs.f32, N)` : tableau local de N éléments (N constant).
+    fn declare_local_array(&mut self, target: &J, call: &J) -> R<()> {
+        if target["_type"] != "Name" {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                "gs.local(...) s'affecte à une variable : buf = gs.local(gs.f32, 16)",
+            ));
+        }
+        let name = target["id"].as_str().unwrap_or("").to_string();
+        let args = call["args"].as_array().cloned().unwrap_or_default();
+        if args.len() != 2 {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                "gs.local(type, taille) : ex. gs.local(gs.f32, 16)",
+            ));
+        }
+        let ty = self.annotation_type(&args[0])?;
+        if !ty.is_numeric() {
+            return Err(self.e(
+                ErrorKind::Type,
+                "gs.local : type numérique attendu (gs.f32, gs.i32…)",
+            ));
+        }
+        let len = match self.expr(&args[1])? {
+            Val::Lit(Lit::Int(v)) if (1..=1 << 16).contains(&v) => v as u32,
+            _ => {
+                return Err(self.e(
+                    ErrorKind::Type,
+                    "gs.local : la taille doit être une constante entière entre 1 et 65536 (littéral ou constante globale)",
+                ));
+            }
+        };
+        if self.local_index.contains_key(&name) || self.params.iter().any(|p| p.name == name) {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                format!("« {name} » existe déjà : un tableau local se déclare une seule fois"),
+            ));
+        }
+        let i = self.locals.len();
+        self.locals.push(Local {
+            name: name.clone(),
+            ty,
+            len: Some(len),
+        });
+        self.weak.push(false);
+        self.local_index.insert(name, i);
+        Ok(())
+    }
+
+    /// Indice entier i32 (les u32 et les littéraux sont convertis).
+    fn index_expr(&mut self, node: &J) -> R<Expr> {
+        let v = self.expr(node)?;
+        match v.ty() {
+            Scalar::I32 => self.to_ty(v, Scalar::I32, "indice"),
+            Scalar::U32 => Ok(cast(self.materialize(v)?, Scalar::I32)),
+            t => Err(self.e(
+                ErrorKind::Type,
+                format!("indice de type {t} : un indice doit être entier (int(...) si besoin)"),
+            )),
+        }
+    }
+
+    /// `x[i, k]` (tableau d'entrée) ou `buf[k]` (tableau local) → (tableau, indice aplati).
+    fn subscript(&mut self, node: &J) -> R<(Option<usize>, Option<usize>, Expr)> {
+        let base = &node["value"];
+        let id = if base["_type"] == "Name" {
+            base["id"].as_str().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+        let idx_nodes: Vec<J> = if node["slice"]["_type"] == "Tuple" {
+            node["slice"]["elts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            vec![node["slice"].clone()]
+        };
+        if idx_nodes.iter().any(|n| n["_type"] == "Slice") {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                "tranches x[a:b] non supportées dans un kernel : indexez case par case",
+            ));
+        }
+        if let Some(&l) = self.local_index.get(&id) {
+            if self.locals[l].len.is_some() {
+                if idx_nodes.len() != 1 {
+                    return Err(self.e(
+                        ErrorKind::Syntax,
+                        format!("le tableau local '{id}' a une dimension : {id}[k]"),
+                    ));
+                }
+                let i = self.index_expr(&idx_nodes[0])?;
+                return Ok((None, Some(l), i));
+            }
+        }
+        if let Some(p) = self
+            .params
+            .iter()
+            .position(|p| p.name == id && p.kind == ParamKind::Array)
+        {
+            if self.rank.is_none() {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    format!("indexation {id}[...] : dans un kernel élément par élément, `{id}` désigne déjà l'élément courant (pour indexer, utilisez gs.index() et des dimensions nommées)"),
+                ));
+            }
+            let dims = self.params[p].dims.clone();
+            if idx_nodes.len() != dims.len() {
+                return Err(self.e(
+                    ErrorKind::Type,
+                    format!(
+                        "'{id}' a {} dimension(s), {} indice(s) donné(s)",
+                        dims.len(),
+                        idx_nodes.len()
+                    ),
+                ));
+            }
+            // Indice aplati, ordre C : ((i0 * d1 + i1) * d2 + i2)…
+            let mut flat: Option<Expr> = None;
+            for (k, n) in idx_nodes.iter().enumerate() {
+                let i = self.index_expr(n)?;
+                flat = Some(match flat {
+                    None => i,
+                    Some(acc) => {
+                        let d = ex(Scalar::I32, ExprKind::Param(dims[k]));
+                        let mul = ex(
+                            Scalar::I32,
+                            ExprKind::Binary(BinOp::Mul, Box::new(acc), Box::new(d)),
+                        );
+                        ex(
+                            Scalar::I32,
+                            ExprKind::Binary(BinOp::Add, Box::new(mul), Box::new(i)),
+                        )
+                    }
+                });
+            }
+            return Ok((Some(p), None, flat.unwrap()));
+        }
+        Err(self.e(ErrorKind::Syntax, "indexation non supportée : seuls les tableaux d'entrée et les tableaux locaux (gs.local) s'indexent".to_string()))
+    }
+
+    /// `buf[k] = v` : écriture dans un tableau local (les entrées sont en lecture seule).
+    fn store(&mut self, target: &J, v: Val) -> R<Stmt> {
+        let (param, local, index) = self.subscript(target)?;
+        match (param, local) {
+            (_, Some(l)) => {
+                let ty = self.locals[l].ty;
+                let value = self.to_ty(v, ty, "écriture dans un tableau local")?;
+                Ok(Stmt::LocalStore {
+                    local: l,
+                    index,
+                    value,
+                })
+            }
+            (Some(p), _) => Err(self.e(
+                ErrorKind::Syntax,
+                format!(
+                    "'{}' est une entrée, en lecture seule : le résultat s'écrit avec return",
+                    self.params[p].name
+                ),
+            )),
+            _ => unreachable!(),
+        }
+    }
+
+    /// `x.shape[k]` / `len(x)` : taille d'un axe (i32).
+    fn shape_of(&self, id: &str, axis: i64) -> R<Val> {
+        if let Some(&l) = self.local_index.get(id) {
+            if let Some(n) = self.locals[l].len {
+                if axis == 0 || axis == -1 {
+                    return Ok(Val::Lit(Lit::Int(n as i64)));
+                }
+            }
+        }
+        let Some(p) = self
+            .params
+            .iter()
+            .find(|p| p.name == id && p.kind == ParamKind::Array)
+        else {
+            return Err(self.e(ErrorKind::Syntax, format!("« {id} » n'est pas un tableau")));
+        };
+        if self.rank.is_none() {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                format!("{id}.shape : disponible dans les kernels avec gs.index() et des dimensions nommées"),
+            ));
+        }
+        let rank = p.dims.len() as i64;
+        let a = if axis < 0 { axis + rank } else { axis };
+        if !(0..rank).contains(&a) {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!("{id}.shape[{axis}] : '{id}' a {rank} dimension(s)"),
+            ));
+        }
+        Ok(Val::E(ex(Scalar::I32, ExprKind::Param(p.dims[a as usize]))))
+    }
+
     fn assign(&mut self, name: &str, v: Val, declared: Option<Scalar>) -> R<Stmt> {
         if self.params.iter().any(|p| p.name == name) {
             return Err(self.e(
@@ -526,6 +960,9 @@ impl Lowerer<'_> {
         }
         let idx = match self.local_index.get(name) {
             Some(&i) => {
+                if self.locals[i].len.is_some() {
+                    return Err(self.e(ErrorKind::Syntax, format!("'{name}' est un tableau local : écrivez dans ses cases ({name}[k] = ...)")));
+                }
                 if let Some(d) = declared {
                     if d != self.locals[i].ty {
                         return Err(self.e(
@@ -558,6 +995,7 @@ impl Lowerer<'_> {
                     .unwrap_or(v.ty());
                 let i = self.locals.len();
                 self.locals.push(Local {
+                    len: None,
                     name: name.to_string(),
                     ty,
                 });
@@ -690,10 +1128,22 @@ impl Lowerer<'_> {
     }
 
     fn name(&self, id: &str) -> R<Val> {
-        if let Some(i) = self.params.iter().position(|p| p.name == id) {
+        if let Some(i) = self.params.iter().position(|p| p.name == id && !p.hidden) {
+            if self.params[i].kind == ParamKind::Array && self.rank.is_some() {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    format!("'{id}' est un tableau : indexez-le ({id}[i, ...]) avec les coordonnées de gs.index()"),
+                ));
+            }
             return Ok(Val::E(ex(self.params[i].ty, ExprKind::Param(i))));
         }
         if let Some(&i) = self.local_index.get(id) {
+            if self.locals[i].len.is_some() {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    format!("'{id}' est un tableau local : indexez-le ({id}[k])"),
+                ));
+            }
             return Ok(Val::E(ex(self.locals[i].ty, ExprKind::Local(i))));
         }
         if let Some(l) = self.constants.get(id) {
@@ -710,7 +1160,10 @@ impl Lowerer<'_> {
         match node["_type"].as_str().unwrap_or("") {
             "Constant" => match parse_lit(&node["value"]) {
                 Some(l) => Ok(Val::Lit(l)),
-                None => Err(self.e(ErrorKind::Syntax, "seules les constantes numériques et booléennes sont supportées")),
+                None => Err(self.e(
+                    ErrorKind::Syntax,
+                    "seules les constantes numériques et booléennes sont supportées",
+                )),
             },
             "Name" => self.name(node["id"].as_str().unwrap_or("")),
             "BinOp" => {
@@ -737,13 +1190,20 @@ impl Lowerer<'_> {
                 }
             }
             "BoolOp" => {
-                let op = if node["op"]["_type"] == "And" { BinOp::And } else { BinOp::Or };
+                let op = if node["op"]["_type"] == "And" {
+                    BinOp::And
+                } else {
+                    BinOp::Or
+                };
                 let values = node["values"].as_array().cloned().unwrap_or_default();
                 let mut acc: Option<Expr> = None;
                 for v in &values {
                     let v = self.expr(v)?;
                     if v.ty() != Scalar::Bool {
-                        return Err(self.e(ErrorKind::Type, "`and` / `or` attendent des booléens (comparaisons)"));
+                        return Err(self.e(
+                            ErrorKind::Type,
+                            "`and` / `or` attendent des booléens (comparaisons)",
+                        ));
                     }
                     let e = self.materialize(v)?;
                     acc = Some(match acc {
@@ -751,7 +1211,9 @@ impl Lowerer<'_> {
                         Some(a) => ex(Scalar::Bool, ExprKind::Binary(op, Box::new(a), Box::new(e))),
                     });
                 }
-                Ok(Val::E(acc.ok_or_else(|| self.e(ErrorKind::Syntax, "expression booléenne vide"))?))
+                Ok(Val::E(acc.ok_or_else(|| {
+                    self.e(ErrorKind::Syntax, "expression booléenne vide")
+                })?))
             }
             "Compare" => {
                 let ops = node["ops"].as_array().cloned().unwrap_or_default();
@@ -767,52 +1229,127 @@ impl Lowerer<'_> {
                         "LtE" => CmpOp::Le,
                         "Gt" => CmpOp::Gt,
                         "GtE" => CmpOp::Ge,
-                        o => return Err(self.e(ErrorKind::Syntax, format!("comparaison « {o} » non supportée (is, in…)"))),
+                        o => {
+                            return Err(self.e(
+                                ErrorKind::Syntax,
+                                format!("comparaison « {o} » non supportée (is, in…)"),
+                            ));
+                        }
                     };
-                    let ty = if left.ty() == Scalar::Bool && right.ty() == Scalar::Bool && matches!(cmp, CmpOp::Eq | CmpOp::Ne) {
+                    let ty = if left.ty() == Scalar::Bool
+                        && right.ty() == Scalar::Bool
+                        && matches!(cmp, CmpOp::Eq | CmpOp::Ne)
+                    {
                         Scalar::Bool
                     } else {
                         self.unify(&left, &right, "comparaison")?
                     };
-                    let (a, b) = (self.to_ty(left, ty, "comparaison")?, self.to_ty(right.clone(), ty, "comparaison")?);
-                    let c = ex(Scalar::Bool, ExprKind::Compare(cmp, Box::new(a), Box::new(b)));
+                    let (a, b) = (
+                        self.to_ty(left, ty, "comparaison")?,
+                        self.to_ty(right.clone(), ty, "comparaison")?,
+                    );
+                    let c = ex(
+                        Scalar::Bool,
+                        ExprKind::Compare(cmp, Box::new(a), Box::new(b)),
+                    );
                     acc = Some(match acc {
                         None => c,
-                        Some(prev) => ex(Scalar::Bool, ExprKind::Binary(BinOp::And, Box::new(prev), Box::new(c))),
+                        Some(prev) => ex(
+                            Scalar::Bool,
+                            ExprKind::Binary(BinOp::And, Box::new(prev), Box::new(c)),
+                        ),
                     });
                     left = right;
                 }
-                Ok(Val::E(acc.ok_or_else(|| self.e(ErrorKind::Syntax, "comparaison vide"))?))
+                Ok(Val::E(acc.ok_or_else(|| {
+                    self.e(ErrorKind::Syntax, "comparaison vide")
+                })?))
             }
             "IfExp" => {
                 let cond = self.condition(&node["test"])?;
                 let a = self.expr(&node["body"])?;
                 let b = self.expr(&node["orelse"])?;
-                let ty = if a.ty() == Scalar::Bool && b.ty() == Scalar::Bool { Scalar::Bool } else { self.unify(&a, &b, "a if c else b")? };
-                let (a, b) = (self.to_ty(a, ty, "ternaire")?, self.to_ty(b, ty, "ternaire")?);
-                Ok(Val::E(ex(ty, ExprKind::Select(Box::new(cond), Box::new(a), Box::new(b)))))
+                let ty = if a.ty() == Scalar::Bool && b.ty() == Scalar::Bool {
+                    Scalar::Bool
+                } else {
+                    self.unify(&a, &b, "a if c else b")?
+                };
+                let (a, b) = (
+                    self.to_ty(a, ty, "ternaire")?,
+                    self.to_ty(b, ty, "ternaire")?,
+                );
+                Ok(Val::E(ex(
+                    ty,
+                    ExprKind::Select(Box::new(cond), Box::new(a), Box::new(b)),
+                )))
             }
             "Call" => self.call(node),
             "Attribute" => {
                 let attr = node["attr"].as_str().unwrap_or("");
                 match (self.module_of(&node["value"]), attr) {
-                    (Some("math" | "gpusync"), "pi") => Ok(Val::Lit(Lit::Float(std::f64::consts::PI))),
-                    (Some("math" | "gpusync"), "e") => Ok(Val::Lit(Lit::Float(std::f64::consts::E))),
-                    (Some("math" | "gpusync"), "tau") => Ok(Val::Lit(Lit::Float(std::f64::consts::TAU))),
+                    (Some("math" | "gpusync"), "pi") => {
+                        Ok(Val::Lit(Lit::Float(std::f64::consts::PI)))
+                    }
+                    (Some("math" | "gpusync"), "e") => {
+                        Ok(Val::Lit(Lit::Float(std::f64::consts::E)))
+                    }
+                    (Some("math" | "gpusync"), "tau") => {
+                        Ok(Val::Lit(Lit::Float(std::f64::consts::TAU)))
+                    }
                     (Some("math" | "gpusync"), "inf") => Ok(Val::Lit(Lit::Float(f64::INFINITY))),
                     (Some("math" | "gpusync"), "nan") => Ok(Val::Lit(Lit::Float(f64::NAN))),
-                    _ => Err(self.e(ErrorKind::Syntax, format!("attribut « .{attr} » non supporté dans un kernel"))),
+                    _ => Err(self.e(
+                        ErrorKind::Syntax,
+                        format!("attribut « .{attr} » non supporté dans un kernel"),
+                    )),
                 }
             }
-            "Subscript" => Err(self.e(
-                ErrorKind::Syntax,
-                "indexation x[...] : dans un kernel élément par élément, `x` désigne déjà l'élément courant (l'indexation explicite arrive au jalon M2)",
-            )),
-            "List" | "ListComp" | "Dict" | "Set" | "Tuple" => {
-                Err(self.e(ErrorKind::Syntax, "listes, tuples et dictionnaires ne sont pas supportés dans un kernel"))
+            "Subscript" => {
+                let base = &node["value"];
+                if base["_type"] == "Attribute"
+                    && base["attr"] == "shape"
+                    && base["value"]["_type"] == "Name"
+                {
+                    let axis = match parse_lit(&node["slice"]["value"]) {
+                        Some(Lit::Int(a)) if node["slice"]["_type"] == "Constant" => a,
+                        _ => match &node["slice"] {
+                            n if n["_type"] == "UnaryOp" && n["op"]["_type"] == "USub" => {
+                                match parse_lit(&n["operand"]["value"]) {
+                                    Some(Lit::Int(a)) => -a,
+                                    _ => {
+                                        return Err(self.e(
+                                            ErrorKind::Syntax,
+                                            "x.shape[k] : k doit être un entier constant",
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(self.e(
+                                    ErrorKind::Syntax,
+                                    "x.shape[k] : k doit être un entier constant",
+                                ));
+                            }
+                        },
+                    };
+                    return self.shape_of(base["value"]["id"].as_str().unwrap_or(""), axis);
+                }
+                let (param, local, index) = self.subscript(node)?;
+                Ok(Val::E(match (param, local) {
+                    (Some(p), _) => ex(self.params[p].ty, ExprKind::Load(p, Box::new(index))),
+                    (_, Some(l)) => ex(self.locals[l].ty, ExprKind::LocalLoad(l, Box::new(index))),
+                    _ => unreachable!(),
+                }))
             }
+            "List" | "ListComp" | "Dict" | "Set" | "Tuple" => Err(self.e(
+                ErrorKind::Syntax,
+                "listes, tuples et dictionnaires ne sont pas supportés dans un kernel",
+            )),
             "Lambda" => Err(self.e(ErrorKind::Syntax, "lambda non supportée dans un kernel")),
-            other => Err(self.e(ErrorKind::Syntax, format!("expression Python non supportée dans un kernel : {other}"))),
+            other => Err(self.e(
+                ErrorKind::Syntax,
+                format!("expression Python non supportée dans un kernel : {other}"),
+            )),
         }
     }
 
@@ -875,6 +1412,28 @@ impl Lowerer<'_> {
         };
         let module = module_owned.as_deref();
         let args = node["args"].as_array().cloned().unwrap_or_default();
+        // Appels dont les arguments ne sont pas des valeurs : traités avant d'évaluer les arguments.
+        match (module, fname) {
+            (None, "len") => {
+                let a = args
+                    .first()
+                    .filter(|a| a["_type"] == "Name" && args.len() == 1);
+                return match a {
+                    Some(a) => self.shape_of(a["id"].as_str().unwrap_or(""), 0),
+                    None => Err(self.e(ErrorKind::Syntax, "len(x) : x doit être un tableau")),
+                };
+            }
+            (Some("gpusync"), "index") => {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    "gs.index() s'utilise seul dans une affectation : i, j = gs.index()",
+                ));
+            }
+            (Some("gpusync"), "local") => {
+                return Err(self.e(ErrorKind::Syntax, "gs.local(...) s'utilise seul dans une affectation : buf = gs.local(gs.f32, 16)"));
+            }
+            _ => {}
+        }
         let mut vals = args.iter().map(|a| self.expr(a)).collect::<R<Vec<_>>>()?;
 
         // Conversions explicites
@@ -934,12 +1493,7 @@ impl Lowerer<'_> {
                     "range() n'est utilisable que dans `for i in range(...)`",
                 ));
             }
-            (None, "len") => {
-                return Err(self.e(
-                    ErrorKind::Syntax,
-                    "len() : prévu au jalon M2 (dimensions nommées)",
-                ));
-            }
+
             _ => {
                 return Err(self.e(
                     ErrorKind::Syntax,

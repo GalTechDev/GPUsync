@@ -106,7 +106,7 @@ impl Const {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
-    /// Tableau : dans le corps, désigne l'élément courant.
+    /// Tableau : élément courant (kernel élément par élément) ou lu par indices (`x[i, k]`).
     Array,
     /// Scalaire passé tel quel à tous les threads.
     Scalar,
@@ -117,22 +117,39 @@ pub struct Param {
     pub name: String,
     pub kind: ParamKind,
     pub ty: Scalar,
+    /// Tableau d'un kernel avec index : paramètres (cachés, i32) donnant la taille de chaque axe.
+    pub dims: Vec<usize>,
+    /// Paramètre ajouté par le frontend (taille d'une dimension nommée), fourni par le runtime.
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Local {
     pub name: String,
     pub ty: Scalar,
+    /// `Some(n)` : tableau local de `n` éléments (`gs.local(type, n)`), propre à chaque thread.
+    pub len: Option<u32>,
 }
 
-/// Un kernel élément par élément.
+/// Forme de la grille de threads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Grid {
+    /// Un thread par élément des tableaux (tous de même forme) ; les tableaux désignent l'élément courant.
+    Elementwise,
+    /// Un thread par case de la sortie ; `axes` : paramètres cachés donnant la taille de chaque axe.
+    Indexed { axes: Vec<usize> },
+}
+
+/// Un kernel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Kernel {
     pub name: String,
     pub params: Vec<Param>,
-    pub output: Scalar,
+    /// Types des sorties (une ou plusieurs, de même forme).
+    pub outputs: Vec<Scalar>,
     pub locals: Vec<Local>,
     pub body: Block,
+    pub grid: Grid,
 }
 
 pub type Block = Vec<Stmt>;
@@ -162,8 +179,14 @@ pub enum Stmt {
     },
     Break,
     Continue,
-    /// Écrit la valeur de l'élément courant de la sortie et termine le thread.
-    Return(Expr),
+    /// `buf[index] = value` sur un tableau local.
+    LocalStore {
+        local: usize,
+        index: Expr,
+        value: Expr,
+    },
+    /// Écrit la case courante de chaque sortie et termine le thread.
+    Return(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,6 +210,12 @@ pub enum ExprKind {
     Call(Intrinsic, Vec<Expr>),
     /// Conversion vers `ty`.
     Cast(Box<Expr>),
+    /// Lecture `param[index]` (indice aplati, i32) d'un tableau d'entrée.
+    Load(usize, Box<Expr>),
+    /// Lecture `local[index]` d'un tableau local.
+    LocalLoad(usize, Box<Expr>),
+    /// Coordonnée du thread sur l'axe donné de la grille (i32).
+    GridIndex(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,7 +334,7 @@ impl Intrinsic {
 
 impl Kernel {
     pub fn requirements(&self) -> Requirements {
-        let mut f64 = self.output == Scalar::F64
+        let mut f64 = self.outputs.contains(&Scalar::F64)
             || self.params.iter().any(|p| p.ty == Scalar::F64)
             || self.locals.iter().any(|l| l.ty == Scalar::F64);
         let mut f64_math_op: Option<&'static str> = None;
@@ -345,8 +374,14 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
     fn expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         f(e);
         match &e.kind {
-            ExprKind::Const(_) | ExprKind::Local(_) | ExprKind::Param(_) => {}
-            ExprKind::Unary(_, a) | ExprKind::Cast(a) => expr(a, f),
+            ExprKind::Const(_)
+            | ExprKind::Local(_)
+            | ExprKind::Param(_)
+            | ExprKind::GridIndex(_) => {}
+            ExprKind::Unary(_, a)
+            | ExprKind::Cast(a)
+            | ExprKind::Load(_, a)
+            | ExprKind::LocalLoad(_, a) => expr(a, f),
             ExprKind::Binary(_, a, b) | ExprKind::Compare(_, a, b) => {
                 expr(a, f);
                 expr(b, f);
@@ -361,7 +396,12 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
     }
     for s in block {
         match s {
-            Stmt::Assign { value, .. } | Stmt::Return(value) => expr(value, f),
+            Stmt::Assign { value, .. } => expr(value, f),
+            Stmt::Return(values) => values.iter().for_each(|v| expr(v, f)),
+            Stmt::LocalStore { index, value, .. } => {
+                expr(index, f);
+                expr(value, f);
+            }
             Stmt::If {
                 cond,
                 then,

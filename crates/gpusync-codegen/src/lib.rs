@@ -1,9 +1,9 @@
 //! Génération de code : IR → OpenCL C (≥ 1.2) et WGSL (ARCHITECTURE.md §7).
 //!
 //! Disposition des arguments (commune à l'exécution) :
-//! - **OpenCL** : paramètres dans l'ordre déclaré (tableaux = buffers, scalaires = valeurs),
-//!   puis le buffer de sortie, puis `n` (uint).
-//! - **WGSL** : un binding par tableau d'entrée (ordre déclaré), puis la sortie, puis un buffer
+//! - **OpenCL** : paramètres dans l'ordre déclaré (tableaux = buffers, scalaires = valeurs, dont les
+//!   dimensions cachées des kernels avec index, en dernier), puis un buffer par sortie, puis `n` (uint).
+//! - **WGSL** : un binding par tableau d'entrée (ordre déclaré), puis un par sortie, puis un buffer
 //!   `array<u32>` contenant les scalaires non f64 (un mot chacun) suivis de `n`, puis — seulement si le
 //!   kernel a des scalaires f64 — un buffer `array<f64>` avec ces scalaires.
 
@@ -122,6 +122,10 @@ impl Out {
 mod tests {
     use super::*;
 
+    pub(crate) fn ret(e: Expr) -> Stmt {
+        Stmt::Return(vec![e])
+    }
+
     pub(crate) fn e(ty: Scalar, kind: ExprKind) -> Expr {
         Expr { ty, kind }
     }
@@ -138,27 +142,36 @@ mod tests {
                     name: "x".into(),
                     kind: ParamKind::Array,
                     ty: Scalar::F32,
+                    dims: vec![],
+                    hidden: false,
                 },
                 Param {
                     name: "moyenne".into(),
                     kind: ParamKind::Scalar,
                     ty: Scalar::F32,
+                    dims: vec![],
+                    hidden: false,
                 },
                 Param {
                     name: "écart".into(),
                     kind: ParamKind::Scalar,
                     ty: Scalar::I32,
+                    dims: vec![],
+                    hidden: false,
                 },
             ],
-            output: Scalar::F32,
+            outputs: vec![Scalar::F32],
+            grid: Grid::Elementwise,
             locals: vec![
                 Local {
                     name: "acc".into(),
                     ty: Scalar::F32,
+                    len: None,
                 },
                 Local {
                     name: "i".into(),
                     ty: Scalar::I32,
+                    len: None,
                 },
             ],
             body: vec![
@@ -183,7 +196,7 @@ mod tests {
                         ),
                     }],
                 },
-                Stmt::Return(e(
+                ret(e(
                     Scalar::F32,
                     ExprKind::Select(
                         Box::new(e(Scalar::Bool, ExprKind::Compare(CmpOp::Gt, x(), c(0.0)))),

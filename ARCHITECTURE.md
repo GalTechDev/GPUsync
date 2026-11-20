@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M1.5 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M2 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -10,6 +10,31 @@
 | M0 Squelette | ✅ workspace Cargo, PyO3 0.30 (abi3-py310) + maturin 1.16, `gs.devices()` / `gs.backends()` via wgpu 30 et opencl3 0.12 (chargement dynamique) | Mac M5 Pro (Python 3.15) ; PC Windows RTX 4080 SUPER + UHD 770 (Python 3.10) |
 | M1 MVP | ✅ `@gs.kernel` élément par élément, IR + interpréteur, émetteurs OpenCL C et WGSL, `gs.Array`, zéro-copie OpenCL | Mac : Metal, OpenCL, cpu (75 tests) ; PC : Vulkan et OpenCL sur RTX 4080 SUPER et UHD 770, cpu (104 tests) |
 | M1.5 Transferts et choix automatique | ✅ f64 via Vulkan, besoins `f64` / `f64_math`, classement des périphériques, option `compat` ; moteur de transferts (Direct, Résident, Flux) pour OpenCL et wgpu ; zéro-copie Metal (`NoCopy` via wgpu-hal) ; `out=`, `np.memmap`, `.stream()`, `gs.OutOfMemory`, `gs.set_memory_budget` | Mac : 109 tests ; PC : 164 tests ; essais à gros volume ci-dessous |
+| M2 Index et formes | ✅ `gs.index()`, dimensions nommées (`gs.f32["n", "t"]`, axes sans nom `gs.f32[:, :]`), `x.shape[k]`, `len(x)`, plusieurs sorties (`-> (gs.f32["n"], gs.i32["n"])`, `out=` en tuple), `gs.local`, réductions de `gs.Array` sur l'hôte ; moteur à plusieurs sorties ; perte du GPU par le driver (TDR) : erreur claire et réouverture | Mac : 152 tests ; PC : 228 tests ; DTW identique au prototype |
+
+#### Mesures M2 (`tools/bench_m2.py`, à chaud, résultat lu sur l'hôte)
+
+DTW (fenêtre 5) entre toutes les paires de séries ; écart avec le prototype ≤ 2e-7 en relatif (identique au
+bit près en OpenCL sur le Mac) sur les 391 séries `OXYGENE` (`tests/data`).
+
+| Cas | `metal:0` | `opencl:0` Mac | `vulkan:0` RTX | `opencl:0` RTX | `vulkan:1` UHD | `opencl:1` UHD | `cpu:0` |
+|---|---|---|---|---|---|---|---|
+| 391 × 391, séries de 21 | 3,0 ms | 1,9 ms | 1,3 ms | 0,9 ms | 81 ms | 103 ms | 6,3 s (Mac) |
+| 4000 × 4000, séries de 64 | 1,41 s | 1,12 s | 1,13 s | 0,42 s | perdu (TDR) | 73 s | — |
+
+#### Décisions et constats de M2
+
+- **Un seul bloc pour les kernels avec index** : les entrées sont lues en entier par chaque case (DTW,
+  distances), la grille couvre toute la sortie. Si l'appel ne tient pas dans le budget (GPU dédié) ou dans un
+  buffer, erreur claire renvoyant au M3 (§9.7). Les kernels élément par élément gardent les trois modes.
+- **Dimensions cachées** : chaque dimension distincte (nommée, ou `param.axe` sans nom) devient un paramètre
+  `i32` caché, fourni par le runtime depuis les formes ; les indices `x[i, k]` sont aplatis en ordre C.
+- **TDR Windows** : sur l'UHD 770, un DTW 4000×4000 dépasse ~2 s en Vulkan ; le driver perd le périphérique et
+  wgpu paniquait à l'appel suivant. Désormais : `gs.DeviceError` explicite, puis le périphérique et les kernels
+  compilés sont rouverts au prochain appel. OpenCL sur le même GPU n'est pas interrompu (73 s). Découper la
+  grille en plusieurs soumissions (M3) supprimera ce cas.
+- **Vulkan 2,7 fois plus lent qu'OpenCL sur la RTX** pour le DTW (tableaux locaux de 257 éléments par case) :
+  piste à mesurer (initialisation et contrôles de bornes des tableaux `var<function>` en WGSL).
 
 #### Mesures M1.5 (`tools/bench_m15.py`, résultat vérifié en entier)
 
@@ -251,7 +276,15 @@ dist = pairwise_dist(series)      # (2000, 365) → n=2000, t=365 → sortie (20
 1. Les dimensions nommées sont liées depuis les formes des entrées (`n=2000`, `t=365`).
 2. Une même dimension doit avoir la même taille partout, sinon `gs.ShapeMismatch` avant tout lancement.
 3. La sortie est allouée à la forme déclarée ; la grille vaut cette forme.
-4. Une dimension de sortie absente des entrées est une erreur de déclaration (à fournir via `dims={"k": 10}`).
+4. Une dimension de sortie absente des entrées est une erreur de déclaration (un paramètre `dims={"k": 10}`
+   pourra la fournir plus tard).
+5. Un axe sans nom (`gs.f32[:, :]`) a une taille libre, lisible par `x.shape[k]` (`k` négatif accepté) ;
+   `len(x)` vaut `x.shape[0]`. Toutes les sorties portent des noms.
+6. Indexation : `x[i, k]` (un indice par dimension, ordre C) ; un indice hors limites donne un résultat
+   indéfini sur GPU et une erreur dans l'interpréteur `cpu:0`.
+
+Tableau local à chaque case : `buf = gs.local(gs.f32, 64)` (taille constante, mis à zéro), indexé par
+`buf[k]` en lecture et en écriture.
 
 ### 4.4 Plusieurs sorties
 
@@ -668,8 +701,8 @@ Les trois modes exécutent le même code généré : un bloc est vu par le kerne
 - **Les limites matérielles deviennent des tailles de bloc** : 1 Gio par liaison sur l'UHD 770 en Vulkan,
   3,3 Gio par allocation sur le M5 Pro en OpenCL. Aucune n'est plus une erreur.
 - **Élément par élément** : un bloc est une sous-plage d'indices de toutes les entrées et de la sortie.
-- **Avec index (M2)** : découpage de la sortie le long de sa première dimension ; une entrée qui ne partage
-  pas cette dimension est résidente (§9.7).
+- **Avec index** : M2 lance la grille en un seul bloc (entrées entières) ; M3 découpera la sortie le long de
+  sa première dimension, une entrée qui ne partage pas cette dimension restant résidente (§9.7).
 
 ### 9.3 Transferts sur GPU dédié
 
@@ -715,7 +748,7 @@ Les trois modes exécutent le même code généré : un bloc est vu par le kerne
   supprimera ces allers-retours.
 - Mode Direct : pas de transfert dans aucun cas.
 
-### 9.7 Ce qui est découpable (kernels avec index, M2)
+### 9.7 Ce qui est découpable (kernels avec index, M3)
 
 On découpe la grille le long de sa **première dimension**. Pour chaque entrée :
 - si elle partage cette dimension (même nom), elle est découpée de la même façon ;
@@ -793,7 +826,7 @@ Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget �
 |---|---|---|
 | D1 | IR maison ou bâtir sur CubeCL ? | IR maison, car OpenCL C est une cible obligatoire. Vérifier les cibles actuelles de CubeCL avant de trancher |
 | D2 | Version minimale de Python | ✅ 3.10 (abi3), décidé à M0 |
-| D3 | `f16` dans le MVP ? | non, à M2 si utile |
+| D3 | `f16` dans le MVP ? | non ; pas de besoin constaté à M2, à revoir avec un cas réel |
 | D4 | Strides (vues non contiguës) | copie contiguë dans le MVP ; à mesurer |
 | D5 | Nom du projet : garder « GPUsync » ? | à décider |
 | D6 | Licence | MIT, comme le prototype |

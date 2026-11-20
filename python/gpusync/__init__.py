@@ -11,7 +11,7 @@
     y = normalize(x, x.mean(), x.std())     # gs.Array : calcul lancé sur le GPU
     print(y[:5])                            # attend la fin et rapatrie
 
-État : jalon M1 (kernels élément par élément). Voir ARCHITECTURE.md.
+État : jalon M2 (kernels élément par élément et avec index). Voir ARCHITECTURE.md.
 """
 
 from . import _core

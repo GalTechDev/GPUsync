@@ -109,6 +109,9 @@ impl Gen<'_> {
                     _ => format!("{}({})", intrinsic_name(*f), a.join(", ")),
                 }
             }
+            ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.expr(i)),
+            ExprKind::LocalLoad(l, i) => format!("{}[{}]", local_name(self.k, *l), self.expr(i)),
+            ExprKind::GridIndex(a) => format!("gs_g{a}"),
             ExprKind::Cast(a) => format!("{}({})", w_type(e.ty), self.expr(a)),
         }
     }
@@ -187,9 +190,24 @@ impl Gen<'_> {
             }
             Stmt::Break => self.out.line("break;"),
             Stmt::Continue => self.out.line("continue;"),
-            Stmt::Return(e) => {
-                let r = format!("gs_out[gs_i] = {};", self.expr(e));
-                self.out.line(r);
+            Stmt::LocalStore {
+                local,
+                index,
+                value,
+            } => {
+                let l = format!(
+                    "{}[{}] = {};",
+                    local_name(self.k, *local),
+                    self.expr(index),
+                    self.expr(value)
+                );
+                self.out.line(l);
+            }
+            Stmt::Return(es) => {
+                for (o, e) in es.iter().enumerate() {
+                    let r = format!("gs_out{o}[gs_i] = {};", self.expr(e));
+                    self.out.line(r);
+                }
                 self.out.line("return;");
             }
         }
@@ -262,10 +280,14 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
         ));
         binding += 1;
     }
-    g.out.line(format!(
-        "@group(0) @binding({binding}) var<storage, read_write> gs_out: array<{}>;",
-        w_type(k.output)
-    ));
+    for (o, t) in k.outputs.iter().enumerate() {
+        g.out.line(format!(
+            "@group(0) @binding({binding}) var<storage, read_write> gs_out{o}: array<{}>;",
+            w_type(*t)
+        ));
+        binding += 1;
+    }
+    let binding = binding - 1; // dernier binding de sortie : les paramètres suivent
     g.out.line(format!(
         "@group(0) @binding({}) var<storage, read> gs_params: array<u32>;",
         binding + 1
@@ -317,9 +339,29 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
             g.out.line(format!("let {} = {read};", param_name(k, i)));
         }
     }
+    if let Grid::Indexed { axes } = &k.grid {
+        // Coordonnées du thread dans la grille (forme de la sortie, ordre C).
+        g.out.line("var gs_r = gs_i;");
+        for (a, p) in axes.iter().enumerate().rev() {
+            let size = param_name(k, *p);
+            g.out
+                .line(format!("let gs_g{a} = i32(gs_r % u32({size}));"));
+            if a > 0 {
+                g.out.line(format!("gs_r = gs_r / u32({size});"));
+            }
+        }
+    }
     for (i, l) in k.locals.iter().enumerate() {
-        g.out
-            .line(format!("var {}: {};", local_name(k, i), w_type(l.ty)));
+        match l.len {
+            Some(n) => g.out.line(format!(
+                "var {}: array<{}, {n}>;",
+                local_name(k, i),
+                w_type(l.ty)
+            )),
+            None => g
+                .out
+                .line(format!("var {}: {};", local_name(k, i), w_type(l.ty))),
+        }
     }
     g.block(&k.body);
     g.out.depth = 0;
@@ -343,7 +385,7 @@ mod tests {
             "{c}"
         );
         assert!(
-            c.contains("@binding(1) var<storage, read_write> gs_out: array<f32>;"),
+            c.contains("@binding(1) var<storage, read_write> gs_out0: array<f32>;"),
             "{c}"
         );
         assert!(
@@ -363,13 +405,14 @@ mod tests {
     fn f64_arithmetique_accepte_mais_pas_les_fonctions_transcendantes() {
         let mut k = crate::tests::sample();
         // Tout en f64 : le sample utilise ** (pow) → refusé.
-        k.output = Scalar::F64;
+        k.outputs = vec![Scalar::F64];
         k.params[0].ty = Scalar::F64;
         k.params[1].ty = Scalar::F64;
         fn retype(b: &mut Block) {
             for s in b {
                 match s {
-                    Stmt::Assign { value, .. } | Stmt::Return(value) => retype_e(value),
+                    Stmt::Assign { value, .. } => retype_e(value),
+                    Stmt::Return(values) => values.iter_mut().for_each(retype_e),
                     Stmt::For { body, .. } => retype(body),
                     _ => {}
                 }
@@ -398,7 +441,8 @@ mod tests {
         let err = emit_wgsl(&k).unwrap_err().0;
         assert!(err.contains("**") && err.contains("f64"), "{err}");
         // Sans le ** : accepté, avec le buffer gs_fparams et le % flottant f64.
-        if let Stmt::Return(e) = &mut k.body[2] {
+        if let Stmt::Return(es) = &mut k.body[2] {
+            let e = &mut es[0];
             if let ExprKind::Select(_, a, _) = &mut e.kind {
                 **a = Expr {
                     ty: Scalar::F64,

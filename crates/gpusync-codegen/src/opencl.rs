@@ -98,6 +98,9 @@ impl Gen<'_> {
                     _ => format!("{}({})", intrinsic_name(*f), a.join(", ")),
                 }
             }
+            ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.expr(i)),
+            ExprKind::LocalLoad(l, i) => format!("{}[{}]", local_name(self.k, *l), self.expr(i)),
+            ExprKind::GridIndex(a) => format!("gs_g{a}"),
             ExprKind::Cast(a) if e.ty == Scalar::Bool => format!("({} != 0)", self.expr(a)),
             ExprKind::Cast(a) => format!("(({}){})", c_type(e.ty), self.expr(a)),
         }
@@ -169,9 +172,24 @@ impl Gen<'_> {
             }
             Stmt::Break => self.out.line("break;"),
             Stmt::Continue => self.out.line("continue;"),
-            Stmt::Return(e) => {
-                let r = format!("gs_out[gs_i] = {};", self.expr(e));
-                self.out.line(r);
+            Stmt::LocalStore {
+                local,
+                index,
+                value,
+            } => {
+                let l = format!(
+                    "{}[{}] = {};",
+                    local_name(self.k, *local),
+                    self.expr(index),
+                    self.expr(value)
+                );
+                self.out.line(l);
+            }
+            Stmt::Return(es) => {
+                for (o, e) in es.iter().enumerate() {
+                    let r = format!("gs_out{o}[gs_i] = {};", self.expr(e));
+                    self.out.line(r);
+                }
                 self.out.line("return;");
             }
         }
@@ -292,7 +310,9 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
             ParamKind::Scalar => format!("const {} {}", c_type(p.ty), param_name(k, i)),
         })
         .collect();
-    args.push(format!("__global {}* restrict gs_out", c_type(k.output)));
+    for (o, t) in k.outputs.iter().enumerate() {
+        args.push(format!("__global {}* restrict gs_out{o}", c_type(*t)));
+    }
     args.push("const uint gs_n".into());
     g.out.line(format!(
         "__kernel void {entry}(\n    {}) {{",
@@ -301,9 +321,29 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
     g.out.depth = 1;
     g.out.line("const uint gs_i = get_global_id(0);");
     g.out.line("if (gs_i >= gs_n) return;");
+    if let Grid::Indexed { axes } = &k.grid {
+        // Coordonnées du thread dans la grille (forme de la sortie, ordre C).
+        g.out.line("uint gs_r = gs_i;");
+        for (a, p) in axes.iter().enumerate().rev() {
+            let size = param_name(k, *p);
+            g.out
+                .line(format!("const int gs_g{a} = (int)(gs_r % (uint){size});"));
+            if a > 0 {
+                g.out.line(format!("gs_r /= (uint){size};"));
+            }
+        }
+    }
     for (i, l) in k.locals.iter().enumerate() {
-        g.out
-            .line(format!("{} {};", c_type(l.ty), local_name(k, i)));
+        match l.len {
+            Some(n) => g.out.line(format!(
+                "{} {}[{n}] = {{0}};",
+                c_type(l.ty),
+                local_name(k, i)
+            )),
+            None => g
+                .out
+                .line(format!("{} {};", c_type(l.ty), local_name(k, i))),
+        }
     }
     g.block(&k.body);
     g.out.depth = 0;
@@ -327,7 +367,7 @@ mod tests {
         assert!(c.contains("const int p2__cart"), "{c}"); // « écart » assaini en ASCII
         assert!(c.contains("gs_mod_f32(p0_x[gs_i], 3.0f)"), "{c}");
         assert!(c.contains("pow(p0_x[gs_i], 2.0f)"), "{c}");
-        assert!(c.contains("gs_out[gs_i] ="), "{c}");
+        assert!(c.contains("gs_out0[gs_i] ="), "{c}");
         assert!(!c.contains("cl_khr_fp64"), "{c}");
     }
 

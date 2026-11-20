@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gpusync_runtime::{BackendError, DeviceInfo};
-use wgpu::util::DeviceExt;
 
 pub const WORKGROUP_SIZE: u32 = 256;
 
@@ -19,12 +18,17 @@ pub struct WgDevice {
     max_groups_per_dim: u32,
     kernels: Mutex<HashMap<String, Arc<WgKernel>>>,
     staging_pool: Mutex<HashMap<(usize, bool), Vec<Staging>>>,
+    /// Clé dans `OPEN` (ex. `vulkan:1`).
+    key: String,
+    /// Raison de la perte du périphérique par le driver (TDR Windows, plantage…), si perdu.
+    lost: Arc<Mutex<Option<String>>>,
 }
 
 pub struct WgKernel {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     n_inputs: usize,
+    n_outputs: usize,
     has_fparams: bool,
 }
 
@@ -45,6 +49,43 @@ fn aligned(bytes: usize) -> u64 {
 }
 
 impl WgDevice {
+    /// Erreur claire si le driver a perdu le périphérique ; il est alors oublié et sera rouvert
+    /// au prochain `open`.
+    fn check(&self) -> Result<(), BackendError> {
+        let lost = self.lost.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(reason) = lost else { return Ok(()) };
+        if let Some(open) = OPEN.get() {
+            let mut open = open.lock().unwrap_or_else(|e| e.into_inner());
+            if open
+                .get(&self.key)
+                .is_some_and(|d| std::ptr::eq(&**d, self))
+            {
+                open.remove(&self.key);
+            }
+        }
+        Err(BackendError(format!(
+            "wgpu : le driver a perdu le périphérique {} ({reason}). Sous Windows, un calcul de plus \
+             de ~2 s sur un GPU est interrompu (TDR) : réduisez la taille de l'appel ou choisissez un GPU \
+             plus rapide. Le périphérique sera rouvert au prochain appel.",
+            self.info.name
+        )))
+    }
+
+    /// Buffer de stockage initialisé (sans `mapped_at_creation`, qui panique si le périphérique
+    /// est perdu).
+    fn storage_init(&self, contents: &[u8]) -> wgpu::Buffer {
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: aligned(contents.len()),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut data = contents.to_vec();
+        data.resize(aligned(contents.len()) as usize, 0);
+        self.queue.write_buffer(&buf, 0, &data);
+        buf
+    }
+
     /// Ouvre (une fois par processus) le périphérique `<api>:<index>` (ex. `metal:0`, `vulkan:1`).
     pub fn open(api: &str, index: usize) -> Result<Arc<WgDevice>, BackendError> {
         let key = format!("{api}:{index}");
@@ -79,6 +120,11 @@ impl WgDevice {
         device.on_uncaptured_error(Arc::new(|e| {
             eprintln!("[gpusync] erreur wgpu non capturée : {e}")
         }));
+        let lost: Arc<Mutex<Option<String>>> = Arc::default();
+        let flag = lost.clone();
+        device.set_device_lost_callback(move |reason, msg| {
+            *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{reason:?} : {msg}"));
+        });
         let d = Arc::new(WgDevice {
             info: info.clone(),
             device,
@@ -86,6 +132,8 @@ impl WgDevice {
             max_groups_per_dim: limits.max_compute_workgroups_per_dimension.max(1),
             kernels: Mutex::new(HashMap::new()),
             staging_pool: Mutex::new(HashMap::new()),
+            key: key.clone(),
+            lost,
         });
         open.insert(key, d.clone());
         Ok(d)
@@ -96,6 +144,7 @@ impl WgDevice {
         &self,
         code: &str,
         n_inputs: usize,
+        n_outputs: usize,
         has_fparams: bool,
     ) -> Result<Arc<WgKernel>, BackendError> {
         let mut cache = self.kernels.lock().unwrap_or_else(|e| e.into_inner());
@@ -115,10 +164,11 @@ impl WgDevice {
         };
         // Disposition explicite : un binding déclaré mais inutilisé reste valide.
         let mut entries: Vec<_> = (0..n_inputs as u32).map(|b| storage(b, true)).collect();
-        entries.push(storage(n_inputs as u32, false));
-        entries.push(storage(n_inputs as u32 + 1, true));
+        let first_param = (n_inputs + n_outputs) as u32;
+        entries.extend((n_inputs as u32..first_param).map(|b| storage(b, false)));
+        entries.push(storage(first_param, true));
         if has_fparams {
-            entries.push(storage(n_inputs as u32 + 2, true));
+            entries.push(storage(first_param + 1, true));
         }
         let layout = self
             .device
@@ -159,6 +209,7 @@ impl WgDevice {
             pipeline,
             layout,
             n_inputs,
+            n_outputs,
             has_fparams,
         });
         cache.insert(code.to_string(), k.clone());
@@ -166,6 +217,7 @@ impl WgDevice {
     }
 
     pub fn alloc(&self, bytes: usize) -> Result<WgBuffer, BackendError> {
+        self.check()?;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: aligned(bytes),
@@ -194,12 +246,13 @@ impl WgDevice {
         &self,
         k: &WgKernel,
         inputs: &[&WgBuffer],
-        out: &WgBuffer,
+        outs: &[&WgBuffer],
         params: &[u32],
         fparams: &[f64],
         n: usize,
     ) -> Result<(), BackendError> {
-        if inputs.len() != k.n_inputs {
+        self.check()?;
+        if inputs.len() != k.n_inputs || outs.len() != k.n_outputs {
             return Err(BackendError(
                 "nombre de tableaux d'entrée incohérent".into(),
             ));
@@ -208,13 +261,14 @@ impl WgDevice {
         // faux silencieux, objectif O2).
         let oom = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let submitted = self.submit(k, inputs, out, params, fparams, n);
+        let submitted = self.submit(k, inputs, outs, params, fparams, n);
         let errors = [
             pollster::block_on(validation.pop()),
             pollster::block_on(oom.pop()),
         ];
         submitted?;
         if let Some(e) = errors.into_iter().flatten().next() {
+            self.check()?;
             return Err(BackendError(format!(
                 "wgpu : lancement refusé sur {} ({e})",
                 self.info.name
@@ -227,13 +281,13 @@ impl WgDevice {
         &self,
         k: &WgKernel,
         inputs: &[&WgBuffer],
-        out: &WgBuffer,
+        outs: &[&WgBuffer],
         params: &[u32],
         fparams: &[f64],
         n: usize,
     ) -> Result<(), BackendError> {
         let mut enc = self.device.create_command_encoder(&Default::default());
-        self.encode(&mut enc, k, inputs, out, params, fparams, n)?;
+        self.encode(&mut enc, k, inputs, outs, params, fparams, n)?;
         self.queue.submit([enc.finish()]);
         Ok(())
     }
@@ -245,18 +299,12 @@ impl WgDevice {
         enc: &mut wgpu::CommandEncoder,
         k: &WgKernel,
         inputs: &[&WgBuffer],
-        out: &WgBuffer,
+        outs: &[&WgBuffer],
         params: &[u32],
         fparams: &[f64],
         n: usize,
     ) -> Result<(), BackendError> {
-        let params_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck_u32(params),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let params_buf = self.storage_init(bytemuck_u32(params));
         let mut entries: Vec<wgpu::BindGroupEntry> = inputs
             .iter()
             .enumerate()
@@ -265,30 +313,25 @@ impl WgDevice {
                 resource: b.buf.as_entire_binding(),
             })
             .collect();
+        for (o, b) in outs.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: (inputs.len() + o) as u32,
+                resource: b.buf.as_entire_binding(),
+            });
+        }
+        let first_param = (inputs.len() + outs.len()) as u32;
         entries.push(wgpu::BindGroupEntry {
-            binding: inputs.len() as u32,
-            resource: out.buf.as_entire_binding(),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: inputs.len() as u32 + 1,
+            binding: first_param,
             resource: params_buf.as_entire_binding(),
         });
         let fparams_buf = k.has_fparams.then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: unsafe {
-                        std::slice::from_raw_parts(
-                            fparams.as_ptr().cast(),
-                            std::mem::size_of_val(fparams),
-                        )
-                    },
-                    usage: wgpu::BufferUsages::STORAGE,
-                })
+            self.storage_init(unsafe {
+                std::slice::from_raw_parts(fparams.as_ptr().cast(), std::mem::size_of_val(fparams))
+            })
         });
         if let Some(b) = &fparams_buf {
             entries.push(wgpu::BindGroupEntry {
-                binding: inputs.len() as u32 + 2,
+                binding: first_param + 1,
                 resource: b.as_entire_binding(),
             });
         }
@@ -318,6 +361,7 @@ impl WgDevice {
 
     /// Copie bloquante périphérique → hôte (attend la fin des calculs soumis).
     pub fn read(&self, buf: &WgBuffer, out: &mut [u8]) -> Result<(), BackendError> {
+        self.check()?;
         let size = aligned(buf.bytes);
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -367,7 +411,7 @@ impl WgDevice {
         {
             use objc2_metal::{MTLDevice, MTLResourceOptions};
             const PAGE: usize = 16384;
-            if self.info.backend != "metal" || (ptr as usize) % PAGE != 0 || bytes == 0 {
+            if self.info.backend != "metal" || !(ptr as usize).is_multiple_of(PAGE) || bytes == 0 {
                 return Ok(None);
             }
             let len = bytes.div_ceil(PAGE) * PAGE; // la dernière page entière reste dans la même page mappée
@@ -497,6 +541,7 @@ impl WgDevice {
         bytes: usize,
         chunk: usize,
     ) -> Result<(), BackendError> {
+        self.check()?;
         let chunk = chunk.min(bytes).max(4);
         let mut ring: Vec<Staging> = (0..3).map(|_| self.staging(chunk, true)).collect();
         let mut off = 0;
@@ -538,6 +583,7 @@ impl WgDevice {
         bytes: usize,
         chunk: usize,
     ) -> Result<(), BackendError> {
+        self.check()?;
         let chunk = chunk.min(bytes).max(4);
         let mut ring: Vec<Staging> = (0..3).map(|_| self.staging(chunk, false)).collect();
         let mut pending: std::collections::VecDeque<(usize, usize, usize)> = Default::default(); // (slot, off, len)
@@ -585,38 +631,28 @@ impl WgDevice {
     }
 
     /// Exécute `k` en mode Flux : bloc par bloc, envoi du bloc k+1 et retour du bloc k−1 pendant le
-    /// calcul du bloc k ; chaque bloc de résultat est écrit directement dans `out_dst`.
+    /// calcul du bloc k ; chaque bloc de chaque sortie est écrit directement dans sa destination
+    /// (`outs` : (adresse hôte, octets par élément)).
     ///
     /// # Safety
-    /// Les pointeurs hôte (entrées `Host`, `out_dst`) doivent couvrir `n` éléments.
+    /// Les pointeurs hôte (entrées `Host`, destinations) doivent couvrir `n` éléments.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn flux(
         &self,
         k: &WgKernel,
         inputs: &[FluxIn],
-        out_dst: *mut u8,
-        out_elem: usize,
+        outs: &[(*mut u8, usize)],
         scalars: &[u32],
         fparams: &[f64],
         n: usize,
         chunk_elems: usize,
     ) -> Result<(), BackendError> {
+        self.check()?;
         const SLOTS: usize = 3;
         let oom = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let r = unsafe {
-            self.flux_inner(
-                k,
-                inputs,
-                out_dst,
-                out_elem,
-                scalars,
-                fparams,
-                n,
-                chunk_elems,
-                SLOTS,
-            )
-        };
+        let r =
+            unsafe { self.flux_inner(k, inputs, outs, scalars, fparams, n, chunk_elems, SLOTS) };
         let errors = [
             pollster::block_on(validation.pop()),
             pollster::block_on(oom.pop()),
@@ -636,8 +672,7 @@ impl WgDevice {
         &self,
         k: &WgKernel,
         inputs: &[FluxIn],
-        out_dst: *mut u8,
-        out_elem: usize,
+        outs: &[(*mut u8, usize)],
         scalars: &[u32],
         fparams: &[f64],
         n: usize,
@@ -647,8 +682,8 @@ impl WgDevice {
         struct Slot {
             ins: Vec<WgBuffer>,
             ups: Vec<Option<Staging>>,
-            out: WgBuffer,
-            back: Staging,
+            outs: Vec<WgBuffer>,
+            backs: Vec<Staging>,
             busy: Option<(usize, usize)>, // (élément de départ, nombre d'éléments)
         }
         let chunk_elems = chunk_elems.max(1).min(n);
@@ -661,33 +696,40 @@ impl WgDevice {
                 ins.push(self.alloc(bytes)?);
                 ups.push(matches!(i, FluxIn::Host { .. }).then(|| self.staging(bytes, true)));
             }
+            let mut obufs = Vec::new();
+            let mut backs = Vec::new();
+            for (_, elem) in outs {
+                obufs.push(self.alloc(chunk_elems * elem)?);
+                backs.push(self.staging(chunk_elems * elem, false));
+            }
             ring.push(Slot {
                 ins,
                 ups,
-                out: self.alloc(chunk_elems * out_elem)?,
-                back: self.staging(chunk_elems * out_elem, false),
+                outs: obufs,
+                backs,
                 busy: None,
             });
         }
         let finish = |dev: &WgDevice, s: &mut Slot| -> Result<(), BackendError> {
             if let Some((start, len)) = s.busy.take() {
-                dev.wait_mapped(&s.back)?;
-                let bytes = len * out_elem;
-                {
-                    let view = s
-                        .back
-                        .buf
-                        .get_mapped_range(..bytes as u64)
-                        .map_err(|e| err("lecture d'un tampon", e))?;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            view.as_ptr(),
-                            out_dst.add(start * out_elem),
-                            bytes,
-                        )
-                    };
+                for (back, (dst, elem)) in s.backs.iter().zip(outs) {
+                    dev.wait_mapped(back)?;
+                    let bytes = len * elem;
+                    {
+                        let view = back
+                            .buf
+                            .get_mapped_range(..bytes as u64)
+                            .map_err(|e| err("lecture d'un tampon", e))?;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                view.as_ptr(),
+                                dst.add(start * elem),
+                                bytes,
+                            )
+                        };
+                    }
+                    back.buf.unmap();
                 }
-                s.back.buf.unmap();
             }
             Ok(())
         };
@@ -731,20 +773,24 @@ impl WgDevice {
             let mut params = scalars.to_vec();
             params.push(len as u32);
             let ins: Vec<&WgBuffer> = s.ins.iter().collect();
-            self.encode(&mut enc, k, &ins, &s.out, &params, fparams, len)?;
-            let out_bytes = len * out_elem;
-            enc.copy_buffer_to_buffer(
-                &s.out.buf,
-                0,
-                &s.back.buf,
-                0,
-                out_bytes.div_ceil(4) as u64 * 4,
-            );
+            let obufs: Vec<&WgBuffer> = s.outs.iter().collect();
+            self.encode(&mut enc, k, &ins, &obufs, &params, fparams, len)?;
+            for ((ob, back), (_, elem)) in s.outs.iter().zip(&s.backs).zip(outs) {
+                enc.copy_buffer_to_buffer(
+                    &ob.buf,
+                    0,
+                    &back.buf,
+                    0,
+                    (len * elem).div_ceil(4) as u64 * 4,
+                );
+            }
             let idx = self.queue.submit([enc.finish()]);
             for st in s.ups.iter_mut().flatten() {
                 self.remap(st, wgpu::MapMode::Write, &idx);
             }
-            self.remap(&mut s.back, wgpu::MapMode::Read, &idx);
+            for back in s.backs.iter_mut() {
+                self.remap(back, wgpu::MapMode::Read, &idx);
+            }
             s.busy = Some((start, len));
             start += len;
             i += 1;
@@ -759,15 +805,18 @@ impl WgDevice {
             for st in s.ups.into_iter().flatten() {
                 self.recycle(st, true);
             }
-            self.recycle(s.back, false);
+            for back in s.backs {
+                self.recycle(back, false);
+            }
         }
         Ok(())
     }
 
     pub fn finish(&self) -> Result<(), BackendError> {
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| err("attente du GPU", e))?;
+        self.check()?;
+        let r = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.check()?;
+        r.map_err(|e| err("attente du GPU", e))?;
         Ok(())
     }
 }

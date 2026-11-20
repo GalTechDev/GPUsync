@@ -4,7 +4,8 @@
 OpenCL ≥ 1.2, puis CUDA. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**État : jalon M1.5** — kernels élément par élément, sans limite de taille, sur le périphérique le plus adapté.
+**État : jalon M2** — kernels élément par élément (sans limite de taille) et kernels avec index (dimensions
+nommées, plusieurs sorties, tableaux locaux), sur le périphérique le plus adapté.
 
 ```python
 import numpy as np
@@ -33,6 +34,36 @@ for bloc in normalize.stream(generateur(), 0.0, 1.0):
 
 print(normalize.source("opencl"))            # code généré (aussi "wgsl", "ir")
 ```
+
+Avec index : on écrit le calcul d'**une case de la sortie**, dont la forme vient des dimensions nommées des
+entrées.
+
+```python
+@gs.kernel
+def pairwise_dist(x: gs.f32["n", "t"]) -> gs.f32["n", "n"]:
+    i, j = gs.index()                        # la case (i, j) de la sortie
+    acc = 0.0
+    for k in range(x.shape[1]):
+        d = x[i, k] - x[j, k]
+        acc += d * d
+    return gs.sqrt(acc)
+
+dist = pairwise_dist(series)                 # (2000, 365) → sortie (2000, 2000)
+
+@gs.kernel
+def stats(x: gs.f32["n", "t"]) -> (gs.f32["n"], gs.f32["n"]):
+    i = gs.index()
+    buf = gs.local(gs.f32, 64)               # tableau propre à chaque case, taille constante
+    ...
+    return mean, std
+
+mean, std = stats(series)                    # un gs.Array par sortie ; out=(a, b) possible
+dist.max(), dist.mean(axis=0)                # réductions (sur l'hôte, via NumPy)
+```
+
+Une même dimension doit avoir la même taille dans toutes les entrées (sinon `gs.ShapeMismatch` avant tout
+calcul). Un kernel avec index est lancé en un seul bloc : sur GPU dédié, il doit tenir dans le budget mémoire
+(le découpage arrive au jalon M3). Exemple complet : le DTW de `tests/test_index.py`, identique au prototype.
 
 Dans un kernel : arithmétique, comparaisons, `and` / `or` / `not`, `a if c else b`, `if` / `elif` / `else`,
 `for i in range(...)`, `while`, `break`, `continue`, variables locales, constantes globales numériques,
@@ -72,6 +103,7 @@ python3 tools/dev.py setup                       # .venv + maturin, pytest, nump
 python3 tools/dev.py test                        # recompile, puis cargo test + pytest + diagnostic
 python3 tools/dev.py run tools/bench_m1.py tout  # surcoût par appel, débit, pic mémoire
 python3 tools/dev.py run tools/bench_m15.py ram 4 opencl:0   # gros volumes (§9.8 de l'architecture)
+python3 tools/dev.py run tools/bench_m2.py       # DTW sur chaque périphérique
 ```
 
 `GS_EXPECT=metal,opencl` (ou `vulkan,opencl`) fait échouer les tests si ces backends n'ont aucun périphérique
