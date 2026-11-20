@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M3 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M4 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -12,6 +12,41 @@
 | M1.5 Transferts et choix automatique | ✅ f64 via Vulkan, besoins `f64` / `f64_math`, classement des périphériques, option `compat` ; moteur de transferts (Direct, Résident, Flux) pour OpenCL et wgpu ; zéro-copie Metal (`NoCopy` via wgpu-hal) ; `out=`, `np.memmap`, `.stream()`, `gs.OutOfMemory`, `gs.set_memory_budget` | Mac : 109 tests ; PC : 164 tests ; essais à gros volume ci-dessous |
 | M2 Index et formes | ✅ `gs.index()`, dimensions nommées (`gs.f32["n", "t"]`, axes sans nom `gs.f32[:, :]`), `x.shape[k]`, `len(x)`, plusieurs sorties (`-> (gs.f32["n"], gs.i32["n"])`, `out=` en tuple), `gs.local`, réductions de `gs.Array` sur l'hôte ; moteur à plusieurs sorties ; perte du GPU par le driver (TDR) : erreur claire et réouverture | Mac : 152 tests ; PC : 228 tests ; DTW identique au prototype |
 | M3 Out-of-core avec index | ✅ grille découpée par blocs de lignes (premier axe de la sortie) dans tous les modes ; entrées lues seulement à la ligne courante découpées, les autres gardées entières ; lancements cadencés (~0,1 s chacun) | Mac : 172 tests ; PC : 263 tests ; essais à gros volume ci-dessous |
+| M4 Async et interop | ✅ `await y`, `await kernel(...)`, `mean, std = await stats(x)` ; appels depuis plusieurs threads (`asyncio.to_thread`) ; DLPack (export et import, mémoire hôte) ; `y.save("r.npy")` par blocs ; même code en script, asyncio et Jupyter (notebook exécuté par nbclient) ; cache disque étudié et écarté (mesures ci-dessous) | Mac : 196 tests ; PC : 301 tests |
+
+#### Mesures M4 (`tools/bench_m4.py`, processus neufs)
+
+| Périphérique | 1er appel du processus | appel suivant | 1er appel d'un 2e processus |
+|---|---|---|---|
+| Mac `metal:0` | 5,3 ms | 0,7 ms | 5,2 ms |
+| Mac `opencl:0` | 5,1 ms | 0,6 ms | 5,0 ms |
+| PC `vulkan:0` (RTX) | 59 ms | 0,4 ms | 51 ms |
+| PC `opencl:0` (RTX) | 69 ms | 0,2 ms | 62 ms |
+| PC `opencl:1` (UHD 770) | 506 ms | 3,9 ms | 7,8 ms |
+
+Le premier appel paie surtout l'**ouverture du périphérique** (40 à 75 ms sur le PC) ; la compilation d'un
+kernel ne coûte que 0,1 à 2 ms une fois le périphérique ouvert. Les drivers ont déjà leur cache de binaires :
+l'UHD 770 passe de 506 ms à 7,8 ms dans un deuxième processus, NVIDIA de même (`ComputeCache`).
+`gs.devices()` coûte ~340 ms sur le PC (découverte Vulkan et OpenCL par les drivers), ~35 ms sur le Mac.
+
+#### Décisions et constats de M4
+
+- **Cache disque des kernels : non fait.** Les mesures ci-dessus montrent qu'il ne ferait rien gagner :
+  la compilation est déjà mise en cache par les drivers, et le reste du premier appel est l'ouverture du
+  périphérique. À reprendre avec CUDA (M6) si NVRTC s'avère lent.
+- **`await`** : un appel met toujours le travail en file de façon synchrone (les erreurs arrivent à l'appel,
+  y compris dans Jupyter) ; `await y` attend la fin et la lecture sur un thread de l'exécuteur asyncio (GIL
+  libéré), puis rend `y`. Plusieurs sorties : un tuple attendable (`Results`). Ce qui s'exécute dans l'appel
+  lui-même (mode par blocs, `cpu:0`) se met hors de la boucle avec `await asyncio.to_thread(f, x)` : les
+  appels sont sûrs depuis plusieurs threads (testé sur 8 threads, même kernel, même périphérique).
+- **Lancements cadencés, version 2** : les lancements ne sont chronométrés que jusqu'à une mesure fiable
+  (≥ 20 ms) ; les suivants partent en file sans attente. L'appel rend la main plus tôt, `await` a du sens
+  même pour de gros calculs, et le DTW 4000 × 4000 sur l'UHD 770 reste à 56,6 s sans perte du GPU.
+- **DLPack** : export de la mémoire hôte du résultat (sans copie ; `np.from_dlpack`, `torch.from_dlpack`),
+  import de tout objet DLPack lisible depuis l'hôte. Un tenseur resté sur un GPU donne une erreur qui
+  suggère `.cpu()`. L'échange direct de buffers GPU attend le backend CUDA (M6).
+- **Jupyter** : testé pour de vrai (notebook exécuté par nbclient, kernels définis dans une cellule,
+  `await` au niveau de la cellule). Dépendances de développement ajoutées : `nbclient`, `ipykernel`.
 
 #### Mesures M3 (`tools/bench_m3.py`, 64 lignes vérifiées contre NumPy)
 
@@ -364,12 +399,12 @@ z = other(normalize(x, 0.0, 1.0))   # chaînage : rien ne repasse par la RAM
 | Opération sur `gs.Array` | Effet |
 |---|---|
 | passer à un autre kernel | aucune attente, dépendance enregistrée |
-| `await y` | future asyncio complété par le runtime (`call_soon_threadsafe`) |
+| `await y` | attente et lecture sur un thread de l'exécuteur asyncio, puis rend `y` (M4) |
 | `np.asarray(y)`, `y.numpy()`, `y[...]`, `print(y)` | attente bloquante GIL libéré, puis relecture. Sur mémoire unifiée : **vue** sur la mémoire du buffer, sans copie |
 | `y.shape`, `y.dtype`, `y.device` | immédiat (connu sans attendre) |
-| `y.sum()`, `y.max(axis=…)`, `y.mean()` | réductions fournies par la lib (kernels internes) |
-| `y.save(path)` | écriture bloc par bloc sur disque |
-| `torch.from_dlpack(y)` | export DLPack (zéro-copie si même périphérique) |
+| `y.sum()`, `y.max(axis=…)`, `y.mean()` | réductions, calculées sur l'hôte par NumPy après lecture (kernels internes plus tard) |
+| `y.save(path)` | fichier `.npy` écrit bloc par bloc depuis le GPU |
+| `torch.from_dlpack(y)`, `np.from_dlpack(y)` | export DLPack de la mémoire hôte, sans copie |
 
 Le même code fonctionne à l'identique dans un script, dans Jupyter et dans du code async.
 
@@ -696,13 +731,15 @@ Mesuré à M1 : wgpu copie et consomme 3 à 5 fois la taille des données. La r�
 ### 8.5 Threads et GIL
 
 - Toute opération longue (compilation, attente, copie) se fait **GIL libéré**.
-- `__await__` : le runtime attend l'événement sur un thread Rust dédié, puis complète un future asyncio via `loop.call_soon_threadsafe`.
+- `__await__` : attente sur un thread de l'exécuteur asyncio (`run_in_executor`), GIL libéré pendant l'attente
+  et la lecture (M4).
 - Aucune boucle asyncio interne à la lib.
 
 ### 8.6 Cache de compilation
 
 - En mémoire, par processus.
-- Sur disque (répertoire de cache utilisateur), clé = hash(code généré, cible, nom et version du driver). Les kernels OpenCL et CUDA compilés sont réutilisés entre deux lancements.
+- Sur disque : écarté à M4 après mesure (les drivers mettent déjà les binaires en cache ; compilation de 0,1
+  à 2 ms). À reconsidérer pour CUDA (M6).
 
 ---
 
@@ -851,7 +888,7 @@ la taille de la grille.
 | **M1.5** Moteur de transferts et choix automatique | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM ; f64 via Vulkan (`SHADER_F64`) ; besoins `f64` / `f64_math` ; choix automatique du périphérique par kernel et option `compat` (`auto` : avertissement + repli OpenCL ; `strict` : erreur) (§4.8) | critères du §9.8 sur le Mac et le PC ; un kernel f64 arithmétique tourne sur Vulkan (RTX), un kernel f64 avec `exp` sur OpenCL (RTX), sans `device=` |
 | **M2** Index et formes | `gs.index()`, dimensions nommées, retours multiples, boucles, `gs.local`, réductions de `gs.Array` | `pairwise_dist` et `stats` corrects ; ta DTW portée et comparée au prototype |
 | **M3** Out-of-core avec index | ✅ découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes ; lancements cadencés | `pairwise_dist` sur des données dont la sortie dépasse la VRAM (19,3 Gio sur la RTX, 3,8 s) |
-| **M4** Async et interop | `await`, DLPack, cache disque | même script en synchrone, async et Jupyter |
+| **M4** Async et interop | ✅ `await`, DLPack, `y.save()`, appels multi-threads ; cache disque écarté après mesure | même script en synchrone, async et Jupyter (testé, nbclient) |
 | **M5** Mode explicite | `grid=`, `gs.Out`, atomiques (dont émulation OpenCL 1.2) | histogramme correct sur toutes les cibles |
 | **M6** CUDA | émetteur CUDA C, backend `cudarc` | parité des tests avec les autres backends sur NVIDIA |
 | **M7** Avancé | multi-GPU, plusieurs streams, fusion de kernels élément par élément | à définir avec des mesures |

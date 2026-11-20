@@ -24,7 +24,7 @@ import warnings
 import numpy as np
 
 from . import _core
-from ._array import Array
+from ._array import Array, Results
 from ._ast import KernelDeclarationError, kernel_json
 from ._device import CompatibilityWarning, _by_id, capable, fallback, ranked, resolve
 
@@ -47,6 +47,19 @@ def _aligned_empty(shape, dtype) -> np.ndarray:
         ) from None
     offset = (-raw.ctypes.data) % _ALIGN
     return raw[offset : offset + nbytes].view(dtype).reshape(shape)
+
+
+def _host_array(value, name) -> np.ndarray:
+    """Tableau NumPy, liste, ou objet DLPack (PyTorch, JAX, CuPy…) en mémoire hôte, sans copie."""
+    if isinstance(value, np.ndarray) or not hasattr(value, "__dlpack__"):
+        return np.asarray(value)
+    try:
+        return np.from_dlpack(value)
+    except (BufferError, RuntimeError, TypeError) as e:
+        raise _core.TypeMismatch(
+            f"argument '{name}' : objet DLPack illisible depuis l'hôte ({e}). S'il est sur un GPU, "
+            f"ramenez-le en mémoire hôte d'abord (ex. tenseur.cpu())"
+        ) from None
 
 
 class Kernel:
@@ -167,7 +180,7 @@ class Kernel:
                     arrays.append(value._handle)
                     keepalive.append(value)  # sa mémoire hôte peut être lue (zéro-copie)
             else:
-                a = np.asarray(value)
+                a = _host_array(value, name)
                 if a.dtype != dtype.np:
                     if self._cast == "auto" and a.dtype.kind in "biuf":
                         a = a.astype(dtype.np)
@@ -195,11 +208,11 @@ class Kernel:
 
         outs = self._outputs(out, shape)
         if outs[0].size == 0:
-            results = tuple(Array(None, o, dev_id) for o in outs)
+            results = Results(Array(None, o, dev_id) for o in outs)
         else:
             keepalive.extend(outs)
             handles = self._ir.launch(dev_id, arrays, scalars, outs[0].size, [o.ctypes.data for o in outs], keepalive)
-            results = tuple(Array(h, o, dev_id) for h, o in zip(handles, outs))
+            results = Results(Array(h, o, dev_id) for h, o in zip(handles, outs))
         return results if self._tuple else results[0]
 
     def _bind_dims(self, shapes) -> tuple[tuple, list]:

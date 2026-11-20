@@ -4,7 +4,7 @@
 OpenCL ≥ 1.2, puis CUDA. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**État : jalon M3** — kernels élément par élément et kernels avec index (dimensions nommées, plusieurs
+**État : jalon M4** — kernels élément par élément et kernels avec index (dimensions nommées, plusieurs
 sorties, tableaux locaux), sans limite de taille, sur le périphérique le plus adapté.
 
 ```python
@@ -33,6 +33,12 @@ for bloc in normalize.stream(generateur(), 0.0, 1.0):
     ...
 
 print(normalize.source("opencl"))            # code généré (aussi "wgsl", "ir")
+
+# Async, Jupyter et interop : le même code partout
+y = await normalize(x, 0.0, 1.0)             # attend sans bloquer la boucle asyncio (ou une cellule Jupyter)
+y = await asyncio.to_thread(normalize, big, 0.0, 1.0, out=out)   # gros appel par blocs, hors de la boucle
+t = torch.from_dlpack(y)                     # DLPack, sans copie ; les tenseurs CPU sont acceptés en entrée
+y.save("resultat.npy")                       # écrit par blocs depuis le GPU
 ```
 
 Avec index : on écrit le calcul d'**une case de la sortie**, dont la forme vient des dimensions nommées des
@@ -135,6 +141,7 @@ tools/bench_m1.py           mesures du jalon M1
 tools/bench_m15.py          essais à gros volume du jalon M1.5
 tools/bench_m2.py           DTW sur chaque périphérique (jalon M2)
 tools/bench_m3.py           kernels avec index à gros volume (jalon M3)
+tools/bench_m4.py           coût du premier appel dans un processus neuf (jalon M4)
 tools/remote/               exécution sur les machines de test
 GPUsync-python/             prototype v1 (référence, hors dépôt)
 ```

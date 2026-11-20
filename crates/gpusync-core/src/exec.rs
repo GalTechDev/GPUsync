@@ -1225,12 +1225,17 @@ const TARGET_LAUNCH_S: f64 = 0.1;
 /// Cases au plus par lancement (indices u32, limites de la grille wgpu).
 const MAX_LAUNCH_CELLS: usize = 1 << 30;
 
-/// Découpe les lancements d'un kernel avec index pour qu'aucun ne dure plus de ~0,1 s : le premier
-/// est petit et chronométré, les suivants sont dimensionnés d'après le débit mesuré.
+/// Durée minimale d'un lancement chronométré pour que la mesure du débit soit fiable.
+const MIN_TIMED_S: f64 = 0.02;
+
+/// Découpe les lancements d'un kernel avec index pour qu'aucun ne dure plus de ~0,1 s (délai de
+/// garde des drivers) : les premiers, petits puis grandissants, sont chronométrés jusqu'à une mesure
+/// fiable du débit ; les suivants, dimensionnés d'après elle, partent en file sans attente.
 #[derive(Default)]
 struct Pacer {
-    /// Débit mesuré (lignes par seconde).
+    /// Débit mesuré (lignes par seconde), et s'il est fiable (lancement d'au moins MIN_TIMED_S).
     rate: Option<f64>,
+    calibrated: bool,
     last: usize,
 }
 
@@ -1252,15 +1257,17 @@ impl Pacer {
         while s < b {
             let want = match self.rate {
                 None => (PROBE_CELLS / rest).max(1),
+                Some(r) if self.calibrated => ((r * TARGET_LAUNCH_S) as usize).max(1),
                 Some(r) => ((r * TARGET_LAUNCH_S) as usize).clamp(1, self.last.saturating_mul(8)),
             };
             let len = want.min(max_rows).min(b - s);
-            let last = s + len == b;
+            let timed = !self.calibrated && s + len < b;
             let t0 = std::time::Instant::now();
-            step(s, len, !last)?;
-            if !last {
+            step(s, len, timed)?;
+            if timed {
                 let dt = t0.elapsed().as_secs_f64().max(1e-6);
                 self.rate = Some(len as f64 / dt);
+                self.calibrated = dt >= MIN_TIMED_S;
                 self.last = len;
             }
             s += len;
