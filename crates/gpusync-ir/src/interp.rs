@@ -43,15 +43,36 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
             }
         }
     }
+    let scalar = |p: usize| match args.get(p) {
+        Some(Arg::Scalar(c)) => match convert(*c, Scalar::I32) {
+            Const::I32(v) => v.max(0) as usize,
+            _ => 0,
+        },
+        _ => 0,
+    };
+    // Bloc de lignes (kernels avec index) : première ligne et décalage de la sortie.
+    let (row0, obase) = match &kernel.grid {
+        Grid::Indexed { row0, obase, .. } => (
+            scalar(*row0),
+            match args.get(*obase) {
+                Some(Arg::Scalar(c)) => match convert(*c, Scalar::U32) {
+                    Const::U32(v) => v as usize,
+                    _ => 0,
+                },
+                _ => 0,
+            },
+        ),
+        Grid::Elementwise => (0, 0),
+    };
     for (o, t) in outs.iter().zip(&kernel.outputs) {
-        if o.len() < n * t.size() {
+        if o.len() < (obase + n) * t.size() {
             return Err("tableau de sortie trop court".into());
         }
     }
     // Taille des axes de la grille (kernels avec index).
     let axes: Vec<usize> = match &kernel.grid {
         Grid::Elementwise => vec![],
-        Grid::Indexed { axes } => axes
+        Grid::Indexed { axes, .. } => axes
             .iter()
             .map(|p| match args[*p] {
                 Arg::Scalar(c) => match convert(c, Scalar::I32) {
@@ -74,9 +95,12 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
         }
         let mut coords = vec![0usize; axes.len()];
         let mut rest = i;
-        for a in (0..axes.len()).rev() {
+        for a in (1..axes.len()).rev() {
             coords[a] = rest % axes[a].max(1);
             rest /= axes[a].max(1);
+        }
+        if !axes.is_empty() {
+            coords[0] = rest + row0;
         }
         let mut st = State {
             kernel,
@@ -96,7 +120,8 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
             }
         };
         for ((v, o), t) in values.into_iter().zip(outs.iter_mut()).zip(&kernel.outputs) {
-            store(v, &mut o[i * t.size()..(i + 1) * t.size()]);
+            let j = i + obase;
+            store(v, &mut o[j * t.size()..(j + 1) * t.size()]);
         }
     }
     Ok(())

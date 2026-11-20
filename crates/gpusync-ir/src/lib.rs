@@ -137,7 +137,19 @@ pub enum Grid {
     /// Un thread par élément des tableaux (tous de même forme) ; les tableaux désignent l'élément courant.
     Elementwise,
     /// Un thread par case de la sortie ; `axes` : paramètres cachés donnant la taille de chaque axe.
-    Indexed { axes: Vec<usize> },
+    ///
+    /// Lancement par blocs de lignes (premier axe de la sortie, ARCHITECTURE.md §9.7) : le thread
+    /// `gs_i` d'un lancement calcule la ligne `gs_i / (cases par ligne) + row0`, écrit la sortie à
+    /// `gs_i + obase`, et les tableaux `chunked` (lus seulement à la ligne courante) sont indexés à
+    /// partir de la ligne `inrow`. `row0`, `inrow` (i32) et `obase` (u32) sont des paramètres cachés
+    /// fournis par le moteur, pas par l'appelant.
+    Indexed {
+        axes: Vec<usize>,
+        chunked: Vec<usize>,
+        row0: usize,
+        inrow: usize,
+        obase: usize,
+    },
 }
 
 /// Un kernel.
@@ -150,6 +162,22 @@ pub struct Kernel {
     pub locals: Vec<Local>,
     pub body: Block,
     pub grid: Grid,
+}
+
+impl Kernel {
+    /// Paramètres fournis par le moteur d'exécution (et non par l'appelant) : `row0`, `inrow`, `obase`.
+    pub fn engine_params(&self) -> [Option<usize>; 3] {
+        match &self.grid {
+            Grid::Indexed {
+                row0, inrow, obase, ..
+            } => [Some(*row0), Some(*inrow), Some(*obase)],
+            Grid::Elementwise => [None; 3],
+        }
+    }
+
+    pub fn is_engine_param(&self, i: usize) -> bool {
+        self.engine_params().contains(&Some(i))
+    }
 }
 
 pub type Block = Vec<Stmt>;

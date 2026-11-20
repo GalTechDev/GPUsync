@@ -4,8 +4,8 @@
 OpenCL ≥ 1.2, puis CUDA. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**État : jalon M2** — kernels élément par élément (sans limite de taille) et kernels avec index (dimensions
-nommées, plusieurs sorties, tableaux locaux), sur le périphérique le plus adapté.
+**État : jalon M3** — kernels élément par élément et kernels avec index (dimensions nommées, plusieurs
+sorties, tableaux locaux), sans limite de taille, sur le périphérique le plus adapté.
 
 ```python
 import numpy as np
@@ -62,8 +62,10 @@ dist.max(), dist.mean(axis=0)                # réductions (sur l'hôte, via Num
 ```
 
 Une même dimension doit avoir la même taille dans toutes les entrées (sinon `gs.ShapeMismatch` avant tout
-calcul). Un kernel avec index est lancé en un seul bloc : sur GPU dédié, il doit tenir dans le budget mémoire
-(le découpage arrive au jalon M3). Exemple complet : le DTW de `tests/test_index.py`, identique au prototype.
+calcul). Sans limite de taille là aussi : la sortie est calculée par blocs de lignes (19,3 Gio de distances
+sur une RTX de 16 Go en 3,8 s) ; les entrées lues seulement à la ligne courante (`x[i, k]`) sont découpées
+avec elle, les autres restent entières sur le GPU. Exemple complet : le DTW de `tests/test_index.py`,
+identique au prototype.
 
 Dans un kernel : arithmétique, comparaisons, `and` / `or` / `not`, `a if c else b`, `if` / `elif` / `else`,
 `for i in range(...)`, `while`, `break`, `continue`, variables locales, constantes globales numériques,
@@ -104,6 +106,7 @@ python3 tools/dev.py test                        # recompile, puis cargo test + 
 python3 tools/dev.py run tools/bench_m1.py tout  # surcoût par appel, débit, pic mémoire
 python3 tools/dev.py run tools/bench_m15.py ram 4 opencl:0   # gros volumes (§9.8 de l'architecture)
 python3 tools/dev.py run tools/bench_m2.py       # DTW sur chaque périphérique
+python3 tools/dev.py run tools/bench_m3.py pairwise 72000 16 vulkan:0   # sortie plus grosse que la VRAM
 ```
 
 `GS_EXPECT=metal,opencl` (ou `vulkan,opencl`) fait échouer les tests si ces backends n'ont aucun périphérique
@@ -130,6 +133,8 @@ tests/                      tests Python (différentiels sur chaque périphériq
 tools/dev.py                tâches de développement multi-plateformes
 tools/bench_m1.py           mesures du jalon M1
 tools/bench_m15.py          essais à gros volume du jalon M1.5
+tools/bench_m2.py           DTW sur chaque périphérique (jalon M2)
+tools/bench_m3.py           kernels avec index à gros volume (jalon M3)
 tools/remote/               exécution sur les machines de test
 GPUsync-python/             prototype v1 (référence, hors dépôt)
 ```

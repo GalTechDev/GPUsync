@@ -52,6 +52,14 @@ struct Gen<'a> {
 }
 
 impl Gen<'_> {
+    /// Indice d'écriture des sorties : décalé de `obase` pour un kernel avec index lancé par blocs.
+    fn out_index(&self) -> String {
+        match &self.k.grid {
+            Grid::Indexed { obase, .. } => format!("gs_i + {}", param_name(self.k, *obase)),
+            Grid::Elementwise => "gs_i".into(),
+        }
+    }
+
     fn expr(&self, e: &Expr) -> String {
         match &e.kind {
             ExprKind::Const(c) => lit(*c),
@@ -187,7 +195,7 @@ impl Gen<'_> {
             }
             Stmt::Return(es) => {
                 for (o, e) in es.iter().enumerate() {
-                    let r = format!("gs_out{o}[gs_i] = {};", self.expr(e));
+                    let r = format!("gs_out{o}[{}] = {};", self.out_index(), self.expr(e));
                     self.out.line(r);
                 }
                 self.out.line("return;");
@@ -321,17 +329,20 @@ pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
     g.out.depth = 1;
     g.out.line("const uint gs_i = get_global_id(0);");
     g.out.line("if (gs_i >= gs_n) return;");
-    if let Grid::Indexed { axes } = &k.grid {
-        // Coordonnées du thread dans la grille (forme de la sortie, ordre C).
+    if let Grid::Indexed { axes, row0, .. } = &k.grid {
+        // Coordonnées du thread dans la grille (forme de la sortie, ordre C) ; le lancement
+        // couvre un bloc de lignes commençant à la ligne row0.
         g.out.line("uint gs_r = gs_i;");
-        for (a, p) in axes.iter().enumerate().rev() {
+        for (a, p) in axes.iter().enumerate().skip(1).rev() {
             let size = param_name(k, *p);
             g.out
                 .line(format!("const int gs_g{a} = (int)(gs_r % (uint){size});"));
-            if a > 0 {
-                g.out.line(format!("gs_r /= (uint){size};"));
-            }
+            g.out.line(format!("gs_r /= (uint){size};"));
         }
+        g.out.line(format!(
+            "const int gs_g0 = (int)gs_r + {};",
+            param_name(k, *row0)
+        ));
     }
     for (i, l) in k.locals.iter().enumerate() {
         match l.len {

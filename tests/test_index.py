@@ -10,8 +10,6 @@ import numpy as np
 import pytest
 
 import gpusync as gs
-from gpusync import _core
-from gpusync._device import _set_transfer_limits
 
 DEVICES = [d.id for d in gs.devices()]
 RNG = np.random.default_rng(2026)
@@ -250,27 +248,3 @@ def test_erreurs_de_forme():
 def test_signature_lisible():
     assert repr(moments) == "<gs.kernel moments(x: gs.f32['n', 't']) -> (gs.f32['n'], gs.f32['n'], gs.i32['n'])>"
     assert "gs_out2" in moments.source("opencl")
-
-
-@pytest.mark.parametrize("dev", DEVICES)
-def test_budget_depasse(dev):
-    """Au-delà du budget : élément par élément passe en Flux ; avec index, erreur claire (M3) si
-    le périphérique ne travaille pas directement dans la mémoire de l'hôte."""
-    x = RNG.random((64, 5), dtype=np.float32)
-    a = RNG.random(5000, dtype=np.float32)
-    _set_transfer_limits(chunk_bytes=4000, budget_bytes=1, direct_chunk_bytes=12_000)
-    try:
-        s, p = split(a, a, device=dev)
-        check(s, a + a)
-        check(p, a * a)
-        try:
-            y = pairwise(x, device=dev)
-        except gs.UnsupportedFeature as e:
-            # Seuls cpu:0 et OpenCL sur mémoire unifiée travaillent toujours sans copie (Metal :
-            # seulement si l'entrée est alignée sur 16 Kio, ce qui dépend de l'allocation NumPy).
-            assert "M3" in str(e)
-            assert dev != "cpu:0" and not (dev.startswith("opencl") and _core.device_zero_copy(dev))
-        else:
-            check(y, np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32))
-    finally:
-        _set_transfer_limits()

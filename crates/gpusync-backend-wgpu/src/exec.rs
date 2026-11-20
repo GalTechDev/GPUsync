@@ -359,6 +359,31 @@ impl WgDevice {
         Ok(())
     }
 
+    /// Copie périphérique → périphérique, mise en file (décalages et taille multiples de 4).
+    pub fn copy(
+        &self,
+        src: &WgBuffer,
+        src_off: usize,
+        dst: &WgBuffer,
+        dst_off: usize,
+        bytes: usize,
+    ) -> Result<(), BackendError> {
+        self.check()?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(
+            &src.buf,
+            src_off as u64,
+            &dst.buf,
+            dst_off as u64,
+            bytes as u64,
+        );
+        self.queue.submit([enc.finish()]);
+        Ok(())
+    }
+
     /// Copie bloquante périphérique → hôte (attend la fin des calculs soumis).
     pub fn read(&self, buf: &WgBuffer, out: &mut [u8]) -> Result<(), BackendError> {
         self.check()?;

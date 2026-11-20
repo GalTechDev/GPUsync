@@ -201,8 +201,41 @@ pub fn lower(spec: &J) -> R<Kernel> {
         for (p, ds) in params.iter_mut().zip(&param_dims) {
             p.dims = ds.iter().map(idx).collect();
         }
+        // Paramètres du moteur pour le lancement par blocs de lignes (§9.7).
+        let engine = params.len();
+        for (name, ty) in [
+            ("gs_row0", Scalar::I32),
+            ("gs_inrow", Scalar::I32),
+            ("gs_obase", Scalar::U32),
+        ] {
+            params.push(Param {
+                name: name.into(),
+                kind: ParamKind::Scalar,
+                ty,
+                dims: vec![],
+                hidden: true,
+            });
+        }
+        let out_dims = out_dims.unwrap_or_default();
+        let readers = row_readers(&J::Array(body_json.clone()), &modules);
+        let chunked = param_dims
+            .iter()
+            .enumerate()
+            .filter(|(p, ds)| {
+                params[*p].kind == ParamKind::Array
+                    && !ds.is_empty()
+                    && ds.first() == out_dims.first()
+                    && !readers.other.contains(&params[*p].name)
+                    && readers.ok
+            })
+            .map(|(p, _)| p)
+            .collect();
         Grid::Indexed {
-            axes: out_dims.unwrap_or_default().iter().map(idx).collect(),
+            axes: out_dims.iter().map(idx).collect(),
+            chunked,
+            row0: engine,
+            inrow: engine + 1,
+            obase: engine + 2,
         }
     } else {
         Grid::Elementwise
@@ -217,9 +250,14 @@ pub fn lower(spec: &J) -> R<Kernel> {
         }
     }
     let line_offset = spec["line_offset"].as_u64().unwrap_or(0) as u32;
-    let rank = match &grid {
-        Grid::Indexed { axes } => Some(axes.len()),
-        Grid::Elementwise => None,
+    let (rank, chunked, inrow) = match &grid {
+        Grid::Indexed {
+            axes,
+            chunked,
+            inrow,
+            ..
+        } => (Some(axes.len()), chunked.clone(), Some(*inrow)),
+        Grid::Elementwise => (None, vec![], None),
     };
 
     let mut hints: HashMap<String, Scalar> = HashMap::new();
@@ -229,6 +267,8 @@ pub fn lower(spec: &J) -> R<Kernel> {
                 params: &params,
                 outputs: &outputs,
                 rank,
+                chunked: &chunked,
+                inrow,
                 constants: &constants,
                 modules: &modules,
                 line_offset,
@@ -267,6 +307,90 @@ pub fn lower(spec: &J) -> R<Kernel> {
         "impossible de déterminer le type des variables locales".into(),
         None,
     ))
+}
+
+/// Lecture des tableaux par ligne (pour le découpage par blocs de lignes, §9.7).
+struct RowReaders {
+    /// Une seule affectation `i, … = gs.index()`, et `i` n'est jamais réaffecté.
+    ok: bool,
+    /// Tableaux indexés au moins une fois avec un premier indice autre que `i`.
+    other: Vec<String>,
+}
+
+/// Quels tableaux ne sont lus qu'à la ligne courante (`x[i, …]`, `i` premier axe de `gs.index()`) ?
+fn row_readers(body: &J, modules: &HashMap<String, String>) -> RowReaders {
+    fn is_index_call(n: &J, modules: &HashMap<String, String>) -> bool {
+        n["_type"] == "Call"
+            && n["func"]["_type"] == "Attribute"
+            && n["func"]["attr"] == "index"
+            && n["func"]["value"]["_type"] == "Name"
+            && modules
+                .get(n["func"]["value"]["id"].as_str().unwrap_or(""))
+                .map(String::as_str)
+                == Some("gpusync")
+    }
+    fn names(t: &J, out: &mut Vec<String>) {
+        match t["_type"].as_str() {
+            Some("Name") => out.push(t["id"].as_str().unwrap_or("").to_string()),
+            Some("Tuple") | Some("List") => {
+                for e in t["elts"].as_array().into_iter().flatten() {
+                    names(e, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk(n: &J, f: &mut dyn FnMut(&J)) {
+        match n {
+            J::Object(o) => {
+                f(n);
+                for v in o.values() {
+                    walk(v, f);
+                }
+            }
+            J::Array(a) => a.iter().for_each(|v| walk(v, f)),
+            _ => {}
+        }
+    }
+    let mut row_vars = Vec::new();
+    let mut assigned: Vec<String> = Vec::new();
+    walk(body, &mut |n| match n["_type"].as_str() {
+        Some("Assign") => {
+            for t in n["targets"].as_array().into_iter().flatten() {
+                if is_index_call(&n["value"], modules) {
+                    let first = if t["_type"] == "Tuple" {
+                        t["elts"][0].clone()
+                    } else {
+                        t.clone()
+                    };
+                    names(&first, &mut row_vars);
+                }
+                names(t, &mut assigned);
+            }
+        }
+        Some("AugAssign") | Some("AnnAssign") | Some("NamedExpr") => {
+            names(&n["target"], &mut assigned)
+        }
+        Some("For") => names(&n["target"], &mut assigned),
+        _ => {}
+    });
+    let ok = row_vars.len() == 1 && assigned.iter().filter(|a| **a == row_vars[0]).count() == 1;
+    let mut other = Vec::new();
+    walk(body, &mut |n| {
+        if n["_type"] == "Subscript" && n["value"]["_type"] == "Name" {
+            let first = if n["slice"]["_type"] == "Tuple" {
+                &n["slice"]["elts"][0]
+            } else {
+                &n["slice"]
+            };
+            let is_row = first["_type"] == "Name"
+                && row_vars.first().is_some_and(|r| first["id"] == r.as_str());
+            if !is_row {
+                other.push(n["value"]["id"].as_str().unwrap_or("").to_string());
+            }
+        }
+    });
+    RowReaders { ok, other }
 }
 
 /// Le corps appelle-t-il `gs.index()` ?
@@ -368,6 +492,9 @@ struct Lowerer<'a> {
     outputs: &'a [Scalar],
     /// Rang de la grille pour un kernel avec index ; `None` : élément par élément.
     rank: Option<usize>,
+    /// Tableaux lus seulement à la ligne courante : indexés à partir de la ligne `inrow`.
+    chunked: &'a [usize],
+    inrow: Option<usize>,
     constants: &'a HashMap<String, Lit>,
     modules: &'a HashMap<String, String>,
     line_offset: u32,
@@ -865,7 +992,15 @@ impl Lowerer<'_> {
             // Indice aplati, ordre C : ((i0 * d1 + i1) * d2 + i2)…
             let mut flat: Option<Expr> = None;
             for (k, n) in idx_nodes.iter().enumerate() {
-                let i = self.index_expr(n)?;
+                let mut i = self.index_expr(n)?;
+                if k == 0 && self.chunked.contains(&p) {
+                    // Tableau découpé par lignes : seule la partie du bloc est sur le périphérique.
+                    let base = ex(Scalar::I32, ExprKind::Param(self.inrow.unwrap()));
+                    i = ex(
+                        Scalar::I32,
+                        ExprKind::Binary(BinOp::Sub, Box::new(i), Box::new(base)),
+                    );
+                }
                 flat = Some(match flat {
                     None => i,
                     Some(acc) => {

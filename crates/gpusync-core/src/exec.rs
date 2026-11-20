@@ -203,7 +203,8 @@ pub unsafe fn launch(
 ) -> R<Vec<DeviceArray>> {
     let k = &c.kernel;
     let arrays: Vec<_> = k.array_params().map(|(_, p)| p.ty).collect();
-    let n_scalars = k.params.len() - arrays.len();
+    let n_engine = k.engine_params().iter().flatten().count();
+    let n_scalars = k.params.len() - arrays.len() - n_engine;
     if inputs.len() != arrays.len() || scalars.len() != n_scalars {
         return Err(CoreError::Type(format!(
             "'{}' attend {} tableau(x) et {} scalaire(s)",
@@ -278,72 +279,119 @@ pub unsafe fn launch(
 
     let limits = transfer_limits();
     let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
-    let result: Planned = match (dev, &c.imp) {
-        (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
-        (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
-            cl_direct(d, ck, k, &ins, &arrays, scalars, n, outs, &limits)
-        },
-        (Device::Cl(d), Imp::Cl(ck)) => {
-            if fits(dev, &ins, n, &out_elems, &limits) {
-                unsafe { cl_resident(d, ck, k, &ins, scalars, n, &limits) }
-            } else if indexed {
-                Err(too_big_indexed(k))
-            } else {
-                unsafe { cl_flux(d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
-            }
+    let scalars = &full_scalars(k, scalars);
+    let result: Planned = if n == 0 {
+        Ok((
+            outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+            Mode::Cpu,
+            false,
+        ))
+    } else if indexed {
+        let rows = Rows::new(k, scalars, n, &ins, &out_elems);
+        match (dev, &c.imp) {
+            (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
+            (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
+                rows_cl_direct(d, ck, k, &rows, &ins, scalars, outs, &limits)
+            },
+            (Device::Cl(d), Imp::Cl(ck)) => unsafe {
+                rows_cl(
+                    d,
+                    ck,
+                    k,
+                    &rows,
+                    &ins,
+                    scalars,
+                    outs,
+                    &limits,
+                    fits(dev, &ins, n, &out_elems, &limits),
+                    budget(dev, &limits),
+                )
+            },
+            (Device::Wg(d), Imp::Wg(wk)) => unsafe {
+                match rows_wg_direct(d, wk, k, &rows, &ins, scalars, outs, &limits)? {
+                    Some(direct) => Ok(direct),
+                    None => rows_wg(
+                        d,
+                        wk,
+                        k,
+                        &rows,
+                        &ins,
+                        scalars,
+                        outs,
+                        &limits,
+                        fits(dev, &ins, n, &out_elems, &limits),
+                        budget(dev, &limits),
+                    ),
+                }
+            },
+            _ => Err(CoreError::Device(
+                "kernel compilé pour un autre périphérique".into(),
+            )),
         }
-        (Device::Wg(d), Imp::Wg(wk)) => {
-            let (words, fwords) = wg_params(k, scalars)?;
-            if let Some(direct) = unsafe {
-                wg_direct(
-                    d, wk, &ins, &arrays, &words, &fwords, n, outs, &out_elems, indexed, &limits,
-                )?
-            } {
-                Ok(direct)
-            } else if fits(dev, &ins, n, &out_elems, &limits) {
-                unsafe { wg_resident(d, wk, &ins, &words, &fwords, n, &out_elems, &limits) }
-            } else if indexed {
-                Err(too_big_indexed(k))
-            } else {
-                let flux_in: Vec<FluxIn> = ins
-                    .iter()
-                    .zip(&arrays)
-                    .map(|(i, ty)| match i {
-                        In::Host(p, _) => Ok(FluxIn::Host {
-                            ptr: *p,
-                            elem: ty.size(),
-                        }),
-                        In::Dev(a) => match &a.storage {
-                            Storage::Wg(b) => Ok(FluxIn::Dev {
-                                buf: b,
+    } else {
+        match (dev, &c.imp) {
+            (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
+            (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
+                cl_direct(d, ck, k, &ins, &arrays, scalars, n, outs, &limits)
+            },
+            (Device::Cl(d), Imp::Cl(ck)) => {
+                if fits(dev, &ins, n, &out_elems, &limits) {
+                    unsafe { cl_resident(d, ck, k, &ins, scalars, n, &limits) }
+                } else {
+                    unsafe { cl_flux(d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
+                }
+            }
+            (Device::Wg(d), Imp::Wg(wk)) => {
+                let (words, fwords) = wg_params(k, scalars)?;
+                if let Some(direct) = unsafe {
+                    wg_direct(
+                        d, wk, &ins, &arrays, &words, &fwords, n, outs, &out_elems, &limits,
+                    )?
+                } {
+                    Ok(direct)
+                } else if fits(dev, &ins, n, &out_elems, &limits) {
+                    unsafe { wg_resident(d, wk, &ins, &words, &fwords, n, &out_elems, &limits) }
+                } else {
+                    let flux_in: Vec<FluxIn> = ins
+                        .iter()
+                        .zip(&arrays)
+                        .map(|(i, ty)| match i {
+                            In::Host(p, _) => Ok(FluxIn::Host {
+                                ptr: *p,
                                 elem: ty.size(),
                             }),
-                            _ => Err(other_kind()),
-                        },
-                    })
-                    .collect::<R<_>>()?;
-                let elem_max = elem_max(&arrays, &out_elems);
-                let max_buf = d.info.max_buffer_bytes.unwrap_or(u64::MAX) as usize;
-                let chunk_elems = (limits.chunk_bytes.min(max_buf) / elem_max).max(1);
-                let fouts: Vec<(*mut u8, usize)> = outs
-                    .iter()
-                    .copied()
-                    .zip(out_elems.iter().copied())
-                    .collect();
-                unsafe {
-                    d.flux(wk, &flux_in, &fouts, &words, &fwords, n, chunk_elems)
-                        .map_err(dev_err)?
-                };
-                Ok((
-                    outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
-                    Mode::Flux,
-                    false,
-                ))
+                            In::Dev(a) => match &a.storage {
+                                Storage::Wg(b) => Ok(FluxIn::Dev {
+                                    buf: b,
+                                    elem: ty.size(),
+                                }),
+                                _ => Err(other_kind()),
+                            },
+                        })
+                        .collect::<R<_>>()?;
+                    let elem_max = elem_max(&arrays, &out_elems);
+                    let max_buf = d.info.max_buffer_bytes.unwrap_or(u64::MAX) as usize;
+                    let chunk_elems = (limits.chunk_bytes.min(max_buf) / elem_max).max(1);
+                    let fouts: Vec<(*mut u8, usize)> = outs
+                        .iter()
+                        .copied()
+                        .zip(out_elems.iter().copied())
+                        .collect();
+                    unsafe {
+                        d.flux(wk, &flux_in, &fouts, &words, &fwords, n, chunk_elems)
+                            .map_err(dev_err)?
+                    };
+                    Ok((
+                        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+                        Mode::Flux,
+                        false,
+                    ))
+                }
             }
+            _ => Err(CoreError::Device(
+                "kernel compilé pour un autre périphérique".into(),
+            )),
         }
-        _ => Err(CoreError::Device(
-            "kernel compilé pour un autre périphérique".into(),
-        )),
     };
     let (storages, mode, mut host_backed_io) = result?;
     // Entrées rapatriées d'un autre périphérique : copies locales libérées au retour.
@@ -370,15 +418,6 @@ type Planned = R<(Vec<Storage>, Mode, bool)>;
 
 fn other_kind() -> CoreError {
     CoreError::Device("entrée sur un autre type de périphérique".into())
-}
-
-fn too_big_indexed(k: &Kernel) -> CoreError {
-    CoreError::Unsupported(format!(
-        "'{}' : les données ne tiennent pas en une fois sur le périphérique ; le découpage des \
-         kernels avec index arrive au jalon M3 (en attendant : gs.set_memory_budget() plus grand, \
-         un autre périphérique, ou device=\"cpu:0\")",
-        k.name
-    ))
 }
 
 fn elem_max(arrays: &[Scalar], out_elems: &[usize]) -> usize {
@@ -408,6 +447,12 @@ fn device_memory(dev: &Device) -> u64 {
         .unwrap_or(4 << 30)
 }
 
+fn budget(dev: &Device, limits: &TransferLimits) -> u64 {
+    limits
+        .budget_bytes
+        .unwrap_or_else(|| device_memory(dev) / 2)
+}
+
 /// L'appel tient-il en mode Résident (budget, taille max d'un buffer, une seule grille) ?
 fn fits(dev: &Device, ins: &[In], n: usize, out_elems: &[usize], limits: &TransferLimits) -> bool {
     let budget = limits.budget_bytes.unwrap_or(device_memory(dev) / 2);
@@ -428,27 +473,33 @@ fn fits(dev: &Device, ins: &[In], n: usize, out_elems: &[usize], limits: &Transf
     n <= u32::MAX as usize && new_bytes <= budget && biggest <= max_buf
 }
 
-/// Blocs `(début, longueur)` de la grille : un seul pour un kernel avec index (M3 : découpage).
-fn blocks(n: usize, chunk: usize, indexed: bool) -> Vec<(usize, usize)> {
-    if n == 0 {
-        return Vec::new();
-    }
-    if indexed {
-        return vec![(0, n)];
-    }
+/// Blocs `(début, longueur)` de la grille élément par élément.
+fn blocks(n: usize, chunk: usize) -> Vec<(usize, usize)> {
     (0..n)
-        .step_by(chunk)
+        .step_by(chunk.max(1))
         .map(|s| (s, chunk.min(n - s)))
         .collect()
 }
 
-/// Partie `(décalage, octets)` d'une entrée lue par le bloc : tout le tableau avec index.
-fn region(input: &In, ty: Scalar, start: usize, len: usize, indexed: bool) -> (usize, usize) {
-    if indexed {
-        (0, input.bytes())
-    } else {
-        (start * ty.size(), len * ty.size())
-    }
+/// Liste complète des scalaires (ordre des paramètres) : ceux de l'appelant, et des zéros à la
+/// place des paramètres du moteur (remplis à chaque lancement).
+fn full_scalars(k: &Kernel, user: &[Const]) -> Vec<Const> {
+    let mut u = user.iter();
+    k.params
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.kind == ParamKind::Scalar)
+        .map(|(i, p)| {
+            if k.is_engine_param(i) {
+                match p.ty {
+                    Scalar::U32 => Const::U32(0),
+                    _ => Const::I32(0),
+                }
+            } else {
+                *u.next().unwrap()
+            }
+        })
+        .collect()
 }
 
 fn scalar_args(k: &Kernel, scalars: &[Const]) -> Vec<Const> {
@@ -560,26 +611,19 @@ unsafe fn cl_direct(
     outs: &[*mut u8],
     limits: &TransferLimits,
 ) -> Planned {
-    let indexed = matches!(k.grid, Grid::Indexed { .. });
     let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
     let max_alloc = d
         .info
         .max_buffer_bytes
         .unwrap_or(u64::MAX)
         .min(usize::MAX as u64) as usize;
-    if indexed
-        && (ins.iter().any(|i| i.bytes() > max_alloc)
-            || out_elems.iter().any(|e| n * e > max_alloc))
-    {
-        return Err(too_big_indexed(k));
-    }
     let chunk_bytes = limits
         .direct_chunk_bytes
         .unwrap_or(max_alloc)
         .min(max_alloc);
     let chunk = (chunk_bytes / elem_max(arrays, &out_elems)).clamp(1, u32::MAX as usize);
     let mut out_bufs: Vec<Vec<ClBuffer>> = outs.iter().map(|_| Vec::new()).collect();
-    for (start, len) in blocks(n, chunk, indexed) {
+    for (start, len) in blocks(n, chunk) {
         let mut bufs = Vec::new();
         for (i, ty) in ins.iter().zip(arrays) {
             let In::Host(p, _) = i else {
@@ -587,7 +631,7 @@ unsafe fn cl_direct(
                     "mode Direct : entrée restée sur un périphérique".into(),
                 ));
             };
-            let (off, bytes) = region(i, *ty, start, len, indexed);
+            let (off, bytes) = (start * ty.size(), len * ty.size());
             bufs.push(unsafe { d.wrap_host(p.add(off) as *mut u8, bytes) }.map_err(dev_err)?);
         }
         let mut obs = Vec::new();
@@ -632,7 +676,6 @@ unsafe fn wg_direct(
     n: usize,
     outs: &[*mut u8],
     out_elems: &[usize],
-    indexed: bool,
     limits: &TransferLimits,
 ) -> R<Option<(Vec<Storage>, Mode, bool)>> {
     const PAGE: usize = 16384;
@@ -650,21 +693,16 @@ unsafe fn wg_direct(
         .max_buffer_bytes
         .unwrap_or(u64::MAX)
         .min(usize::MAX as u64) as usize;
-    if indexed
-        && (ins.iter().any(|i| i.bytes() > max_buf) || out_elems.iter().any(|e| n * e > max_buf))
-    {
-        return Ok(None);
-    }
     let chunk_bytes = limits.direct_chunk_bytes.unwrap_or(max_buf).min(max_buf);
     let step = PAGE / 4; // débuts de blocs alignés sur une page pour des éléments de 4 ou 8 o
     let chunk = ((chunk_bytes / elem_max(arrays, out_elems)) / step * step).max(step);
     let refused = || CoreError::Device("Metal a refusé une partie de la mémoire hôte".into());
     let mut out_bufs: Vec<Vec<WgBuffer>> = outs.iter().map(|_| Vec::new()).collect();
-    for (start, len) in blocks(n, chunk, indexed) {
+    for (start, len) in blocks(n, chunk) {
         let mut bufs = Vec::new();
         for (i, ty) in ins.iter().zip(arrays) {
             let In::Host(p, _) = i else { unreachable!() };
-            let (off, bytes) = region(i, *ty, start, len, indexed);
+            let (off, bytes) = (start * ty.size(), len * ty.size());
             match unsafe { d.wrap_host(p.add(off) as *mut u8, bytes) }.map_err(dev_err)? {
                 Some(b) => bufs.push(b),
                 None if start == 0 => return Ok(None),
@@ -1037,6 +1075,804 @@ unsafe fn cl_flux(
         }
         for p in s.pin_outs {
             d.recycle(p);
+        }
+    }
+    Ok((
+        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+        Mode::Flux,
+        false,
+    ))
+}
+
+// ───────────────────── Kernels avec index : blocs de lignes (§9.7) ─────────────────────
+
+/// Plan par lignes d'un kernel avec index : la grille (forme de la sortie) est découpée le long de
+/// son premier axe. Les entrées `chunked` (lues seulement à la ligne courante) suivent le même
+/// découpage ; les autres restent entières sur le périphérique.
+struct Rows {
+    /// Lignes de la sortie (taille du premier axe).
+    total: usize,
+    /// Cases par ligne.
+    rest: usize,
+    /// Par entrée : découpée par lignes ?
+    chunked: Vec<bool>,
+    /// Octets par ligne : de chaque entrée découpée (0 sinon), de chaque sortie.
+    in_row: Vec<usize>,
+    out_row: Vec<usize>,
+    /// Positions de row0, inrow, obase dans la liste des scalaires.
+    slots: [usize; 3],
+    /// Nom de chaque entrée (messages d'erreur).
+    names: Vec<String>,
+}
+
+impl Rows {
+    fn new(k: &Kernel, scalars: &[Const], n: usize, ins: &[In], out_elems: &[usize]) -> Rows {
+        let Grid::Indexed {
+            axes,
+            chunked,
+            row0,
+            inrow,
+            obase,
+        } = &k.grid
+        else {
+            unreachable!()
+        };
+        let pos = |param: usize| {
+            k.params[..param]
+                .iter()
+                .filter(|p| p.kind == ParamKind::Scalar)
+                .count()
+        };
+        let total = match interp::convert(scalars[pos(axes[0])], Scalar::I32) {
+            Const::I32(v) => v.max(1) as usize,
+            _ => 1,
+        };
+        let rest = n / total;
+        let arrays: Vec<(usize, String)> =
+            k.array_params().map(|(i, p)| (i, p.name.clone())).collect();
+        let is_chunked: Vec<bool> = arrays.iter().map(|(i, _)| chunked.contains(i)).collect();
+        Rows {
+            total,
+            rest,
+            in_row: ins
+                .iter()
+                .zip(&is_chunked)
+                .map(|(i, c)| if *c { i.bytes() / total } else { 0 })
+                .collect(),
+            out_row: out_elems.iter().map(|e| rest * e).collect(),
+            chunked: is_chunked,
+            slots: [pos(*row0), pos(*inrow), pos(*obase)],
+            names: arrays.into_iter().map(|(_, n)| n).collect(),
+        }
+    }
+
+    /// Scalaires d'un lancement : lignes `row0…`, entrées découpées à partir de la ligne `inrow`,
+    /// sorties écrites à partir de la case `obase` de leur buffer.
+    fn with(&self, scalars: &[Const], row0: usize, inrow: usize, obase: usize) -> Vec<Const> {
+        let mut s = scalars.to_vec();
+        s[self.slots[0]] = Const::I32(row0 as i32);
+        s[self.slots[1]] = Const::I32(inrow as i32);
+        s[self.slots[2]] = Const::U32(obase as u32);
+        s
+    }
+
+    /// Plus grand nombre d'octets par ligne parmi les tableaux découpés (entrées et sorties).
+    fn max_row(&self) -> usize {
+        self.in_row
+            .iter()
+            .chain(&self.out_row)
+            .copied()
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// Octets par ligne, tous tableaux découpés confondus.
+    fn sum_row(&self) -> usize {
+        (self.in_row.iter().sum::<usize>() + self.out_row.iter().sum::<usize>()).max(1)
+    }
+
+    /// Blocs de lignes `(début, lignes)` de `rows` lignes au plus.
+    fn blocks(&self, rows: usize) -> Vec<(usize, usize)> {
+        let rows = rows.clamp(1, self.total);
+        (0..self.total)
+            .step_by(rows)
+            .map(|s| (s, rows.min(self.total - s)))
+            .collect()
+    }
+
+    fn resident_too_big(
+        &self,
+        k: &Kernel,
+        i: usize,
+        bytes: usize,
+        room: u64,
+        dev: &str,
+    ) -> CoreError {
+        CoreError::Unsupported(format!(
+            "'{}' : l'entrée '{}' ({}) est lue à n'importe quelle ligne de la sortie, elle doit \
+             donc tenir entière sur {dev} ({} disponibles). Pour qu'elle soit découpée, indexez-la \
+             par la ligne courante ({}[i, …] avec i, … = gs.index()) ; sinon augmentez gs.set_memory_budget() \
+             ou utilisez un autre périphérique",
+            k.name,
+            self.names[i],
+            human(bytes as u64),
+            human(room),
+            self.names[i],
+        ))
+    }
+}
+
+/// Taille lisible : « 1,50 Gio », « 12,0 Mio », « 300 o ».
+fn human(b: u64) -> String {
+    let f = b as f64;
+    let s = if b >= 1 << 30 {
+        format!("{:.2} Gio", f / (1u64 << 30) as f64)
+    } else if b >= 1 << 20 {
+        format!("{:.1} Mio", f / (1u64 << 20) as f64)
+    } else if b >= 1 << 10 {
+        format!("{:.1} Kio", f / 1024.0)
+    } else {
+        format!("{b} o")
+    };
+    s.replace('.', ",")
+}
+
+/// Cases lancées sans mesure (appel court) ou lors de la première mesure.
+const PROBE_CELLS: usize = 1 << 16;
+/// Durée visée d'un lancement : bien en deçà du délai de garde des drivers (TDR Windows : ~2 s).
+const TARGET_LAUNCH_S: f64 = 0.1;
+/// Cases au plus par lancement (indices u32, limites de la grille wgpu).
+const MAX_LAUNCH_CELLS: usize = 1 << 30;
+
+/// Découpe les lancements d'un kernel avec index pour qu'aucun ne dure plus de ~0,1 s : le premier
+/// est petit et chronométré, les suivants sont dimensionnés d'après le débit mesuré.
+#[derive(Default)]
+struct Pacer {
+    /// Débit mesuré (lignes par seconde).
+    rate: Option<f64>,
+    last: usize,
+}
+
+impl Pacer {
+    /// Calcule les lignes `[a, b)` ; `step(première ligne, lignes, attendre la fin)`.
+    fn run(
+        &mut self,
+        a: usize,
+        b: usize,
+        rest: usize,
+        step: &mut dyn FnMut(usize, usize, bool) -> R<()>,
+    ) -> R<()> {
+        let rest = rest.max(1);
+        let max_rows = (MAX_LAUNCH_CELLS / rest).max(1);
+        if self.rate.is_none() && (b - a) * rest <= PROBE_CELLS {
+            return step(a, b - a, false);
+        }
+        let mut s = a;
+        while s < b {
+            let want = match self.rate {
+                None => (PROBE_CELLS / rest).max(1),
+                Some(r) => ((r * TARGET_LAUNCH_S) as usize).clamp(1, self.last.saturating_mul(8)),
+            };
+            let len = want.min(max_rows).min(b - s);
+            let last = s + len == b;
+            let t0 = std::time::Instant::now();
+            step(s, len, !last)?;
+            if !last {
+                let dt = t0.elapsed().as_secs_f64().max(1e-6);
+                self.rate = Some(len as f64 / dt);
+                self.last = len;
+            }
+            s += len;
+        }
+        Ok(())
+    }
+}
+
+fn max_buffer(info_max: Option<u64>) -> usize {
+    info_max.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize
+}
+
+/// Kernel avec index, OpenCL sur mémoire unifiée : chaque bloc de lignes utilise directement la
+/// mémoire de l'hôte ; les entrées lues à toutes les lignes sont importées une fois.
+#[allow(clippy::too_many_arguments)]
+unsafe fn rows_cl_direct(
+    d: &ClDevice,
+    ck: &ClKernel,
+    k: &Kernel,
+    rows: &Rows,
+    ins: &[In],
+    scalars: &[Const],
+    outs: &[*mut u8],
+    limits: &TransferLimits,
+) -> Planned {
+    let max_alloc = max_buffer(d.info.max_buffer_bytes);
+    let cap = limits
+        .direct_chunk_bytes
+        .unwrap_or(max_alloc)
+        .min(max_alloc);
+    let mut whole: Vec<Option<ClBuffer>> = Vec::new();
+    for (i, input) in ins.iter().enumerate() {
+        let In::Host(p, bytes) = input else {
+            return Err(CoreError::Device(
+                "mode Direct : entrée restée sur un périphérique".into(),
+            ));
+        };
+        whole.push(if rows.chunked[i] {
+            None
+        } else {
+            if *bytes > max_alloc {
+                return Err(rows.resident_too_big(k, i, *bytes, max_alloc as u64, &d.info.name));
+            }
+            Some(unsafe { d.wrap_host(*p as *mut u8, *bytes) }.map_err(dev_err)?)
+        });
+    }
+    let mut pacer = Pacer::default();
+    let mut out_bufs: Vec<Vec<ClBuffer>> = outs.iter().map(|_| Vec::new()).collect();
+    for (r0, len) in rows.blocks(cap / rows.max_row()) {
+        let mut parts: Vec<Option<ClBuffer>> = Vec::new();
+        for (i, input) in ins.iter().enumerate() {
+            parts.push(match input {
+                In::Host(p, _) if rows.chunked[i] => {
+                    let rb = rows.in_row[i];
+                    Some(
+                        unsafe { d.wrap_host(p.add(r0 * rb) as *mut u8, len * rb) }
+                            .map_err(dev_err)?,
+                    )
+                }
+                _ => None,
+            });
+        }
+        let mut obs = Vec::new();
+        for (p, rb) in outs.iter().zip(&rows.out_row) {
+            obs.push(unsafe { d.wrap_host(p.add(r0 * rb), len * rb) }.map_err(dev_err)?);
+        }
+        let refs: Vec<&ClBuffer> = parts
+            .iter()
+            .zip(&whole)
+            .map(|(a, b)| a.as_ref().or(b.as_ref()).unwrap())
+            .collect();
+        let orefs: Vec<&ClBuffer> = obs.iter().collect();
+        pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
+            let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
+            let cells = l * rows.rest;
+            let e = d
+                .launch(
+                    ck,
+                    &cl_args(k, &refs, &sc, &orefs, cells as u32),
+                    cells,
+                    &[],
+                )
+                .map_err(dev_err)?;
+            if sync {
+                wait(&e).map_err(dev_err)?;
+            }
+            Ok(())
+        })?;
+        for (dst, ob) in out_bufs.iter_mut().zip(obs) {
+            dst.push(ob);
+        }
+        // Les buffers d'entrée du bloc peuvent être libérés : la file garde ses références.
+    }
+    // Les imports entiers doivent survivre aux calculs : ils sont rattachés à la première sortie.
+    let mut storages: Vec<Storage> = out_bufs
+        .into_iter()
+        .zip(outs)
+        .map(|(bufs, ptr)| Storage::ClDirect { bufs, ptr: *ptr })
+        .collect();
+    if let Some(Storage::ClDirect { bufs, .. }) = storages.first_mut() {
+        bufs.extend(whole.into_iter().flatten());
+    }
+    Ok((storages, Mode::Direct, true))
+}
+
+/// Kernel avec index, OpenCL sur GPU dédié : Résident (tout tient) ou par blocs de lignes, avec
+/// deux emplacements pour recouvrir le retour d'un bloc par le calcul du suivant.
+#[allow(clippy::too_many_arguments)]
+unsafe fn rows_cl(
+    d: &ClDevice,
+    ck: &ClKernel,
+    k: &Kernel,
+    rows: &Rows,
+    ins: &[In],
+    scalars: &[Const],
+    outs: &[*mut u8],
+    limits: &TransferLimits,
+    fits: bool,
+    budget: u64,
+) -> Planned {
+    let max_buf = max_buffer(d.info.max_buffer_bytes);
+    // Entrées entières (toutes si l'appel tient, sinon celles lues à n'importe quelle ligne).
+    let mut owned: Vec<Option<ClBuffer>> = Vec::new();
+    let mut waits_owned: Vec<ClEvent> = Vec::new();
+    let mut resident_bytes = 0u64;
+    for (i, input) in ins.iter().enumerate() {
+        let keep_whole = fits || !rows.chunked[i];
+        owned.push(match input {
+            In::Host(p, bytes) if keep_whole => {
+                resident_bytes += *bytes as u64;
+                if *bytes > max_buf || (!fits && resident_bytes > budget) {
+                    return Err(rows.resident_too_big(
+                        k,
+                        i,
+                        *bytes,
+                        budget.min(max_buf as u64),
+                        &d.info.name,
+                    ));
+                }
+                let b = d.alloc(*bytes).map_err(dev_err)?;
+                if let Some(e) = unsafe { cl_upload(d, &b, *p, *bytes, limits.chunk_bytes)? } {
+                    waits_owned.push(e);
+                }
+                Some(b)
+            }
+            _ => None,
+        });
+    }
+    let dev_buf = |i: usize| -> R<(&ClBuffer, &ClEvent)> {
+        match &ins[i] {
+            In::Dev(a) => match &a.storage {
+                Storage::Cl { buf, done } => Ok((buf, &**done)),
+                _ => Err(other_kind()),
+            },
+            In::Host(..) => unreachable!(),
+        }
+    };
+    let mut pacer = Pacer::default();
+
+    if fits {
+        let mut refs: Vec<&ClBuffer> = Vec::new();
+        let mut waits: Vec<&ClEvent> = waits_owned.iter().collect();
+        for (i, o) in owned.iter().enumerate() {
+            match o {
+                Some(b) => refs.push(b),
+                None => {
+                    let (b, done) = dev_buf(i)?;
+                    refs.push(b);
+                    waits.push(done);
+                }
+            }
+        }
+        let obufs: Vec<ClBuffer> = rows
+            .out_row
+            .iter()
+            .map(|rb| d.alloc(rows.total * rb).map_err(dev_err))
+            .collect::<R<_>>()?;
+        let orefs: Vec<&ClBuffer> = obufs.iter().collect();
+        let mut last: Option<ClEvent> = None;
+        pacer.run(0, rows.total, rows.rest, &mut |s, l, sync| {
+            let sc = rows.with(scalars, s, 0, s * rows.rest);
+            let cells = l * rows.rest;
+            let w: &[&ClEvent] = if last.is_none() { &waits } else { &[] };
+            let e = d
+                .launch(ck, &cl_args(k, &refs, &sc, &orefs, cells as u32), cells, w)
+                .map_err(dev_err)?;
+            if sync {
+                wait(&e).map_err(dev_err)?;
+            }
+            last = Some(e);
+            Ok(())
+        })?;
+        let done = Arc::new(last.unwrap());
+        return Ok((
+            obufs
+                .into_iter()
+                .map(|buf| Storage::Cl {
+                    buf,
+                    done: done.clone(),
+                })
+                .collect(),
+            Mode::Resident,
+            false,
+        ));
+    }
+
+    // Par blocs de lignes : deux emplacements, chacun avec ses buffers d'entrées découpées et de sorties.
+    let room = budget.saturating_sub(resident_bytes) as usize;
+    let per_row: Vec<usize> = rows.in_row.iter().chain(&rows.out_row).copied().collect();
+    let by_buf = per_row
+        .iter()
+        .filter(|b| **b > 0)
+        .map(|b| max_buf / b)
+        .min()
+        .unwrap_or(rows.total);
+    let br = (limits.chunk_bytes / rows.max_row())
+        .min(room / (2 * rows.sum_row()))
+        .min(by_buf)
+        .clamp(1, rows.total);
+    struct Slot {
+        ins: Vec<Option<ClBuffer>>,
+        outs: Vec<ClBuffer>,
+        pending: Option<(usize, usize, ClEvent)>,
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    for _ in 0..2.min(rows.total.div_ceil(br)) {
+        slots.push(Slot {
+            ins: rows
+                .in_row
+                .iter()
+                .zip(&rows.chunked)
+                .map(|(rb, c)| c.then(|| d.alloc(br * rb)).transpose().map_err(dev_err))
+                .collect::<R<_>>()?,
+            outs: rows
+                .out_row
+                .iter()
+                .map(|rb| d.alloc(br * rb).map_err(dev_err))
+                .collect::<R<_>>()?,
+            pending: None,
+        });
+    }
+    let drain = |s: &mut Slot| -> R<()> {
+        if let Some((r0, len, done)) = s.pending.take() {
+            for (o, buf) in s.outs.iter().enumerate() {
+                let rb = rows.out_row[o];
+                unsafe {
+                    cl_download(
+                        d,
+                        buf,
+                        &done,
+                        outs[o].add(r0 * rb),
+                        len * rb,
+                        limits.chunk_bytes,
+                    )?
+                };
+            }
+        }
+        Ok(())
+    };
+    for (b, (r0, len)) in rows.blocks(br).into_iter().enumerate() {
+        let cur = b % slots.len();
+        let mut writes: Vec<ClEvent> = Vec::new();
+        for (i, input) in ins.iter().enumerate() {
+            if !rows.chunked[i] {
+                continue;
+            }
+            let rb = rows.in_row[i];
+            let dst = slots[cur].ins[i].as_ref().unwrap();
+            match input {
+                In::Host(p, _) => {
+                    if let Some(e) =
+                        unsafe { cl_upload(d, dst, p.add(r0 * rb), len * rb, limits.chunk_bytes)? }
+                    {
+                        writes.push(e);
+                    }
+                }
+                In::Dev(_) => {
+                    let (src, done) = dev_buf(i)?;
+                    writes.push(
+                        d.copy_at(src, r0 * rb, dst, 0, len * rb, &[done])
+                            .map_err(dev_err)?,
+                    );
+                }
+            }
+        }
+        d.flush().map_err(dev_err)?;
+        let mut waits: Vec<&ClEvent> = writes.iter().chain(&waits_owned).collect();
+        for i in 0..ins.len() {
+            if !rows.chunked[i] && owned[i].is_none() {
+                waits.push(dev_buf(i)?.1);
+            }
+        }
+        let refs: Vec<&ClBuffer> = (0..ins.len())
+            .map(|i| match (&slots[cur].ins[i], &owned[i]) {
+                (Some(b), _) | (None, Some(b)) => Ok(b),
+                (None, None) => dev_buf(i).map(|(b, _)| b),
+            })
+            .collect::<R<_>>()?;
+        let orefs: Vec<&ClBuffer> = slots[cur].outs.iter().collect();
+        let mut last: Option<ClEvent> = None;
+        pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
+            let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
+            let cells = l * rows.rest;
+            let w: &[&ClEvent] = if last.is_none() { &waits } else { &[] };
+            let e = d
+                .launch(ck, &cl_args(k, &refs, &sc, &orefs, cells as u32), cells, w)
+                .map_err(dev_err)?;
+            d.flush().map_err(dev_err)?;
+            if sync {
+                wait(&e).map_err(dev_err)?;
+            }
+            last = Some(e);
+            Ok(())
+        })?;
+        drop(refs);
+        drop(orefs);
+        // Pendant ce calcul, le bloc précédent revient dans sa destination.
+        let prev = (cur + slots.len() - 1) % slots.len();
+        if prev != cur {
+            drain(&mut slots[prev])?;
+        }
+        slots[cur].pending = Some((r0, len, last.unwrap()));
+    }
+    for s in &mut slots {
+        drain(s)?;
+    }
+    Ok((
+        outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
+        Mode::Flux,
+        false,
+    ))
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// Kernel avec index sur Metal : blocs de lignes en `NoCopy` sur la mémoire de l'hôte (débuts de
+/// blocs alignés sur une page). `None` si impossible (pas Metal, adresses non alignées…).
+#[allow(clippy::too_many_arguments)]
+unsafe fn rows_wg_direct(
+    d: &gpusync_backend_wgpu::WgDevice,
+    wk: &gpusync_backend_wgpu::WgKernel,
+    k: &Kernel,
+    rows: &Rows,
+    ins: &[In],
+    scalars: &[Const],
+    outs: &[*mut u8],
+    limits: &TransferLimits,
+) -> R<Option<(Vec<Storage>, Mode, bool)>> {
+    const PAGE: usize = 16384;
+    if d.info.backend != "metal" || outs.iter().any(|p| !(*p as usize).is_multiple_of(PAGE)) {
+        return Ok(None);
+    }
+    let max_buf = max_buffer(d.info.max_buffer_bytes);
+    for i in ins {
+        match i {
+            In::Host(p, b) if (*p as usize).is_multiple_of(PAGE) && *b <= max_buf => {}
+            _ => return Ok(None),
+        }
+    }
+    let cap = limits.direct_chunk_bytes.unwrap_or(max_buf).min(max_buf);
+    // Lignes par bloc : multiple de `step` pour que chaque bloc commence sur une page.
+    let step = rows
+        .in_row
+        .iter()
+        .chain(&rows.out_row)
+        .filter(|b| **b > 0)
+        .map(|b| PAGE / gcd(PAGE, *b))
+        .fold(1, |acc, s| acc / gcd(acc, s) * s);
+    let mut br = (cap / rows.max_row()).min(rows.total);
+    if br < rows.total {
+        br = br / step * step;
+        if br == 0 {
+            return Ok(None);
+        }
+    }
+    let mut whole: Vec<Option<WgBuffer>> = Vec::new();
+    for (i, input) in ins.iter().enumerate() {
+        let In::Host(p, bytes) = input else {
+            unreachable!()
+        };
+        whole.push(if rows.chunked[i] {
+            None
+        } else {
+            match unsafe { d.wrap_host(*p as *mut u8, *bytes) }.map_err(dev_err)? {
+                Some(b) => Some(b),
+                None => return Ok(None),
+            }
+        });
+    }
+    let refused = || CoreError::Device("Metal a refusé une partie de la mémoire hôte".into());
+    let mut pacer = Pacer::default();
+    let mut out_bufs: Vec<Vec<WgBuffer>> = outs.iter().map(|_| Vec::new()).collect();
+    let mut keep: Vec<WgBuffer> = Vec::new();
+    for (r0, len) in rows.blocks(br) {
+        let mut parts: Vec<Option<WgBuffer>> = Vec::new();
+        for (i, input) in ins.iter().enumerate() {
+            let In::Host(p, _) = input else {
+                unreachable!()
+            };
+            parts.push(if rows.chunked[i] {
+                let rb = rows.in_row[i];
+                match unsafe { d.wrap_host(p.add(r0 * rb) as *mut u8, len * rb) }
+                    .map_err(dev_err)?
+                {
+                    Some(b) => Some(b),
+                    None if r0 == 0 => return Ok(None),
+                    None => return Err(refused()),
+                }
+            } else {
+                None
+            });
+        }
+        let mut obs = Vec::new();
+        for (p, rb) in outs.iter().zip(&rows.out_row) {
+            match unsafe { d.wrap_host(p.add(r0 * rb), len * rb) }.map_err(dev_err)? {
+                Some(b) => obs.push(b),
+                None if r0 == 0 => return Ok(None),
+                None => return Err(refused()),
+            }
+        }
+        {
+            let refs: Vec<&WgBuffer> = parts
+                .iter()
+                .zip(&whole)
+                .map(|(a, b)| a.as_ref().or(b.as_ref()).unwrap())
+                .collect();
+            let orefs: Vec<&WgBuffer> = obs.iter().collect();
+            pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
+                let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
+                let (mut w, f) = wg_params(k, &sc)?;
+                let cells = l * rows.rest;
+                w.push(cells as u32);
+                d.launch(wk, &refs, &orefs, &w, &f, cells)
+                    .map_err(dev_err)?;
+                if sync {
+                    d.finish().map_err(dev_err)?;
+                }
+                Ok(())
+            })?;
+        }
+        keep.extend(parts.into_iter().flatten());
+        for (dst, ob) in out_bufs.iter_mut().zip(obs) {
+            dst.push(ob);
+        }
+    }
+    let mut storages: Vec<Storage> = out_bufs
+        .into_iter()
+        .zip(outs)
+        .map(|(bufs, ptr)| Storage::WgDirect { bufs, ptr: *ptr })
+        .collect();
+    if let Some(Storage::WgDirect { bufs, .. }) = storages.first_mut() {
+        bufs.extend(keep);
+        bufs.extend(whole.into_iter().flatten());
+    }
+    Ok(Some((storages, Mode::Direct, true)))
+}
+
+/// Kernel avec index via wgpu : Résident (tout tient) ou par blocs de lignes (une seule file :
+/// envoi, calcul et retour de chaque bloc se suivent).
+#[allow(clippy::too_many_arguments)]
+unsafe fn rows_wg(
+    d: &gpusync_backend_wgpu::WgDevice,
+    wk: &gpusync_backend_wgpu::WgKernel,
+    k: &Kernel,
+    rows: &Rows,
+    ins: &[In],
+    scalars: &[Const],
+    outs: &[*mut u8],
+    limits: &TransferLimits,
+    fits: bool,
+    budget: u64,
+) -> Planned {
+    let max_buf = max_buffer(d.info.max_buffer_bytes);
+    let mut owned: Vec<Option<WgBuffer>> = Vec::new();
+    let mut resident_bytes = 0u64;
+    for (i, input) in ins.iter().enumerate() {
+        let keep_whole = fits || !rows.chunked[i];
+        owned.push(match input {
+            In::Host(p, bytes) if keep_whole => {
+                resident_bytes += *bytes as u64;
+                if *bytes > max_buf || (!fits && resident_bytes > budget) {
+                    return Err(rows.resident_too_big(
+                        k,
+                        i,
+                        *bytes,
+                        budget.min(max_buf as u64),
+                        &d.info.name,
+                    ));
+                }
+                let b = d.alloc(*bytes).map_err(dev_err)?;
+                unsafe {
+                    d.upload(&b, 0, *p, *bytes, limits.chunk_bytes)
+                        .map_err(dev_err)?
+                };
+                Some(b)
+            }
+            _ => None,
+        });
+    }
+    let dev_buf = |i: usize| -> R<&WgBuffer> {
+        match &ins[i] {
+            In::Dev(a) => match &a.storage {
+                Storage::Wg(b) => Ok(b),
+                _ => Err(other_kind()),
+            },
+            In::Host(..) => unreachable!(),
+        }
+    };
+    let mut pacer = Pacer::default();
+    let mut launch = |refs: &[&WgBuffer],
+                      orefs: &[&WgBuffer],
+                      r0: usize,
+                      a: usize,
+                      b: usize,
+                      whole_out: bool| {
+        pacer.run(a, b, rows.rest, &mut |s, l, sync| {
+            let obase = if whole_out {
+                s * rows.rest
+            } else {
+                (s - r0) * rows.rest
+            };
+            let sc = rows.with(scalars, s, r0, obase);
+            let (mut w, f) = wg_params(k, &sc)?;
+            let cells = l * rows.rest;
+            w.push(cells as u32);
+            d.launch(wk, refs, orefs, &w, &f, cells).map_err(dev_err)?;
+            if sync {
+                d.finish().map_err(dev_err)?;
+            }
+            Ok(())
+        })
+    };
+
+    if fits {
+        let refs: Vec<&WgBuffer> = (0..ins.len())
+            .map(|i| match &owned[i] {
+                Some(b) => Ok(b),
+                None => dev_buf(i),
+            })
+            .collect::<R<_>>()?;
+        let obufs: Vec<WgBuffer> = rows
+            .out_row
+            .iter()
+            .map(|rb| d.alloc(rows.total * rb).map_err(dev_err))
+            .collect::<R<_>>()?;
+        let orefs: Vec<&WgBuffer> = obufs.iter().collect();
+        launch(&refs, &orefs, 0, 0, rows.total, true)?;
+        drop(orefs);
+        return Ok((
+            obufs.into_iter().map(Storage::Wg).collect(),
+            Mode::Resident,
+            false,
+        ));
+    }
+
+    let room = budget.saturating_sub(resident_bytes) as usize;
+    let by_buf = rows
+        .in_row
+        .iter()
+        .chain(&rows.out_row)
+        .filter(|b| **b > 0)
+        .map(|b| max_buf / b)
+        .min()
+        .unwrap_or(rows.total);
+    let br = (limits.chunk_bytes / rows.max_row())
+        .min(room / rows.sum_row())
+        .min(by_buf)
+        .clamp(1, rows.total);
+    let sins: Vec<Option<WgBuffer>> = rows
+        .in_row
+        .iter()
+        .zip(&rows.chunked)
+        .map(|(rb, c)| c.then(|| d.alloc(br * rb)).transpose().map_err(dev_err))
+        .collect::<R<_>>()?;
+    let souts: Vec<WgBuffer> = rows
+        .out_row
+        .iter()
+        .map(|rb| d.alloc(br * rb).map_err(dev_err))
+        .collect::<R<_>>()?;
+    for (r0, len) in rows.blocks(br) {
+        for (i, input) in ins.iter().enumerate() {
+            if !rows.chunked[i] {
+                continue;
+            }
+            let rb = rows.in_row[i];
+            let dst = sins[i].as_ref().unwrap();
+            match input {
+                In::Host(p, _) => unsafe {
+                    d.upload(dst, 0, p.add(r0 * rb), len * rb, limits.chunk_bytes)
+                        .map_err(dev_err)?
+                },
+                In::Dev(_) => d
+                    .copy(dev_buf(i)?, r0 * rb, dst, 0, len * rb)
+                    .map_err(dev_err)?,
+            }
+        }
+        let refs: Vec<&WgBuffer> = (0..ins.len())
+            .map(|i| match (&sins[i], &owned[i]) {
+                (Some(b), _) | (None, Some(b)) => Ok(b),
+                (None, None) => dev_buf(i),
+            })
+            .collect::<R<_>>()?;
+        let orefs: Vec<&WgBuffer> = souts.iter().collect();
+        launch(&refs, &orefs, r0, r0, r0 + len, false)?;
+        for (o, buf) in souts.iter().enumerate() {
+            let rb = rows.out_row[o];
+            unsafe {
+                d.download(buf, 0, outs[o].add(r0 * rb), len * rb, limits.chunk_bytes)
+                    .map_err(dev_err)?
+            };
         }
     }
     Ok((

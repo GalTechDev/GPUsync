@@ -116,8 +116,8 @@ impl KernelIR {
         self.ir
             .params
             .iter()
-            .filter(|p| p.hidden)
-            .map(|p| p.name.trim_start_matches("gs_dim_").to_string())
+            .filter_map(|p| p.name.strip_prefix("gs_dim_").filter(|_| p.hidden))
+            .map(str::to_string)
             .collect()
     }
 
@@ -177,7 +177,9 @@ impl KernelIR {
             .ir
             .params
             .iter()
-            .filter(|p| p.kind == ParamKind::Scalar)
+            .enumerate()
+            .filter(|(i, p)| p.kind == ParamKind::Scalar && !self.ir.is_engine_param(*i))
+            .map(|(_, p)| p)
             .collect();
         if scalars.len() != scalar_params.len() {
             return Err(TypeMismatch::new_err(format!(

@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M2 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M3 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -11,6 +11,36 @@
 | M1 MVP | ✅ `@gs.kernel` élément par élément, IR + interpréteur, émetteurs OpenCL C et WGSL, `gs.Array`, zéro-copie OpenCL | Mac : Metal, OpenCL, cpu (75 tests) ; PC : Vulkan et OpenCL sur RTX 4080 SUPER et UHD 770, cpu (104 tests) |
 | M1.5 Transferts et choix automatique | ✅ f64 via Vulkan, besoins `f64` / `f64_math`, classement des périphériques, option `compat` ; moteur de transferts (Direct, Résident, Flux) pour OpenCL et wgpu ; zéro-copie Metal (`NoCopy` via wgpu-hal) ; `out=`, `np.memmap`, `.stream()`, `gs.OutOfMemory`, `gs.set_memory_budget` | Mac : 109 tests ; PC : 164 tests ; essais à gros volume ci-dessous |
 | M2 Index et formes | ✅ `gs.index()`, dimensions nommées (`gs.f32["n", "t"]`, axes sans nom `gs.f32[:, :]`), `x.shape[k]`, `len(x)`, plusieurs sorties (`-> (gs.f32["n"], gs.i32["n"])`, `out=` en tuple), `gs.local`, réductions de `gs.Array` sur l'hôte ; moteur à plusieurs sorties ; perte du GPU par le driver (TDR) : erreur claire et réouverture | Mac : 152 tests ; PC : 228 tests ; DTW identique au prototype |
+| M3 Out-of-core avec index | ✅ grille découpée par blocs de lignes (premier axe de la sortie) dans tous les modes ; entrées lues seulement à la ligne courante découpées, les autres gardées entières ; lancements cadencés (~0,1 s chacun) | Mac : 172 tests ; PC : 263 tests ; essais à gros volume ci-dessous |
+
+#### Mesures M3 (`tools/bench_m3.py`, 64 lignes vérifiées contre NumPy)
+
+| Cas | Machine, périphérique | Mode | Durée | Mémoire en plus | Résultat |
+|---|---|---|---|---|---|
+| `pairwise_dist` 72 000 × 72 000 (t = 16), sortie 19,3 Gio > 16 Go de VRAM | PC, `vulkan:0` (RTX) | par blocs (`flux`) | 3,8 s | 0,34 Gio | ✓ |
+| idem | PC, `opencl:0` (RTX) | par blocs (`flux`) | 3,9 s | 0,16 Gio | ✓ |
+| idem | PC, `opencl:1` (UHD 770) | Direct | 29,5 s | 0 | ✓ |
+| idem | PC, `vulkan:1` (UHD 770) | par blocs (`flux`) | 34,5 s | 0,51 Gio | ✓ |
+| `pairwise_dist` 56 000 × 56 000, sortie 11,7 Gio > allocation max (3,3 Gio) | Mac, `opencl:0` | Direct | 1,2 s | 0 | ✓ |
+| idem | Mac, `metal:0` | Direct | 0,6 s | 0,01 Gio | ✓ |
+| DTW 4000 × 4000 (t = 64), perdu par le driver à M2 (TDR) | PC, `vulkan:1` (UHD 770) | Résident, lancements cadencés | 56,7 s | — | ✓ |
+
+#### Décisions et constats de M3
+
+- **Découpage par lignes** : le frontend repère, dans le source, les tableaux lus seulement à la ligne
+  courante (premier indice = la variable `i` de `i, … = gs.index()`, jamais réaffectée, et même première
+  dimension que la sortie). Ceux-là sont découpés avec la sortie ; leur premier indice devient `i − inrow`.
+  Les autres (ex. `series[j, k]` dans `pairwise_dist`) restent entiers sur le périphérique.
+- **Trois paramètres cachés du moteur** : `row0` (première ligne du lancement), `inrow` (première ligne des
+  entrées découpées présentes), `obase` (case de départ dans le buffer de sortie). Le même code sert à tous
+  les modes : Direct (blocs importés sans copie, débuts alignés sur 16 Kio pour Metal), Résident (buffers
+  entiers, plusieurs lancements) et par blocs (OpenCL : deux emplacements, le retour d'un bloc recouvre le
+  calcul du suivant ; wgpu : à la suite).
+- **Lancements cadencés** : au-delà de 65 536 cases, un premier petit lancement est chronométré, puis chaque
+  lancement vise ~0,1 s. Plus aucun lancement ne s'approche du délai de garde des drivers ; coût mesuré :
+  ~1 ms sur un DTW de 391 × 391 (Metal : 3,0 → 4,1 ms), invisible au-delà.
+- **Entrée trop grosse pour rester entière** : `gs.UnsupportedFeature` qui la nomme, donne sa taille et la
+  place disponible, et explique comment la rendre découpable.
 
 #### Mesures M2 (`tools/bench_m2.py`, à chaud, résultat lu sur l'hôte)
 
@@ -24,15 +54,14 @@ bit près en OpenCL sur le Mac) sur les 391 séries `OXYGENE` (`tests/data`).
 
 #### Décisions et constats de M2
 
-- **Un seul bloc pour les kernels avec index** : les entrées sont lues en entier par chaque case (DTW,
-  distances), la grille couvre toute la sortie. Si l'appel ne tient pas dans le budget (GPU dédié) ou dans un
-  buffer, erreur claire renvoyant au M3 (§9.7). Les kernels élément par élément gardent les trois modes.
+- **Un seul bloc pour les kernels avec index** (levé à M3) : la grille couvrait toute la sortie ; au-delà du
+  budget ou d'un buffer, erreur claire renvoyant au M3.
 - **Dimensions cachées** : chaque dimension distincte (nommée, ou `param.axe` sans nom) devient un paramètre
   `i32` caché, fourni par le runtime depuis les formes ; les indices `x[i, k]` sont aplatis en ordre C.
 - **TDR Windows** : sur l'UHD 770, un DTW 4000×4000 dépasse ~2 s en Vulkan ; le driver perd le périphérique et
   wgpu paniquait à l'appel suivant. Désormais : `gs.DeviceError` explicite, puis le périphérique et les kernels
-  compilés sont rouverts au prochain appel. OpenCL sur le même GPU n'est pas interrompu (73 s). Découper la
-  grille en plusieurs soumissions (M3) supprimera ce cas.
+  compilés sont rouverts au prochain appel. OpenCL sur le même GPU n'est pas interrompu (73 s). Les
+  lancements cadencés de M3 suppriment ce cas (56,7 s en Vulkan, sans perte).
 - **Vulkan 2,7 fois plus lent qu'OpenCL sur la RTX** pour le DTW (tableaux locaux de 257 éléments par case) :
   piste à mesurer (initialisation et contrôles de bornes des tableaux `var<function>` en WGSL).
 
@@ -701,8 +730,8 @@ Les trois modes exécutent le même code généré : un bloc est vu par le kerne
 - **Les limites matérielles deviennent des tailles de bloc** : 1 Gio par liaison sur l'UHD 770 en Vulkan,
   3,3 Gio par allocation sur le M5 Pro en OpenCL. Aucune n'est plus une erreur.
 - **Élément par élément** : un bloc est une sous-plage d'indices de toutes les entrées et de la sortie.
-- **Avec index** : M2 lance la grille en un seul bloc (entrées entières) ; M3 découpera la sortie le long de
-  sa première dimension, une entrée qui ne partage pas cette dimension restant résidente (§9.7).
+- **Avec index** : blocs de lignes de la sortie (son premier axe) ; les entrées lues seulement à la ligne
+  courante suivent ce découpage, les autres restent entières (§9.7).
 
 ### 9.3 Transferts sur GPU dédié
 
@@ -750,18 +779,27 @@ Les trois modes exécutent le même code généré : un bloc est vu par le kerne
 
 ### 9.7 Ce qui est découpable (kernels avec index, M3)
 
-On découpe la grille le long de sa **première dimension**. Pour chaque entrée :
-- si elle partage cette dimension (même nom), elle est découpée de la même façon ;
-- sinon, elle est **résidente** : uploadée une fois et gardée sur le GPU pendant tout le traitement (généralisation des « arguments constants » du prototype).
+On découpe la grille le long de sa **première dimension** (blocs de lignes de la sortie). Pour chaque entrée :
+- si elle est lue **seulement à la ligne courante** — premier indice égal à la variable `i` de
+  `i, … = gs.index()` (jamais réaffectée), et même première dimension nommée que la sortie — elle est
+  découpée de la même façon (`x[i, k]`, `x[i, best]`, `idx[i]`) ;
+- sinon, elle est **entière** : envoyée une fois et gardée sur le GPU pendant tout le traitement
+  (généralisation des « arguments constants » du prototype). C'est une analyse du source, faite à la
+  compilation : `x[i + 1, k]` ou `x[j, k]` gardent `x` entier, sans jamais lire hors du bloc.
 
-Exemples :
+| Kernel | Découpé | Entier |
+|---|---|---|
+| `normalize(x: ["n"]) -> ["n"]` (élément par élément) | `x`, sortie | — |
+| `pairwise_dist(series: ["n","t"]) -> ["n","n"]` | sortie | `series` (lue aux lignes `i` et `j`) |
+| `matvec(a: ["m","k"], v: ["k"]) -> ["m"]` | `a`, sortie | `v` |
+| `stats(x: ["n","t"]) -> (["n"], ["n"])` | `x`, sorties | — |
 
-| Kernel | Dimension découpée | Découpé | Résident |
-|---|---|---|---|
-| `normalize(x: ["n"]) -> ["n"]` | `n` | `x`, sortie | — |
-| `pairwise_dist(series: ["n","t"]) -> ["n","n"]` | `n` (lignes de la sortie) | sortie | `series` (lu en entier par chaque thread) |
+Taille d'un bloc : 64 Mio par tableau découpé au plus, dans le budget restant après les entrées entières
+(deux emplacements en OpenCL) et dans la taille max d'un buffer. Si les entrées entières ne tiennent pas dans
+le budget (ou dans un buffer) : `gs.UnsupportedFeature` qui nomme l'entrée en cause.
 
-Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget → `gs.OutOfMemory` qui nomme l'entrée en cause.
+Dans un bloc, les lancements sont cadencés (§ mesures M3) : aucun ne dure plus de ~0,1 s, quelle que soit
+la taille de la grille.
 
 ### 9.8 Critères de réussite
 
@@ -812,7 +850,7 @@ Si les entrées résidentes et un bloc minimal ne tiennent pas dans le budget �
 | **M1** MVP élément par élément | frontend minimal, IR, interpréteur, émetteurs WGSL + OpenCL C, `gs.Array` synchrone, zéro-copie OpenCL sur mémoire unifiée | `normalize` correct sur Metal et OpenCL ; overhead ≤ 0,3 ms ; tests différentiels verts ; pic mémoire ×1 sur 1 Go en OpenCL sur le Mac |
 | **M1.5** Moteur de transferts et choix automatique | blocs et plan d'exécution ; modes Direct, Résident, Flux ; Metal `NoCopy` via wgpu-hal ; anneau épinglé et pipeline à deux files (OpenCL) ; `out=`, `np.memmap`, `.stream()` ; budget VRAM ; f64 via Vulkan (`SHADER_F64`) ; besoins `f64` / `f64_math` ; choix automatique du périphérique par kernel et option `compat` (`auto` : avertissement + repli OpenCL ; `strict` : erreur) (§4.8) | critères du §9.8 sur le Mac et le PC ; un kernel f64 arithmétique tourne sur Vulkan (RTX), un kernel f64 avec `exp` sur OpenCL (RTX), sans `device=` |
 | **M2** Index et formes | `gs.index()`, dimensions nommées, retours multiples, boucles, `gs.local`, réductions de `gs.Array` | `pairwise_dist` et `stats` corrects ; ta DTW portée et comparée au prototype |
-| **M3** Out-of-core avec index | découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes | `pairwise_dist` sur des données dont la sortie dépasse la VRAM |
+| **M3** Out-of-core avec index | ✅ découpage des kernels avec index (§9.7) : sortie découpée, entrées résidentes ; lancements cadencés | `pairwise_dist` sur des données dont la sortie dépasse la VRAM (19,3 Gio sur la RTX, 3,8 s) |
 | **M4** Async et interop | `await`, DLPack, cache disque | même script en synchrone, async et Jupyter |
 | **M5** Mode explicite | `grid=`, `gs.Out`, atomiques (dont émulation OpenCL 1.2) | histogramme correct sur toutes les cibles |
 | **M6** CUDA | émetteur CUDA C, backend `cudarc` | parité des tests avec les autres backends sur NVIDIA |
