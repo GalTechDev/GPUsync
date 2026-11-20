@@ -125,7 +125,10 @@ fn api_rank(api: &str) -> u8 {
 /// Garde un adaptateur par GPU physique (API préférée), ignore le CPU, numérote par API.
 fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
     candidates.retain(|c| c.kind != DeviceKind::Cpu);
-    candidates.sort_by_key(|c| api_rank(c.api));
+    // Ordre stable : API préférée, puis GPU dédiés avant intégrés, puis nom.
+    candidates.sort_by(|a, b| {
+        (api_rank(a.api), a.kind.rank(), &a.name).cmp(&(api_rank(b.api), b.kind.rank(), &b.name))
+    });
     let mut seen: Vec<(u32, u32, String)> = Vec::new();
     let mut out: Vec<(usize, DeviceInfo)> = Vec::new();
     for c in candidates {

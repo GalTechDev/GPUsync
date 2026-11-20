@@ -4,7 +4,7 @@
 OpenCL ≥ 1.2, puis CUDA. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**État : jalon M1** — kernels élément par élément.
+**État : jalon M1.5** — kernels élément par élément, sans limite de taille, sur le périphérique le plus adapté.
 
 ```python
 import numpy as np
@@ -20,9 +20,16 @@ print(y[:5])                                 # attend la fin et rapatrie
 z = normalize(y, 0.0, 2.0)                   # chaînage : y reste sur le GPU
 np.asarray(z)                                # tableau NumPy
 
-normalize(x, 0.0, 1.0, device="opencl")      # choisir le périphérique
+normalize(x, 0.0, 1.0, device="opencl")      # choisir le périphérique (sinon : choix automatique)
 with gs.device("cpu"):                       # interpréteur de référence (lent, toujours disponible)
     normalize(x, 0.0, 1.0)
+
+# Sans limite de taille : plus gros que la VRAM, que la RAM, ou en flux
+big = np.memmap("entree.f32", dtype=np.float32, mode="r")
+out = np.memmap("sortie.f32", dtype=np.float32, mode="w+", shape=big.shape)
+normalize(big, 0.0, 1.0, out=out)            # traité par blocs, fichier → GPU → fichier
+for bloc in normalize.stream(generateur(), 0.0, 1.0):
+    ...
 
 print(normalize.source("opencl"))            # code généré (aussi "wgsl", "ir")
 ```
@@ -32,6 +39,18 @@ Dans un kernel : arithmétique, comparaisons, `and` / `or` / `not`, `a if c else
 fonctions `gs.*` et `math.*` (`sqrt`, `exp`, `log`, `sin`, `cos`, `tanh`, `atan2`, `floor`, `pow`, `abs`,
 `min`, `max`…), conversions `float()`, `int()`, `gs.f32()`, `gs.i32()`, `gs.u32()`. Types : `gs.f32`,
 `gs.f64` (si le périphérique le permet), `gs.i32`, `gs.u32`. `//` et `%` se comportent comme en Python.
+
+**Périphérique et mémoire.** Sans `device=`, GPUsync prend le premier périphérique du classement (GPU dédié :
+Vulkan puis OpenCL ; GPU intégré : Metal puis OpenCL ; CPU). Si le kernel utilise une opération que ce
+périphérique n'a pas (ex. `gs.exp` en f64 sur Vulkan), `@gs.kernel(compat="auto")` (défaut) avertit et
+exécute le kernel en OpenCL, puis sur `cpu:0` en dernier recours ; `compat="strict"` lève une erreur.
+Chaque appel est exécuté dans le mode le plus économe (`y.mode`) :
+
+| Mode | Quand | Mémoire en plus |
+|---|---|---|
+| `direct` | GPU à mémoire unifiée (Metal, OpenCL sur Apple Silicon et GPU intégrés) : aucune copie | ≈ 0 |
+| `resident` | GPU dédié, l'appel tient dans le budget (`gs.set_memory_budget`, 50 % de la VRAM) | bornée |
+| `flux` | au-delà : par blocs, transferts recouverts par le calcul | bornée (~0,3 à 1,2 Gio) |
 
 Les erreurs disent ce qui ne va pas, où et comment corriger :
 
@@ -52,6 +71,7 @@ Visual Studio Build Tools « C++ » sur Windows).
 python3 tools/dev.py setup                       # .venv + maturin, pytest, numpy + compilation
 python3 tools/dev.py test                        # recompile, puis cargo test + pytest + diagnostic
 python3 tools/dev.py run tools/bench_m1.py tout  # surcoût par appel, débit, pic mémoire
+python3 tools/dev.py run tools/bench_m15.py ram 4 opencl:0   # gros volumes (§9.8 de l'architecture)
 ```
 
 `GS_EXPECT=metal,opencl` (ou `vulkan,opencl`) fait échouer les tests si ces backends n'ont aucun périphérique
@@ -77,6 +97,7 @@ python/gpusync/             package Python : @gs.kernel, gs.Array, types, périp
 tests/                      tests Python (différentiels sur chaque périphérique, erreurs)
 tools/dev.py                tâches de développement multi-plateformes
 tools/bench_m1.py           mesures du jalon M1
+tools/bench_m15.py          essais à gros volume du jalon M1.5
 tools/remote/               exécution sur les machines de test
 GPUsync-python/             prototype v1 (référence, hors dépôt)
 ```

@@ -27,10 +27,13 @@ def normalize(x: gs.f32[:], mean: gs.f32, std: gs.f32) -> gs.f32[:]:
     return (x - mean) / std
 
 
+PEAK_KIND = "ram"  # Windows : "ram" (working set) ou "commit" (mémoire engagée)
+
+
 def peak_rss() -> int:
-    """Pic de mémoire du processus, en octets : mémoire résidente (macOS, Linux), mémoire engagée
-    (Windows, PeakPagefileUsage : le working set y est rogné par le système et ne compte pas les
-    pages écrites par le GPU)."""
+    """Pic de mémoire physique du processus, en octets : mémoire résidente (macOS, Linux), working set
+    (Windows). Sous Windows, la mémoire engagée (PEAK_KIND = "commit") compte aussi les allocations
+    en VRAM réservées par le pilote, ce qui ne reflète pas la RAM utilisée."""
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -50,7 +53,7 @@ def peak_rss() -> int:
         pmc.cb = ctypes.sizeof(PMC)
         if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
             raise OSError("GetProcessMemoryInfo a échoué")
-        return pmc.PeakPagefileUsage
+        return pmc.PeakWorkingSetSize if PEAK_KIND == "ram" else pmc.PeakPagefileUsage
     import resource
 
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

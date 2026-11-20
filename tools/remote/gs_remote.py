@@ -52,7 +52,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-TOOL_VERSION = 6                # à incrémenter à chaque changement du protocole ou de l'agent
+TOOL_VERSION = 7                # à incrémenter à chaque changement du protocole ou de l'agent
 EXIT_RESTART = 75                 # code de sortie du worker d'agent : « redémarre-moi » (après mise à jour)
 HOME = Path(os.environ.get("GS_REMOTE_HOME", Path.home() / ".gpusync-remote"))
 HUB_CONFIG = HOME / "hub.json"
@@ -62,6 +62,7 @@ CTL = "@ctl"                      # identité de la CLI auprès du hub
 POLL_WAIT_S = 25                  # long-polling : durée max d'attente d'une tâche
 ONLINE_TIMEOUT_S = 45             # un agent silencieux depuis plus longtemps est « hors ligne »
 HEARTBEAT_S = 5                   # un agent qui exécute une tâche donne signe de vie au moins toutes les 5 s
+LOST_GRACE_S = 600                # CLI : délai d'attente d'un agent injoignable avant d'abandonner une tâche
 ORPHAN_S = 60                     # tâche que plus aucune CLI ne suit depuis 60 s → arrêtée (CLI tuée, terminal fermé)
 UNKILLABLE_S = 15                 # processus toujours vivant 15 s après l'arrêt forcé → l'agent l'abandonne
 MAX_CLOCK_SKEW_S = 300
@@ -726,12 +727,16 @@ class AgentJob:
         self.exec_s: float | None = None  # durée de la commande, chronométrée SUR la machine de test
 
     def _call(self, *args, **kwargs):
-        """Appel au hub, avec quelques nouvelles tentatives si le réseau coupe brièvement (~30 s)."""
-        for attempt in range(7):
+        """Appel au hub pendant une tâche : délai court par tentative, nouvelles tentatives pendant
+        ~5 min. Une coupure réseau ne doit pas faire abandonner une tâche longue (constaté : coupures
+        de plus de 45 s entre deux continents via Tailscale)."""
+        kwargs.setdefault("timeout", 20)
+        deadline = time.time() + 300
+        while True:
             try:
                 return self.api.call(*args, **kwargs)
             except Unreachable:
-                if attempt == 6:
+                if time.time() > deadline:
                     raise
                 time.sleep(5)
 
@@ -1169,6 +1174,7 @@ class Follow:
         try:
             job = self.api.call("POST", "/c/jobs", {"agent": self.agent, "spec": spec, "src": str(src) if src else None})
             self.job_id, offset, delay = job["id"], 0, 0.2
+            lost_since, warned_lost = None, False
             while True:
                 st = self.api.call("GET", f"/c/jobs/{self.job_id}?offset={offset}")
                 data = base64.b64decode(st["data_b64"])
@@ -1176,6 +1182,18 @@ class Follow:
                 if data:
                     self.emit(self._dec.decode(data))
                     delay = 0.2
+                if st["status"] == "lost":
+                    # Agent momentanément injoignable : on continue d'attendre (la tâche tourne
+                    # peut-être encore) ; abandon seulement après LOST_GRACE_S sans nouvelles.
+                    lost_since = lost_since or time.time()
+                    if not warned_lost:
+                        out(f"[{self.agent}] agent injoignable, attente de son retour…\n", sys.stderr)
+                        warned_lost = True
+                    if time.time() - lost_since < LOST_GRACE_S:
+                        time.sleep(2)
+                        continue
+                else:
+                    lost_since = None
                 if st["status"] not in ("queued", "running"):
                     self.emit(self._dec.decode(b"", final=True), final=True)
                     self.result = st

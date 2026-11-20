@@ -27,6 +27,17 @@ impl DeviceKind {
         }
     }
 
+    /// Rang pour un ordre stable : GPU dédiés, intégrés, virtuels, CPU, autres.
+    pub fn rank(self) -> u8 {
+        match self {
+            DeviceKind::DiscreteGpu => 0,
+            DeviceKind::IntegratedGpu => 1,
+            DeviceKind::VirtualGpu => 2,
+            DeviceKind::Cpu => 3,
+            DeviceKind::Other => 4,
+        }
+    }
+
     pub fn is_gpu(self) -> bool {
         matches!(
             self,

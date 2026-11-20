@@ -66,6 +66,15 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
             out.push((id, info));
         }
     }
+    // L'ordre des plateformes donné par le chargeur OpenCL n'est pas stable d'un environnement à
+    // l'autre (constaté sous Windows : RTX puis UHD 770, puis l'inverse) : on trie, pour que
+    // `opencl:0` désigne toujours le même GPU.
+    out.sort_by(|(_, a), (_, b)| {
+        (a.kind.rank(), &a.name, &a.vendor).cmp(&(b.kind.rank(), &b.name, &b.vendor))
+    });
+    for (i, (_, info)) in out.iter_mut().enumerate() {
+        info.index = i;
+    }
     Ok(out)
 }
 

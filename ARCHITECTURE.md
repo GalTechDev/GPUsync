@@ -1,6 +1,6 @@
 # GPUsync v2 — Architecture
 
-> Statut : **M1 terminé** (19/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
+> Statut : **M1.5 terminé** (20/11/2026). Ce document fixe les décisions avant d'écrire le cœur en Rust.
 > Il s'appuie sur le prototype Python (`GPUsync-python/`), testé sur Apple M5 Pro (OpenCL 1.2), le 19/11/2026.
 
 ### Avancement
@@ -9,6 +9,41 @@
 |---|---|---|
 | M0 Squelette | ✅ workspace Cargo, PyO3 0.30 (abi3-py310) + maturin 1.16, `gs.devices()` / `gs.backends()` via wgpu 30 et opencl3 0.12 (chargement dynamique) | Mac M5 Pro (Python 3.15) ; PC Windows RTX 4080 SUPER + UHD 770 (Python 3.10) |
 | M1 MVP | ✅ `@gs.kernel` élément par élément, IR + interpréteur, émetteurs OpenCL C et WGSL, `gs.Array`, zéro-copie OpenCL | Mac : Metal, OpenCL, cpu (75 tests) ; PC : Vulkan et OpenCL sur RTX 4080 SUPER et UHD 770, cpu (104 tests) |
+| M1.5 Transferts et choix automatique | ✅ f64 via Vulkan, besoins `f64` / `f64_math`, classement des périphériques, option `compat` ; moteur de transferts (Direct, Résident, Flux) pour OpenCL et wgpu ; zéro-copie Metal (`NoCopy` via wgpu-hal) ; `out=`, `np.memmap`, `.stream()`, `gs.OutOfMemory`, `gs.set_memory_budget` | Mac : 109 tests ; PC : 164 tests ; essais à gros volume ci-dessous |
+
+#### Mesures M1.5 (`tools/bench_m15.py`, résultat vérifié en entier)
+
+| Cas (§9.8) | Machine, périphérique | Mode | Durée | Mémoire en plus | Résultat |
+|---|---|---|---|---|---|
+| 4 Gio en RAM (> allocation max 3,3 Gio) | Mac, `opencl:0` | Direct | 0,5 s | ≈ 0 | ✓ |
+| 4 Gio en RAM | Mac, `metal:0` | Direct | 0,3 s | 0,14 Gio | ✓ |
+| 40 Gio en memmap, `out=` memmap (> 26 Go de RAM) | Mac, `metal:0` | Direct | 35 s (disque) | 4,1 Gio de cache de fichiers, récupérable | ✓ |
+| 2 Gio (> liaison max 1 Gio) | PC, `vulkan:1` (UHD 770) | Flux | 1,0 s | 1,24 Gio | ✓ |
+| 2 Gio | PC, `vulkan:0` (RTX) | Flux | 0,9 s | 0,31 Gio | ✓ |
+| 2 Gio | PC, `opencl:0` (RTX) | Résident | 0,9 s | 0,38 Gio | ✓ |
+| 2 Gio | PC, `opencl:1` (UHD 770) | Direct | 1,0 s | 0,10 Gio | ✓ |
+| 24 Gio en RAM (> 16 Go de VRAM) | PC, `vulkan:0` (RTX) | Flux | 7,3 s (7,0 Go/s) | 0,31 Gio | ✓ |
+| 24 Gio en RAM | PC, `opencl:0` (RTX) | Flux | 5,9 s (8,7 Go/s) | 0,57 Gio | ✓ |
+| 20 Gio en memmap, `out=` memmap | PC, `vulkan:0` et `opencl:0` (RTX) | Flux | 48 et 51 s (disque) | pages des deux fichiers, récupérables | ✓ |
+
+Mémoire en plus : pic de mémoire physique (résidente sur macOS, working set sous Windows), moins l'entrée et la
+sortie en RAM. Sous macOS, la mémoire épinglée par OpenCL `USE_HOST_PTR` n'apparaît pas dans la mémoire
+résidente : seul le mode Direct de Metal y est mesurable. Comparaison M1 (1 Gio, avant le moteur) : 3,01 Gio
+en Metal, 5,23 Gio en Vulkan sur la RTX, 3,35 Gio en OpenCL sur la RTX.
+
+#### Décisions et constats de M1.5
+
+- **Numérotation stable** : l'ordre des plateformes OpenCL change d'un environnement à l'autre (constaté sous
+  Windows : RTX puis UHD 770, puis l'inverse). Les périphériques sont désormais triés (dédiés, intégrés, CPU,
+  puis nom) : `opencl:0` désigne toujours le même GPU.
+- **Metal `NoCopy`** accepte aussi les pages d'un fichier `memmap` : 40 Gio traités en mode Direct.
+- **wgpu sur la RTX** : une liaison est limitée à ~2 Gio, d'où le mode Flux dès 2 Gio même dans le budget.
+- **Mémoire bornée** : sur la RTX, 0,31 Gio en plus à 2 Gio comme à 24 Gio en Vulkan (0,38 et 0,57 Gio en
+  OpenCL) : le surcoût ne dépend plus du volume.
+- **Outil distant** (v7) : la CLI attend le retour d'un agent injoignable (10 min) et l'agent réessaie
+  pendant 5 min. Reste un problème non résolu : les tâches de plus de ~12 min via l'agent Windows se figent
+  (l'agent ne donne plus signe de vie, sans plantage ni mise en veille du PC). Les essais longs ont été
+  lancés en processus détaché.
 
 #### Mesures M1 (`tools/bench_m1.py`)
 
