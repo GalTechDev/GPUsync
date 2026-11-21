@@ -367,6 +367,11 @@ impl State<'_, '_> {
                     (UnOp::Neg, Const::I64(v)) => Const::I64(v.wrapping_neg()),
                     (UnOp::Neg, Const::U64(v)) => Const::U64(v.wrapping_neg()),
                     (UnOp::Neg, Const::Bool(_)) => return Err("négation d'un booléen".into()),
+                    (UnOp::BitNot, Const::I32(v)) => Const::I32(!v),
+                    (UnOp::BitNot, Const::U32(v)) => Const::U32(!v),
+                    (UnOp::BitNot, Const::I64(v)) => Const::I64(!v),
+                    (UnOp::BitNot, Const::U64(v)) => Const::U64(!v),
+                    (UnOp::BitNot, _) => return Err("~ sur une valeur non entière".into()),
                 }
             }
             ExprKind::Binary(op, a, b) => {
@@ -497,36 +502,26 @@ fn gt(a: Const, b: Const) -> bool {
 fn arith(op: BinOp, a: Const, b: Const) -> Const {
     match (a, b) {
         (Const::I32(x), Const::I32(y)) => Const::I32(match op {
-            BinOp::Add => x.wrapping_add(y),
-            BinOp::Sub => x.wrapping_sub(y),
-            BinOp::Mul => x.wrapping_mul(y),
             BinOp::FloorDiv | BinOp::Div => floordiv_i32(x, y),
             BinOp::Mod => mod_i32(x, y),
-            BinOp::Pow | BinOp::And | BinOp::Or => 0,
+            BinOp::Shr => shr_signed(x as i64, y as u32 as u64, 32) as i32,
+            _ => int_op(op, x as u32 as u64, y as u32 as u64, 32) as u32 as i32,
         }),
         (Const::U32(x), Const::U32(y)) => Const::U32(match op {
-            BinOp::Add => x.wrapping_add(y),
-            BinOp::Sub => x.wrapping_sub(y),
-            BinOp::Mul => x.wrapping_mul(y),
             BinOp::FloorDiv | BinOp::Div => x.checked_div(y).unwrap_or(0),
             BinOp::Mod => x.checked_rem(y).unwrap_or(0),
-            BinOp::Pow | BinOp::And | BinOp::Or => 0,
+            _ => int_op(op, x as u64, y as u64, 32) as u32,
         }),
         (Const::I64(x), Const::I64(y)) => Const::I64(match op {
-            BinOp::Add => x.wrapping_add(y),
-            BinOp::Sub => x.wrapping_sub(y),
-            BinOp::Mul => x.wrapping_mul(y),
             BinOp::FloorDiv | BinOp::Div => floordiv_i64(x, y),
             BinOp::Mod => mod_i64(x, y),
-            BinOp::Pow | BinOp::And | BinOp::Or => 0,
+            BinOp::Shr => shr_signed(x, y as u64, 64),
+            _ => int_op(op, x as u64, y as u64, 64) as i64,
         }),
         (Const::U64(x), Const::U64(y)) => Const::U64(match op {
-            BinOp::Add => x.wrapping_add(y),
-            BinOp::Sub => x.wrapping_sub(y),
-            BinOp::Mul => x.wrapping_mul(y),
             BinOp::FloorDiv | BinOp::Div => x.checked_div(y).unwrap_or(0),
             BinOp::Mod => x.checked_rem(y).unwrap_or(0),
-            BinOp::Pow | BinOp::And | BinOp::Or => 0,
+            _ => int_op(op, x, y, 64),
         }),
         (Const::F32(x), Const::F32(y)) => Const::F32(match op {
             BinOp::Add => x + y,
@@ -536,7 +531,7 @@ fn arith(op: BinOp, a: Const, b: Const) -> Const {
             BinOp::FloorDiv => (x / y).floor(),
             BinOp::Mod => mod_f32(x, y),
             BinOp::Pow => x.powf(y),
-            BinOp::And | BinOp::Or => 0.0,
+            _ => 0.0,
         }),
         (Const::F64(x), Const::F64(y)) => Const::F64(match op {
             BinOp::Add => x + y,
@@ -546,15 +541,58 @@ fn arith(op: BinOp, a: Const, b: Const) -> Const {
             BinOp::FloorDiv => (x / y).floor(),
             BinOp::Mod => mod_f64(x, y),
             BinOp::Pow => x.powf(y),
-            BinOp::And | BinOp::Or => 0.0,
+            _ => 0.0,
         }),
         _ => a, // types incohérents : refusés par le frontend
+    }
+}
+
+/// Opérations entières communes aux types signés et non signés, sur les bits (largeur `w`), le
+/// résultat étant tronqué par l'appelant : +, −, ×, &, |, ^, << (et >> logique).
+fn int_op(op: BinOp, x: u64, y: u64, w: u32) -> u64 {
+    match op {
+        BinOp::Add => x.wrapping_add(y),
+        BinOp::Sub => x.wrapping_sub(y),
+        BinOp::Mul => x.wrapping_mul(y),
+        BinOp::BitAnd => x & y,
+        BinOp::BitOr => x | y,
+        BinOp::BitXor => x ^ y,
+        BinOp::Shl if y < w as u64 => x << y,
+        BinOp::Shr if y < w as u64 => (x & mask(w)) >> y,
+        _ => 0,
+    }
+}
+
+fn mask(w: u32) -> u64 {
+    if w == 64 { u64::MAX } else { (1u64 << w) - 1 }
+}
+
+/// `>>` arithmétique : au-delà de la largeur, 0 ou −1 selon le signe (comme en Python).
+fn shr_signed(x: i64, y: u64, w: u32) -> i64 {
+    if y < w as u64 {
+        x >> y
+    } else if x < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+/// Partie haute du produit complet (`gs.mulhi`).
+fn mulhi(a: Const, b: Const) -> Const {
+    match (a, b) {
+        (Const::I32(x), Const::I32(y)) => Const::I32(((x as i64 * y as i64) >> 32) as i32),
+        (Const::U32(x), Const::U32(y)) => Const::U32(((x as u64 * y as u64) >> 32) as u32),
+        (Const::I64(x), Const::I64(y)) => Const::I64(((x as i128 * y as i128) >> 64) as i64),
+        (Const::U64(x), Const::U64(y)) => Const::U64(((x as u128 * y as u128) >> 64) as u64),
+        _ => a,
     }
 }
 
 fn intrinsic(f: Intrinsic, v: &[Const]) -> Const {
     use Intrinsic::*;
     match (f, v) {
+        (MulHi, [a, b]) => mulhi(*a, *b),
         (Abs, [Const::I32(x)]) => Const::I32(x.wrapping_abs()),
         (Abs, [Const::U32(x)]) => Const::U32(*x),
         (Min, [Const::I32(x), Const::I32(y)]) => Const::I32(*x.min(y)),

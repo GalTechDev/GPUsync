@@ -86,6 +86,26 @@ impl Gen<'_> {
             },
             ExprKind::Unary(UnOp::Neg, a) => format!("(-{})", self.expr(a)),
             ExprKind::Unary(UnOp::Not, a) => format!("(!{})", self.expr(a)),
+            ExprKind::Unary(UnOp::BitNot, a) => format!("(~{})", self.expr(a)),
+            ExprKind::Binary(op @ (BinOp::Shl | BinOp::Shr), a, b) => {
+                let (x, y) = (self.expr(a), self.expr(b));
+                let name = if *op == BinOp::Shl { "shl" } else { "shr" };
+                match crate::const_shift(b) {
+                    // Décalage à gauche d'un signé : en non signé (évite l'erreur de débordement
+                    // de l'évaluation constante WGSL), la conversion conservant les bits.
+                    Some(c) if *op == BinOp::Shl && matches!(a.ty, Scalar::I32 | Scalar::I64) => {
+                        let (t, u) = (
+                            w_type(a.ty),
+                            if a.ty == Scalar::I32 { "u32" } else { "u64" },
+                        );
+                        format!("{t}({u}({x}) << {c}u)")
+                    }
+                    Some(c) => {
+                        format!("({x} {} {c}u)", if *op == BinOp::Shl { "<<" } else { ">>" })
+                    }
+                    None => format!("gs_{name}_{}({x}, {y})", a.ty.name()),
+                }
+            }
             ExprKind::Binary(op, a, b) => {
                 let (x, y) = (self.expr(a), self.expr(b));
                 match (op, a.ty) {
@@ -107,6 +127,10 @@ impl Gen<'_> {
                     (BinOp::Div, _) => format!("({x} / {y})"),
                     (BinOp::And, _) => format!("({x} && {y})"),
                     (BinOp::Or, _) => format!("({x} || {y})"),
+                    (BinOp::BitAnd, _) => format!("({x} & {y})"),
+                    (BinOp::BitOr, _) => format!("({x} | {y})"),
+                    (BinOp::BitXor, _) => format!("({x} ^ {y})"),
+                    (BinOp::Shl | BinOp::Shr, _) => unreachable!(),
                 }
             }
             ExprKind::Compare(op, a, b) => {
@@ -131,6 +155,9 @@ impl Gen<'_> {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 match f {
                     Intrinsic::Pow => format!("gs_pow_f32({}, {})", a[0], a[1]),
+                    Intrinsic::MulHi => {
+                        format!("gs_mulhi_{}({}, {})", args[0].ty.name(), a[0], a[1])
+                    }
                     Intrinsic::Abs if args[0].ty.is_unsigned() => a[0].clone(),
                     _ => format!("{}({})", intrinsic_name(*f), a.join(", ")),
                 }
@@ -485,6 +512,53 @@ const METAL_INT64: &[(Helper, &str)] = &[
     ),
 ];
 
+/// Décalages à compte variable (sémantique de `BinOp::Shl` / `Shr`) et partie haute d'un produit
+/// (`gs.mulhi`, absente de WGSL : produits partiels sur des moitiés).
+fn bits_helper(op: u8, t: Scalar) -> String {
+    let ty = w_type(t);
+    let name = t.name();
+    let wide = t.is_int64();
+    let (u, w, s) = if wide {
+        ("u64", "64lu", if t == Scalar::I64 { "li" } else { "lu" })
+    } else {
+        ("u32", "32u", if t == Scalar::I32 { "i" } else { "u" })
+    };
+    let signed = matches!(t, Scalar::I32 | Scalar::I64);
+    let cnt = if signed || wide { "u32(n)" } else { "n" };
+    let test = if signed {
+        format!("{u}(n) < {w}")
+    } else {
+        format!("n < {w}")
+    };
+    match op {
+        crate::BITS_SHL if signed => format!(
+            "fn gs_shl_{name}(a: {ty}, n: {ty}) -> {ty} {{ if ({test}) {{ return {ty}({u}(a) << {cnt}); }} return 0{s}; }}"
+        ),
+        crate::BITS_SHL => format!(
+            "fn gs_shl_{name}(a: {ty}, n: {ty}) -> {ty} {{ if ({test}) {{ return a << {cnt}; }} return 0{s}; }}"
+        ),
+        crate::BITS_SHR if signed => format!(
+            "fn gs_shr_{name}(a: {ty}, n: {ty}) -> {ty} {{ if ({test}) {{ return a >> {cnt}; }} return select(0{s}, -1{s}, a < 0{s}); }}"
+        ),
+        crate::BITS_SHR => format!(
+            "fn gs_shr_{name}(a: {ty}, n: {ty}) -> {ty} {{ if ({test}) {{ return a >> {cnt}; }} return 0{s}; }}"
+        ),
+        _ if signed => format!(
+            "fn gs_mulhi_{name}(a: {ty}, b: {ty}) -> {ty} {{\n    return {ty}(gs_mulhi_{u}({u}(a), {u}(b))) - select(0{s}, b, a < 0{s}) - select(0{s}, a, b < 0{s});\n}}"
+        ),
+        _ => {
+            let (h, m) = if wide {
+                ("32u", "0xfffffffflu")
+            } else {
+                ("16u", "0xffffu")
+            };
+            format!(
+                "fn gs_mulhi_{name}(a: {ty}, b: {ty}) -> {ty} {{\n    let al = a & {m}; let ah = a >> {h}; let bl = b & {m}; let bh = b >> {h};\n    let lh = al * bh; let hl = ah * bl;\n    let mid = ((al * bl) >> {h}) + (lh & {m}) + (hl & {m});\n    return ah * bh + (lh >> {h}) + (hl >> {h}) + (mid >> {h});\n}}"
+            )
+        }
+    }
+}
+
 /// Le kernel a-t-il des paramètres scalaires f64 (binding `gs_fparams`) ?
 pub fn has_f64_params(k: &Kernel) -> bool {
     k.params
@@ -577,6 +651,11 @@ pub fn emit_wgsl_variant(
                 Some((_, alt)) => g.out.line(*alt),
                 None => g.out.line(*code),
             }
+        }
+    }
+    for h in &used {
+        if let Helper::Bits(op, t) = h {
+            g.out.line(bits_helper(*op, crate::INT_TYPES[*t as usize]));
         }
     }
     // Mots u32 des scalaires (deux par entier 64 bits : poids faible, puis fort), puis n.

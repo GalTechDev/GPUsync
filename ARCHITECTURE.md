@@ -714,13 +714,13 @@ Annotations : évaluées dans les globales de la fonction, y compris avec `from 
 
 | Supporté | Non supporté |
 |---|---|
-| arithmétique, comparaisons, `and`/`or`/`not`, opérateur ternaire | listes, dicts, sets, chaînes |
+| arithmétique, comparaisons, `and`/`or`/`not`, bit à bit (`& \| ^ ~ << >>`), opérateur ternaire | listes, dicts, sets, chaînes |
 | variables locales scalaires | récursion |
 | `if` / `elif` / `else`, `for … in range(…)`, `while`, `break`, `continue` | `try`, `with`, générateurs, `lambda` |
 | indexation `a[i]`, `a[i, j]`, `a.shape[k]` | appels de fonctions Python ordinaires |
 | tuples pour `gs.index()` et les retours multiples | slicing dans le kernel |
 | `gs.local(type, taille)` : tableau local de taille constante | allocation dynamique |
-| intrinsèques : `gs.sqrt`, `gs.exp`, `gs.min`, `gs.abs`, … ; `math.*` équivalents | |
+| intrinsèques : `gs.sqrt`, `gs.exp`, `gs.min`, `gs.abs`, `gs.mulhi`, … ; `math.*` équivalents | |
 
 ### 5.3 Typage
 
@@ -729,6 +729,17 @@ Annotations : évaluées dans les globales de la fonction, y compris avec `from 
 - **Les littéraux s'adaptent au contexte** : `0.0` dans un contexte f32 est un f32. Indispensable car en OpenCL C, `3.0` est un double, ce qui force du fp64 ou échoue sur les GPU sans fp64.
 - Promotions : `i32 op f32 → f32`, jamais vers f64 implicitement.
 - Mode élément par élément : le frontend réécrit `x` en `x[idx]` pour chaque tableau de la forme de la sortie.
+
+**Opérations bit à bit et `gs.mulhi`.** `&`, `|`, `^`, `~` suivent le complément à deux (comme Python pour
+les valeurs représentables) ; sur deux booléens, `&`, `|`, `^` donnent un booléen. `<<` et `>>` gardent le
+type de la valeur décalée (le compte y est converti) ; le compte est lu comme non signé et un compte ≥ la
+largeur donne 0 (ou −1 pour `>>` d'un négatif), là où C et les GPU le réduiraient modulo la largeur. Un
+compte constant s'écrit directement, sinon une petite fonction teste la largeur ; `<<` d'un signé passe
+par le non signé (débordement indéfini en C, erreur de l'évaluation constante en WGSL).
+`gs.mulhi(a, b)` rend la partie haute du produit complet (2 × 32 ou 2 × 64 bits) : `mul_hi` en OpenCL,
+`__umulhi` / `__mulhi` / `__umul64hi` / `__mul64hi` en CUDA, produits partiels sur des moitiés en WGSL.
+Avec elle, une multiplication modulaire (Montgomery) tient en arithmétique 32 bits, sans `%` 64 bits,
+émulé et lent sur GPU (un étage de NTT mesuré va ×1.5 à ×7 plus vite).
 
 ### 5.4 Spécialisation
 

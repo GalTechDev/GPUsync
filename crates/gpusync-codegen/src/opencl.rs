@@ -112,6 +112,23 @@ impl Gen<'_> {
             },
             ExprKind::Unary(UnOp::Neg, a) => format!("(-{})", self.expr(a)),
             ExprKind::Unary(UnOp::Not, a) => format!("(!{})", self.expr(a)),
+            ExprKind::Unary(UnOp::BitNot, a) => format!("(~{})", self.expr(a)),
+            ExprKind::Binary(op @ (BinOp::Shl | BinOp::Shr), a, b) => {
+                let (x, y) = (self.expr(a), self.expr(b));
+                let name = if *op == BinOp::Shl { "shl" } else { "shr" };
+                match crate::const_shift(b) {
+                    // Décalage à gauche d'un signé : en non signé (débordement indéfini en C).
+                    Some(c) if *op == BinOp::Shl && matches!(a.ty, Scalar::I32 | Scalar::I64) => {
+                        format!(
+                            "(({})(({}){x} << {c}))",
+                            c_type(a.ty),
+                            c_type(unsigned(a.ty))
+                        )
+                    }
+                    Some(c) => format!("({x} {} {c})", if *op == BinOp::Shl { "<<" } else { ">>" }),
+                    None => format!("gs_{name}_{}({x}, {y})", a.ty.name()),
+                }
+            }
             ExprKind::Binary(op, a, b) => {
                 let (x, y) = (self.expr(a), self.expr(b));
                 match (op, a.ty) {
@@ -140,6 +157,12 @@ impl Gen<'_> {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 let float = args[0].ty.is_float();
                 match f {
+                    Intrinsic::MulHi if !self.cuda => format!("mul_hi({}, {})", a[0], a[1]),
+                    Intrinsic::MulHi => {
+                        let n = ["__mulhi", "__umulhi", "__mul64hi", "__umul64hi"]
+                            [crate::int_index(args[0].ty) as usize];
+                        format!("{n}({}, {})", a[0], a[1])
+                    }
                     Intrinsic::Abs if float => {
                         format!("{}({})", self.math("fabs", args[0].ty), a[0])
                     }
@@ -327,6 +350,9 @@ fn infix(op: BinOp) -> &'static str {
         BinOp::Div => "/",
         BinOp::And => "&&",
         BinOp::Or => "||",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
         _ => "?",
     }
 }
@@ -360,6 +386,36 @@ pub(crate) fn intrinsic_name(f: Intrinsic) -> &'static str {
         Intrinsic::Abs => "abs",
         Intrinsic::Min => "min",
         Intrinsic::Max => "max",
+        Intrinsic::MulHi => "mul_hi",
+    }
+}
+
+fn unsigned(t: Scalar) -> Scalar {
+    match t {
+        Scalar::I32 => Scalar::U32,
+        Scalar::I64 => Scalar::U64,
+        t => t,
+    }
+}
+
+/// Décalage dont le compte n'est pas une constante : lu comme non signé, ≥ largeur → 0 (ou −1 pour
+/// `>>` d'un négatif), comme en Python.
+fn c_shift_helper(op: u8, t: Scalar) -> String {
+    let (ty, u) = (c_type(t), c_type(unsigned(t)));
+    let w = if t.is_int64() { 64 } else { 32 };
+    let name = t.name();
+    if op == crate::BITS_SHL {
+        format!(
+            "inline {ty} gs_shl_{name}({ty} a, {ty} n) {{ return ({u})n < {w} ? ({ty})(({u})a << ({u})n) : ({ty})0; }}"
+        )
+    } else if t == unsigned(t) {
+        format!(
+            "inline {ty} gs_shr_{name}({ty} a, {ty} n) {{ return n < {w} ? a >> n : ({ty})0; }}"
+        )
+    } else {
+        format!(
+            "inline {ty} gs_shr_{name}({ty} a, {ty} n) {{ return ({u})n < {w} ? a >> ({u})n : (a < 0 ? ({ty})-1 : ({ty})0); }}"
+        )
     }
 }
 
@@ -481,6 +537,16 @@ fn emit_c(
             } else {
                 g.out.line(*code);
             }
+        }
+    }
+    for h in &used {
+        if let Helper::Bits(op @ (crate::BITS_SHL | crate::BITS_SHR), t) = h {
+            let c = c_shift_helper(*op, crate::INT_TYPES[*t as usize]);
+            g.out.line(if cuda {
+                c.replacen("inline ", "__device__ inline ", 1)
+            } else {
+                c
+            });
         }
     }
     // Atomiques flottants : absents d'OpenCL 1.2 (et min / max en CUDA), émulés par une boucle

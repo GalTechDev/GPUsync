@@ -311,6 +311,8 @@ pub enum ExprKind {
 pub enum UnOp {
     Neg,
     Not,
+    /// Complément bit à bit `~x` (entiers).
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +326,14 @@ pub enum BinOp {
     Pow,
     And,
     Or,
+    /// Opérations bit à bit sur des entiers (complément à deux pour les signés, comme en Python).
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// Décalages : le compte (même type que la valeur) est lu comme non signé ; un compte supérieur
+    /// ou égal à la largeur donne 0 (ou −1 pour `>>` d'un négatif), comme en Python borné à la largeur.
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,20 +365,29 @@ pub enum Intrinsic {
     Abs,
     Min,
     Max,
+    /// Partie haute du produit complet de deux entiers de même type (`gs.mulhi`).
+    MulHi,
 }
 
 impl Intrinsic {
     /// Nombre d'arguments attendus.
     pub fn arity(self) -> usize {
         match self {
-            Intrinsic::Atan2 | Intrinsic::Pow | Intrinsic::Min | Intrinsic::Max => 2,
+            Intrinsic::Atan2
+            | Intrinsic::Pow
+            | Intrinsic::Min
+            | Intrinsic::Max
+            | Intrinsic::MulHi => 2,
             _ => 1,
         }
     }
 
     /// Accepte des entiers (sinon : flottants uniquement).
     pub fn accepts_int(self) -> bool {
-        matches!(self, Intrinsic::Abs | Intrinsic::Min | Intrinsic::Max)
+        matches!(
+            self,
+            Intrinsic::Abs | Intrinsic::Min | Intrinsic::Max | Intrinsic::MulHi
+        )
     }
 }
 
@@ -398,6 +417,7 @@ impl Intrinsic {
                 | Intrinsic::Abs
                 | Intrinsic::Min
                 | Intrinsic::Max
+                | Intrinsic::MulHi
         )
     }
 
@@ -419,6 +439,7 @@ impl Intrinsic {
             Intrinsic::Abs => "abs",
             Intrinsic::Min => "min",
             Intrinsic::Max => "max",
+            Intrinsic::MulHi => "gs.mulhi",
         }
     }
 }

@@ -74,6 +74,37 @@ pub(crate) enum Helper {
     FloorDivU64,
     ModI64,
     ModU64,
+    /// Opération sur les bits : (opération, type entier) — voir `BITS_SHL`… et `int_index`.
+    Bits(u8, u8),
+}
+
+pub(crate) const BITS_SHL: u8 = 0;
+pub(crate) const BITS_SHR: u8 = 1;
+pub(crate) const BITS_MULHI: u8 = 2;
+
+/// Rang d'un type entier (i32, u32, i64, u64) pour `Helper::Bits`.
+pub(crate) fn int_index(t: Scalar) -> u8 {
+    match t {
+        Scalar::I32 => 0,
+        Scalar::U32 => 1,
+        Scalar::I64 => 2,
+        _ => 3,
+    }
+}
+
+pub(crate) const INT_TYPES: [Scalar; 4] = [Scalar::I32, Scalar::U32, Scalar::I64, Scalar::U64];
+
+/// Compte de décalage constant et inférieur à la largeur : le décalage s'écrit directement.
+pub(crate) fn const_shift(count: &Expr) -> Option<u32> {
+    let w = if count.ty.is_int64() { 64 } else { 32 };
+    let v = match count.kind {
+        ExprKind::Const(Const::I32(v)) => v as i64,
+        ExprKind::Const(Const::U32(v)) => v as i64,
+        ExprKind::Const(Const::I64(v)) => v,
+        ExprKind::Const(Const::U64(v)) => i64::try_from(v).ok()?,
+        _ => return None,
+    };
+    (0..w).contains(&v).then_some(v as u32)
 }
 
 pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
@@ -114,7 +145,26 @@ pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
                 (BinOp::Pow, Scalar::F32) => {
                     set.insert(Helper::PowF32);
                 }
+                (BinOp::Shl | BinOp::Shr, t) => {
+                    if let ExprKind::Binary(_, _, count) = &e.kind {
+                        if const_shift(count).is_none() {
+                            let o = if *op == BinOp::Shl {
+                                BITS_SHL
+                            } else {
+                                BITS_SHR
+                            };
+                            set.insert(Helper::Bits(o, int_index(t)));
+                        }
+                    }
+                }
                 _ => {}
+            }
+        }
+        if let ExprKind::Call(Intrinsic::MulHi, args) = &e.kind {
+            let t = int_index(args[0].ty);
+            set.insert(Helper::Bits(BITS_MULHI, t));
+            if t == 0 || t == 2 {
+                set.insert(Helper::Bits(BITS_MULHI, t + 1)); // le signé s'appuie sur le non signé
             }
         }
         if let ExprKind::Call(Intrinsic::Pow, args) = &e.kind {

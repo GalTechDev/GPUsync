@@ -84,10 +84,11 @@ sur une RTX de 16 Go en 3,8 s) ; les entrées lues seulement à la ligne courant
 avec elle, les autres restent entières sur le GPU. Exemple complet : le DTW de `tests/test_index.py`,
 identique au prototype.
 
-Dans un kernel : arithmétique, comparaisons, `and` / `or` / `not`, `a if c else b`, `if` / `elif` / `else`,
+Dans un kernel : arithmétique, comparaisons, `and` / `or` / `not`, opérations bit à bit (`&`, `|`, `^`, `~`,
+`<<`, `>>`, sur les entiers ; `&`, `|`, `^` aussi sur les booléens), `a if c else b`, `if` / `elif` / `else`,
 `for i in range(...)`, `while`, `break`, `continue`, variables locales, constantes globales numériques,
 fonctions `gs.*` et `math.*` (`sqrt`, `exp`, `log`, `sin`, `cos`, `tanh`, `atan2`, `floor`, `pow`, `abs`,
-`min`, `max`…), conversions `float()`, `int()`, `gs.f32()`, `gs.i32()`, `gs.u32()`. Types : `gs.f32`,
+`min`, `max`…), `gs.mulhi(a, b)` (partie haute du produit complet de deux entiers), conversions `float()`, `int()`, `gs.f32()`, `gs.i32()`, `gs.u32()`. Types : `gs.f32`,
 `gs.f64` (si le périphérique le permet), `gs.i32`, `gs.u32`. `//` et `%` se comportent comme en Python.
 
 **Périphérique et mémoire.** Sans `device=`, GPUsync prend le premier périphérique du classement (GPU dédié :

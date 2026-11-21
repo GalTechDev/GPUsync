@@ -1597,7 +1597,12 @@ impl Lowerer<'_> {
                         Val::E(e) if e.ty == Scalar::Bool => Ok(Val::E(ex(Scalar::Bool, ExprKind::Unary(UnOp::Not, Box::new(e))))),
                         _ => Err(self.e(ErrorKind::Type, "`not` attend un booléen : écrivez une comparaison explicite (ex. x == 0)")),
                     },
-                    _ => Err(self.e(ErrorKind::Syntax, "opérateur ~ non supporté")),
+                    "Invert" => match a {
+                        Val::Lit(Lit::Int(v)) => Ok(Val::Lit(Lit::Int(!v))),
+                        Val::E(e) if e.ty.is_int() => Ok(Val::E(ex(e.ty, ExprKind::Unary(UnOp::BitNot, Box::new(e))))),
+                        _ => Err(self.e(ErrorKind::Type, "~ attend un entier (utilisez `not` pour un booléen)")),
+                    },
+                    o => Err(self.e(ErrorKind::Syntax, format!("opérateur unaire « {o} » non supporté"))),
                 }
             }
             "BoolOp" => {
@@ -1773,10 +1778,15 @@ impl Lowerer<'_> {
             "FloorDiv" => BinOp::FloorDiv,
             "Mod" => BinOp::Mod,
             "Pow" => BinOp::Pow,
+            "BitAnd" => BinOp::BitAnd,
+            "BitOr" => BinOp::BitOr,
+            "BitXor" => BinOp::BitXor,
+            "LShift" => BinOp::Shl,
+            "RShift" => BinOp::Shr,
             o => {
                 return Err(self.e(
                     ErrorKind::Syntax,
-                    format!("opérateur « {o} » non supporté (opérations bit à bit, @…)"),
+                    format!("opérateur « {o} » non supporté (@…)"),
                 ));
             }
         };
@@ -1784,6 +1794,12 @@ impl Lowerer<'_> {
             if let Some(l) = fold(bop, *x, *y) {
                 return Ok(Val::Lit(l));
             }
+        }
+        if matches!(
+            bop,
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr
+        ) {
+            return self.bitop(bop, a, b);
         }
         let mut ty = self.unify(&a, &b, op_symbol(bop))?;
         if bop == BinOp::Div && ty.is_int() {
@@ -1802,6 +1818,64 @@ impl Lowerer<'_> {
         Ok(Val::E(ex(
             ty,
             ExprKind::Binary(bop, Box::new(x), Box::new(y)),
+        )))
+    }
+
+    /// `&`, `|`, `^` (entiers, ou booléens pour les trois), `<<` et `>>` (entiers).
+    fn bitop(&mut self, op: BinOp, a: Val, b: Val) -> R<Val> {
+        let sym = op_symbol(op);
+        if a.ty() == Scalar::Bool
+            && b.ty() == Scalar::Bool
+            && !matches!(op, BinOp::Shl | BinOp::Shr)
+        {
+            let (x, y) = (self.materialize(a)?, self.materialize(b)?);
+            return Ok(Val::E(match op {
+                BinOp::BitAnd => ex(
+                    Scalar::Bool,
+                    ExprKind::Binary(BinOp::And, Box::new(x), Box::new(y)),
+                ),
+                BinOp::BitOr => ex(
+                    Scalar::Bool,
+                    ExprKind::Binary(BinOp::Or, Box::new(x), Box::new(y)),
+                ),
+                _ => ex(
+                    Scalar::Bool,
+                    ExprKind::Compare(CmpOp::Ne, Box::new(x), Box::new(y)),
+                ),
+            }));
+        }
+        let not_int = |v: &Val| !v.ty().is_int() || matches!(v, Val::Lit(Lit::Float(_)));
+        if not_int(&a) || not_int(&b) {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!(
+                    "« {sym} » attend des entiers ({} et {} reçus)",
+                    a.ty(),
+                    b.ty()
+                ),
+            ));
+        }
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            // Type de la valeur décalée ; le compte est converti vers ce type.
+            let ty = match (&a, &b) {
+                (Val::Lit(_), Val::E(e)) => e.ty,
+                _ => a.ty(),
+            };
+            let x = self.to_ty(a, ty, sym)?;
+            let y = match b {
+                Val::Lit(l) => self.lit_to(l, ty)?,
+                Val::E(e) => cast(e, ty),
+            };
+            return Ok(Val::E(ex(
+                ty,
+                ExprKind::Binary(op, Box::new(x), Box::new(y)),
+            )));
+        }
+        let ty = self.unify(&a, &b, sym)?;
+        let (x, y) = (self.to_ty(a, ty, sym)?, self.to_ty(b, ty, sym)?);
+        Ok(Val::E(ex(
+            ty,
+            ExprKind::Binary(op, Box::new(x), Box::new(y)),
         )))
     }
 
@@ -1877,6 +1951,7 @@ impl Lowerer<'_> {
             (None, "min") | (Some("gpusync"), "min") => Intrinsic::Min,
             (None, "max") | (Some("gpusync"), "max") => Intrinsic::Max,
             (Some("math"), "fabs") => Intrinsic::Abs,
+            (Some("gpusync"), "mulhi") => Intrinsic::MulHi,
             (Some("math" | "gpusync"), n) => match n {
                 "sqrt" => Intrinsic::Sqrt,
                 "exp" => Intrinsic::Exp,
@@ -1950,6 +2025,12 @@ impl Lowerer<'_> {
         if !ty.is_numeric() {
             return Err(self.e(ErrorKind::Type, format!("{fname}() attend un nombre")));
         }
+        if f == Intrinsic::MulHi && !ty.is_int() {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!("gs.mulhi() attend deux entiers de même type ({ty} reçu)"),
+            ));
+        }
         if ty.is_int() && !f.accepts_int() {
             ty = Scalar::F32; // math.sqrt(4) fonctionne en Python
         }
@@ -1978,6 +2059,13 @@ fn fold(op: BinOp, a: Lit, b: Lit) -> Option<Lit> {
                 }),
             BinOp::Mod if y != 0 => Int(((x % y) + y) % y),
             BinOp::Pow if (0..=62).contains(&y) => Int(x.checked_pow(y as u32)?),
+            BinOp::BitAnd => Int(x & y),
+            BinOp::BitOr => Int(x | y),
+            BinOp::BitXor => Int(x ^ y),
+            BinOp::Shl if (0..64).contains(&y) => Int(i64::try_from((x as i128) << y)
+                .ok()
+                .filter(|_| (x as i128) << y >> y == x as i128)?),
+            BinOp::Shr if y >= 0 => Int(x >> y.min(63)),
             _ => return None,
         },
         (Int(_) | Float(_), Int(_) | Float(_)) => {
@@ -2020,6 +2108,11 @@ fn op_symbol(op: BinOp) -> &'static str {
         BinOp::Pow => "**",
         BinOp::And => "and",
         BinOp::Or => "or",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
     }
 }
 

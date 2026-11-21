@@ -36,6 +36,15 @@ def max(*values):
 
 
 
+def mulhi(a, b):
+    """Partie haute du produit complet de deux entiers de même type (32 ou 64 bits) : pour des u32,
+    (a * b) >> 32 calculé sans débordement. Dans un kernel : instruction native du GPU si elle existe."""
+    a, b = _np.asarray(a), _np.asarray(b)
+    bits = a.dtype.itemsize * 8
+    full = a.astype(object) * b.astype(object)
+    return _np.asarray(full >> bits).astype(a.dtype)
+
+
 def index():
     """Dans un kernel avec index : coordonnées de la case de sortie calculée (`i, j = gs.index()`).
 
@@ -72,5 +81,5 @@ nan = _m.nan
 
 __all__ = [
     "sqrt", "exp", "exp2", "log", "log2", "sin", "cos", "tan", "tanh", "atan2",
-    "floor", "ceil", "pow", "abs", "min", "max", "index", "local", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
+    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
 ]
