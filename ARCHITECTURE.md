@@ -26,7 +26,7 @@
 - **Metal** : naga 30 traduit la division et le reste 64 bits en MSL invalide (« call to 'select' is
   ambiguous ») ; le générateur les remplace, sur Metal seulement, par une division par décalages (64 tours) :
   juste mais lente, préférer OpenCL sur Mac pour ces calculs.
-- Premier usage : le crible profond des nombres premiers (`exemples/premiers_gpusync`), diviseurs jusqu'à 2⁴⁰.
+- Premier usage : le crible profond des nombres premiers (`examples/primes_gpusync`), diviseurs jusqu'à 2⁴⁰.
 - Testé sur Mac (Metal, OpenCL, `cpu:0`) ; PC non validé (agent distant hors ligne).
 
 #### Spécialisation des tailles (21/11/2026, §5.4)
