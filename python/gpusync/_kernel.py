@@ -247,6 +247,22 @@ class Kernel:
         else:
             grid = tuple(size(d) for d in self._grid)
         outs_decl = [(n, d, dims) for n, k, d, dims in self._params if k == "out"]
+        # Une dimension de sortie absente des entrées peut venir de `out=` (ex. largeur d'un bloc).
+        given_out = [] if out is None else (list(out) if isinstance(out, (tuple, list)) else [out])
+        known = {}
+        for (n, _, dims), o in zip(outs_decl, given_out):
+            for d, extent in zip(dims, getattr(o, "shape", ())):
+                if isinstance(d, str):
+                    try:
+                        size(d)
+                    except KeyError:
+                        known.setdefault(d, extent)
+        if known:
+            inner = size
+
+            def size(d, inner=inner):  # noqa: F811
+                return known[d] if d in known else inner(d)
+
         shapes_out = []
         for n, _, dims in outs_decl:
             try:

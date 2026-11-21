@@ -204,3 +204,23 @@ def test_dimension_de_sortie_inconnue():
 
     with pytest.raises(gs.ShapeMismatch, match="'m'.*'c' inconnue"):
         k(np.zeros(4, np.float32))
+
+
+@gs.kernel(grid="x")
+def flag_multiples(x: gs.i32["n"], flags: gs.Out[gs.i32["w"], 1]):
+    """La largeur `w` de la sortie n'apparaît dans aucune entrée : elle vient de `out=`."""
+    i = gs.index()
+    k = x[i]
+    while k < flags.shape[0]:
+        gs.atomic_min(flags, k, 0)
+        k += x[i]
+
+
+@pytest.mark.parametrize("dev", DEVICES)
+def test_dimension_de_sortie_donnee_par_out(dev):
+    steps = np.array([3, 5, 7], np.int32)
+    flags = np.ones(100, np.int32)
+    flag_multiples(steps, device=dev, out=flags).numpy()
+    want = np.array([int(all(i % s for s in (3, 5, 7)) or i == 0) for i in range(100)], np.int32)
+    want[0] = 1  # k part de x[i] : l'indice 0 n'est jamais effacé
+    check(flags, want)
