@@ -16,6 +16,19 @@
 | M5 Mode explicite | ✅ `@gs.kernel(grid="x")` ou `grid=("n", "n")`, sorties `gs.Out[gs.i32[10]]` (valeur de départ : `gs.Out[gs.f32["m"], gs.inf]`), `gs.atomic_add` / `atomic_min` / `atomic_max` en i32, u32, f32 (f32 émulé par comparaison-échange en OpenCL 1.2 et en WGSL), indices multiples `(a, b)`, accumulation avec `out=` ; écriture hors limites jamais faite et signalée (`gs.OutOfBounds`) | Mac : 239 tests ; PC : 364 tests |
 | M6 CUDA | ✅ émetteur CUDA C (même générateur qu'OpenCL C, autre dialecte), backend CUDA à liaisons dynamiques maison (driver + NVRTC), moteur de transferts commun à OpenCL et CUDA (trait `Gpu`), réserve de buffers, cache disque du PTX, NVRTC par le toolkit ou `pip install nvidia-cuda-nvrtc-cu12` | PC : 430 tests, dont les 61 tests différentiels par périphérique sur `cuda:0` (parité) ; Mac : 240 tests (CUDA absent, signalé) |
 
+#### Entiers 64 bits : `gs.i64`, `gs.u64` (21/11/2026)
+
+- IR, interpréteur, OpenCL (`long`), CUDA (`long long`), WGSL avec l'extension `SHADER_INT64` (Vulkan, DX12,
+  Metal MSL 2.3+) ; capacité `int64` par périphérique, repli `compat` sinon.
+- Conversions exactes entre entiers (l'interpréteur passait par un f64 : sans perte en 32 bits, plus en 64).
+- Élargissement implicite sans perte, comme les entiers de Python : i32 → i64, u32 → i64, u32 → u64 ; les autres
+  mélanges restent explicites. `gs.Out` en 64 bits refusé pour l'instant (atomiques 64 bits non portables).
+- **Metal** : naga 30 traduit la division et le reste 64 bits en MSL invalide (« call to 'select' is
+  ambiguous ») ; le générateur les remplace, sur Metal seulement, par une division par décalages (64 tours) :
+  juste mais lente, préférer OpenCL sur Mac pour ces calculs.
+- Premier usage : le crible profond des nombres premiers (`exemples/premiers_gpusync`), diviseurs jusqu'à 2⁴⁰.
+- Testé sur Mac (Metal, OpenCL, `cpu:0`) ; PC non validé (agent distant hors ligne).
+
 #### Spécialisation des tailles (21/11/2026, §5.4)
 
 | DTW 1 contre N, 2 M séries | sans | avec | gain |
