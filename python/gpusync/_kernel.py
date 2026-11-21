@@ -200,7 +200,8 @@ class Kernel:
                     keepalive.append(host)
                 else:
                     arrays.append(value._handle)
-                    keepalive.append(value)  # sa mémoire hôte peut être lue (zéro-copie)
+                    if value.mode != "resident":
+                        keepalive.append(value)  # sa mémoire hôte peut être lue (zéro-copie)
             else:
                 a = _host_array(value, name)
                 if a.dtype != dtype.np:

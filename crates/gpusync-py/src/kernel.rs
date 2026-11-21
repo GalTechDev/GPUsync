@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use gpusync_core::{
-    Compiled, CoreError, Device, DeviceArray, Input, TransferLimits, compile, launch, parse,
+    Compiled, CoreError, Device, DeviceArray, Input, Mode, TransferLimits, compile, launch, parse,
     set_transfer_limits, source, transfer_limits,
 };
 use gpusync_ir::{Const, Grid, Kernel, ParamKind, Scalar};
@@ -266,11 +266,17 @@ impl KernelIR {
             unsafe { launch(&dev, &c, &inputs, &consts, n, &outs) }
         });
         let arrays = result.map_err(to_py)?;
-        // Les DeviceArray d'entrée doivent aussi rester en vie (leurs buffers sont lus).
+        // Entrées issues d'un calcul précédent : gardées en vie seulement si elles s'appuient sur la
+        // mémoire de l'hôte (zéro-copie, CPU, flux). Un résultat resté sur le périphérique peut être
+        // libéré dès le lancement mis en file : son buffer n'est réutilisé qu'après les commandes qui
+        // le lisent (ordre des files, événements du pool). Le garder bloquerait toute réutilisation
+        // dans une boucle `y = f(y)` (chaque appel allouerait de la mémoire neuve).
         let mut keep = keepalive;
         for i in items {
             if let A::Dev(d) = i {
-                keep.push(d.into_any());
+                if d.get().array.mode != Mode::Resident {
+                    keep.push(d.into_any());
+                }
             }
         }
         // Chaque sortie garde ses propres références : les entrées vivent tant qu'une sortie

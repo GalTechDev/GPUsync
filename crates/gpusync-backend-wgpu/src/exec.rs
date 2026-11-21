@@ -18,6 +18,7 @@ pub struct WgDevice {
     max_groups_per_dim: u32,
     kernels: Mutex<HashMap<String, Arc<WgKernel>>>,
     staging_pool: Mutex<HashMap<(usize, bool), Vec<Staging>>>,
+    pool: Arc<BufPool>,
     /// Clé dans `OPEN` (ex. `vulkan:1`).
     key: String,
     /// Raison de la perte du périphérique par le driver (TDR Windows, plantage…), si perdu.
@@ -35,6 +36,55 @@ pub struct WgKernel {
 pub struct WgBuffer {
     buf: wgpu::Buffer,
     pub bytes: usize,
+    /// Réserve où rendre le buffer (alloués par `alloc`) ; `None` pour la mémoire hôte enveloppée.
+    pool: Option<Arc<BufPool>>,
+}
+
+impl Drop for WgBuffer {
+    fn drop(&mut self) {
+        if let Some(p) = &self.pool {
+            p.give(self.buf.clone());
+        }
+    }
+}
+
+/// Buffers libérés, réutilisés par les appels suivants : un buffer neuf est mis à zéro par wgpu
+/// à sa première utilisation (coûteux sur mémoire unifiée). La file unique de wgpu ordonne les
+/// soumissions et suit les usages : un buffer rendu peut resservir tout de suite. Taille arrondie
+/// à la puissance de deux jusqu'à 64 Mio, exacte au-delà ; 2 Gio en tout.
+#[derive(Default)]
+struct BufPool {
+    free: Mutex<(HashMap<u64, Vec<wgpu::Buffer>>, u64)>,
+}
+
+const POOL_POW2_MAX: u64 = 64 << 20;
+const POOL_MAX_TOTAL: u64 = 2 << 30;
+
+fn capacity(bytes: usize) -> u64 {
+    let b = aligned(bytes);
+    if b <= POOL_POW2_MAX {
+        b.next_power_of_two()
+    } else {
+        b
+    }
+}
+
+impl BufPool {
+    fn give(&self, buf: wgpu::Buffer) {
+        let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        let size = buf.size();
+        if g.1 + size <= POOL_MAX_TOTAL {
+            g.0.entry(size).or_default().push(buf);
+            g.1 += size;
+        }
+    }
+
+    fn take(&self, size: u64) -> Option<wgpu::Buffer> {
+        let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        let b = g.0.get_mut(&size)?.pop()?;
+        g.1 -= size;
+        Some(b)
+    }
 }
 
 static OPEN: OnceLock<Mutex<HashMap<String, Arc<WgDevice>>>> = OnceLock::new();
@@ -137,6 +187,7 @@ impl WgDevice {
             max_groups_per_dim: limits.max_compute_workgroups_per_dimension.max(1),
             kernels: Mutex::new(HashMap::new()),
             staging_pool: Mutex::new(HashMap::new()),
+            pool: Arc::default(),
             key: key.clone(),
             lost,
         });
@@ -227,15 +278,22 @@ impl WgDevice {
 
     pub fn alloc(&self, bytes: usize) -> Result<WgBuffer, BackendError> {
         self.check()?;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: aligned(bytes),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let size = capacity(bytes);
+        let buf = self.pool.take(size).unwrap_or_else(|| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
-        Ok(WgBuffer { buf, bytes })
+        Ok(WgBuffer {
+            buf,
+            bytes,
+            pool: Some(self.pool.clone()),
+        })
     }
 
     /// Copie hôte → périphérique (les données sont copiées immédiatement par wgpu).
@@ -478,7 +536,11 @@ impl WgDevice {
                     },
                 )
             };
-            Ok(Some(WgBuffer { buf, bytes }))
+            Ok(Some(WgBuffer {
+                buf,
+                bytes,
+                pool: None,
+            }))
         }
         #[cfg(not(target_vendor = "apple"))]
         {

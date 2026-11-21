@@ -19,16 +19,22 @@ use gpusync_runtime::{BackendError, DeviceInfo};
 use crate::sys::{self, CUcontext, CUdeviceptr, CUevent, CUfunction, CUmodule, CUstream, Driver};
 
 const BLOCK: u32 = 256;
-/// Buffers mis en réserve pour être réutilisés : jusqu'à 64 Mio chacun, 512 Mio en tout.
-const POOL_MAX_BUF: usize = 64 << 20;
-const POOL_MAX_TOTAL: usize = 512 << 20;
+/// Buffers mis en réserve pour être réutilisés : capacité arrondie à la puissance de deux jusqu'à
+/// 64 Mio, taille exacte au-delà (une boucle réutilise les mêmes tailles) ; 2 Gio en tout, rendus au
+/// driver si une allocation échoue.
+const POOL_POW2_MAX: usize = 64 << 20;
+const POOL_MAX_TOTAL: usize = 2 << 30;
+const POOL_MAX_BUF: usize = POOL_MAX_TOTAL / 4;
 
 /// Buffer en réserve : capacité, adresse, un événement par stream.
 type Spare = (usize, CUdeviceptr, [CUevent; 2]);
 
-/// Réserve de buffers libérés. `cuMemAlloc` / `cuMemFree` coûtent cher et `cuMemFree` synchronise
-/// tout le GPU : un buffer rendu est gardé, avec un événement par stream, et n'est réutilisé
-/// qu'une fois ces événements passés (plus aucune opération en file ne l'utilise).
+/// Réserve de buffers libérés. `cuMemAlloc` / `cuMemFree` coûtent cher (`cuMemFree` synchronise
+/// tout le GPU, et une mémoire neuve se paie à la première écriture) : un buffer rendu est gardé,
+/// avec un événement par stream. Il est repris de préférence une fois ces événements passés ;
+/// sinon tout de suite, dans l'ordre des streams, comme le pool de CuPy : chaque stream attend
+/// (côté GPU, sans bloquer l'hôte) l'événement de l'autre, son propre ordre faisant le reste.
+/// Une boucle qui soumet plus vite que le GPU ne calcule réutilise ainsi toujours les mêmes buffers.
 struct BufPool {
     d: &'static Driver,
     compute: CUstream,
@@ -43,14 +49,24 @@ unsafe impl Sync for BufPool {}
 impl BufPool {
     fn take(&self, cap: usize) -> Option<CUdeviceptr> {
         let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
-        let pos = g.0.iter().position(|(c, _, evs)| {
-            *c == cap
-                && evs
-                    .iter()
-                    .all(|e| unsafe { (self.d.cuEventQuery)(*e) } == 0)
-        })?;
+        let passed = |evs: &[CUevent; 2]| {
+            evs.iter()
+                .all(|e| unsafe { (self.d.cuEventQuery)(*e) } == 0)
+        };
+        let ready = g.0.iter().position(|(c, _, evs)| *c == cap && passed(evs));
+        let pos = ready.or_else(|| g.0.iter().position(|(c, _, _)| *c == cap))?;
         let (c, ptr, evs) = g.0.swap_remove(pos);
         g.1 -= c;
+        if ready.is_none() {
+            // Encore utilisé par des commandes en file : chaque stream attend celles de l'autre.
+            let ok = unsafe {
+                (self.d.cuStreamWaitEvent)(self.compute, evs[1], 0) == 0
+                    && (self.d.cuStreamWaitEvent)(self.transfer, evs[0], 0) == 0
+            };
+            if !ok {
+                unsafe { (self.d.cuCtxSynchronize)() };
+            }
+        }
         for e in evs {
             unsafe { (self.d.cuEventDestroy_v2)(e) };
         }
@@ -84,10 +100,10 @@ impl BufPool {
 }
 
 /// Taille réservée pour `bytes` : puissance de deux (réutilisation fréquente) jusqu'à 64 Mio,
-/// taille exacte au-delà (jamais mis en réserve).
+/// taille exacte au-delà.
 fn capacity(bytes: usize) -> usize {
     let b = bytes.max(256);
-    if b <= POOL_MAX_BUF {
+    if b <= POOL_POW2_MAX {
         b.next_power_of_two()
     } else {
         b

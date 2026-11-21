@@ -37,6 +37,7 @@ pub struct ClDevice {
     transfer: CommandQueue,
     kernels: Mutex<HashMap<String, Arc<ClKernel>>>,
     pinned_pool: Mutex<HashMap<usize, Vec<Pinned>>>,
+    pool: Arc<BufPool>,
 }
 
 /// Kernel compilé. `set_arg` + lancement doivent être atomiques : d'où le verrou.
@@ -47,9 +48,116 @@ pub struct ClKernel {
 
 /// Buffer OpenCL, éventuellement adossé à la mémoire de l'hôte (`host_ptr` non nul).
 pub struct ClBuffer {
-    buf: Buffer<u8>,
+    buf: std::mem::ManuallyDrop<Buffer<u8>>,
     pub bytes: usize,
     pub host_ptr: *mut u8,
+    /// Capacité réelle et réserve où le rendre (buffers en mémoire du périphérique).
+    cap: usize,
+    pool: Option<Arc<BufPool>>,
+}
+
+impl Drop for ClBuffer {
+    fn drop(&mut self) {
+        let buf = unsafe { std::mem::ManuallyDrop::take(&mut self.buf) };
+        if let Some(p) = &self.pool {
+            p.give(self.cap, buf);
+        }
+    }
+}
+
+/// Buffers mis en réserve : capacité arrondie à la puissance de deux jusqu'à 64 Mio, taille exacte
+/// au-delà, 2 Gio en tout (rendus au driver si une allocation échoue).
+const POOL_POW2_MAX: usize = 64 << 20;
+const POOL_MAX_TOTAL: usize = 2 << 30;
+
+fn capacity(bytes: usize) -> usize {
+    let b = bytes.max(4);
+    if b <= POOL_POW2_MAX {
+        b.next_power_of_two()
+    } else {
+        b
+    }
+}
+
+/// Réserve de buffers libérés : `clCreateBuffer` donne une mémoire neuve, payée à la première
+/// écriture. Un buffer rendu est gardé avec un marqueur par file ; il est repris de préférence une
+/// fois les marqueurs passés, sinon tout de suite, chaque file attendant (barrière côté
+/// périphérique, sans bloquer l'hôte) le marqueur de l'autre, son propre ordre faisant le reste.
+struct BufPool {
+    compute: opencl3::types::cl_command_queue,
+    transfer: opencl3::types::cl_command_queue,
+    free: Mutex<(Vec<Spare>, usize)>,
+}
+
+type Spare = (usize, Buffer<u8>, [Event; 2]);
+
+unsafe impl Send for BufPool {}
+unsafe impl Sync for BufPool {}
+
+fn marker(q: opencl3::types::cl_command_queue, wait: &[cl_event]) -> Option<Event> {
+    let w = if wait.is_empty() {
+        ptr::null()
+    } else {
+        wait.as_ptr()
+    };
+    unsafe { opencl3::command_queue::enqueue_marker_with_wait_list(q, wait.len() as u32, w) }
+        .ok()
+        .map(Event::new)
+}
+
+impl BufPool {
+    fn give(&self, cap: usize, buf: Buffer<u8>) {
+        let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        if g.1 + cap > POOL_MAX_TOTAL {
+            return; // libéré par le driver une fois les commandes en file terminées
+        }
+        if let (Some(c), Some(t)) = (marker(self.compute, &[]), marker(self.transfer, &[])) {
+            self.flush(); // un marqueur jamais envoyé bloquerait la barrière de l'autre file
+            g.0.push((cap, buf, [c, t]));
+            g.1 += cap;
+        }
+    }
+
+    fn flush(&self) {
+        let _ = opencl3::command_queue::flush(self.compute);
+        let _ = opencl3::command_queue::flush(self.transfer);
+    }
+
+    fn take(&self, cap: usize) -> Option<Buffer<u8>> {
+        let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        let passed = |evs: &[Event; 2]| {
+            evs.iter().all(|e| {
+                e.command_execution_status().is_ok_and(|s| s.0 == 0) // CL_COMPLETE
+            })
+        };
+        let ready = g.0.iter().position(|(c, _, evs)| *c == cap && passed(evs));
+        let pos = ready.or_else(|| g.0.iter().position(|(c, _, _)| *c == cap))?;
+        let (c, buf, [ec, et]) = g.0.swap_remove(pos);
+        g.1 -= c;
+        if ready.is_none() {
+            let ok = unsafe {
+                opencl3::command_queue::enqueue_barrier_with_wait_list(self.compute, 1, &et.get())
+                    .is_ok()
+                    && opencl3::command_queue::enqueue_barrier_with_wait_list(
+                        self.transfer,
+                        1,
+                        &ec.get(),
+                    )
+                    .is_ok()
+            };
+            self.flush();
+            if !ok {
+                let _ = (ec.wait(), et.wait());
+            }
+        }
+        Some(buf)
+    }
+
+    fn trim(&self) {
+        let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        g.0.clear();
+        g.1 = 0;
+    }
 }
 
 // Les objets OpenCL (cl_mem, cl_event) sont utilisables depuis n'importe quel thread.
@@ -116,7 +224,13 @@ impl ClDevice {
         #[allow(deprecated)]
         let transfer =
             CommandQueue::create_default(&context, 0).map_err(|e| err("création de la file", e))?;
+        let pool = Arc::new(BufPool {
+            compute: compute.get(),
+            transfer: transfer.get(),
+            free: Mutex::new((Vec::new(), 0)),
+        });
         let d = Arc::new(ClDevice {
+            pool,
             info,
             context,
             compute,
@@ -153,19 +267,28 @@ impl ClDevice {
 
     /// Buffer en mémoire du périphérique.
     pub fn alloc(&self, bytes: usize) -> Result<ClBuffer, BackendError> {
-        let buf = unsafe {
-            Buffer::<u8>::create(
-                &self.context,
-                CL_MEM_READ_WRITE,
-                bytes.max(4),
-                ptr::null_mut(),
-            )
-        }
-        .map_err(|e| err("allocation", e))?;
+        let cap = capacity(bytes);
+        let create = || unsafe {
+            Buffer::<u8>::create(&self.context, CL_MEM_READ_WRITE, cap, ptr::null_mut())
+        };
+        let buf = match self.pool.take(cap) {
+            Some(b) => b,
+            None => match create() {
+                Ok(b) => b,
+                Err(_) => {
+                    // Mémoire pleine : rendre la réserve au driver, puis réessayer.
+                    self.finish()?;
+                    self.pool.trim();
+                    create().map_err(|e| err("allocation", e))?
+                }
+            },
+        };
         Ok(ClBuffer {
-            buf,
+            buf: std::mem::ManuallyDrop::new(buf),
             bytes,
             host_ptr: ptr::null_mut(),
+            cap,
+            pool: Some(self.pool.clone()),
         })
     }
 
@@ -184,9 +307,11 @@ impl ClDevice {
         }
         .map_err(|e| err("buffer adossé à l'hôte", e))?;
         Ok(ClBuffer {
-            buf,
+            buf: std::mem::ManuallyDrop::new(buf),
             bytes,
             host_ptr: ptr,
+            cap: bytes,
+            pool: None,
         })
     }
 

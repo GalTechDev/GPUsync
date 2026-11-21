@@ -883,8 +883,10 @@ Un appel synchrone complet ne fait donc **qu'une seule attente**, au moment de l
 
 ### 8.4 Mémoire
 
-- **Pool** par périphérique, par classes de taille (puissances de 2 au-delà d'un seuil), avec un budget (par défaut une fraction de la mémoire du périphérique).
-- Un buffer libéré par Python (`gs.Array` détruit) retourne au pool **seulement après** l'événement de sa dernière opération.
+- **Réserve** par périphérique (CUDA, OpenCL, wgpu) : capacités arrondies à la puissance de deux jusqu'à 64 Mio, taille exacte au-delà, 2 Gio en tout (rendus au driver si une allocation échoue). Une mémoire neuve se paie à la première écriture (et `cuMemFree` synchronise tout le GPU) : sans réserve, une boucle `y = f(y)` plafonnait à 55-75 Go/s sur la RTX 4080 SUPER.
+- **Réutilisation dans l'ordre des files**, comme le pool de CuPy : un buffer rendu (avec un événement ou un marqueur par file) est repris de préférence une fois ses commandes terminées, sinon tout de suite, chaque file attendant côté périphérique (`cuStreamWaitEvent`, barrière OpenCL) les commandes de l'autre, son propre ordre faisant le reste. wgpu suit lui-même les usages entre soumissions de sa file unique. Une boucle qui soumet plus vite que le GPU ne calcule réutilise ainsi toujours les mêmes buffers.
+- **Durée de vie** : un résultat resté sur le périphérique (mode Résident) passé à un autre kernel n'est pas gardé en vie par celui-ci : il peut être libéré dès le lancement mis en file. Seules les entrées adossées à la mémoire de l'hôte (tableaux NumPy, résultats Direct, CPU ou Flux) le sont, jusqu'à la lecture du résultat. Mesuré (boucle `y = y + 1`, 16 Mo, RTX 4080 SUPER) : CUDA 72 → 463 Go/s, OpenCL 13 → 276 Go/s, Vulkan 76 → 275 Go/s.
+- Limite connue, mémoire unifiée : dans une chaîne de résultats Direct, chaque appel attend la fin du précédent (l'entrée est ré-enveloppée, et wgpu ne voit pas que deux buffers partagent la même mémoire) et enveloppe une mémoire neuve (≈ 0,3 ms de mise en correspondance pour 16 Mo sur M5 Pro). Une chaîne plafonne à ≈ 40 Go/s sur Metal, contre ≈ 275 Go/s pour des buffers wgpu réutilisés ; pour un appel isolé tableau → résultat lu, le Direct reste 2 à 6 fois plus rapide.
 
 #### Mémoire séparée (GPU dédié)
 
