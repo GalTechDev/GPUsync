@@ -16,6 +16,23 @@
 | M5 Mode explicite | ✅ `@gs.kernel(grid="x")` ou `grid=("n", "n")`, sorties `gs.Out[gs.i32[10]]` (valeur de départ : `gs.Out[gs.f32["m"], gs.inf]`), `gs.atomic_add` / `atomic_min` / `atomic_max` en i32, u32, f32 (f32 émulé par comparaison-échange en OpenCL 1.2 et en WGSL), indices multiples `(a, b)`, accumulation avec `out=` ; écriture hors limites jamais faite et signalée (`gs.OutOfBounds`) | Mac : 239 tests ; PC : 364 tests |
 | M6 CUDA | ✅ émetteur CUDA C (même générateur qu'OpenCL C, autre dialecte), backend CUDA à liaisons dynamiques maison (driver + NVRTC), moteur de transferts commun à OpenCL et CUDA (trait `Gpu`), réserve de buffers, cache disque du PTX, NVRTC par le toolkit ou `pip install nvidia-cuda-nvrtc-cu12` | PC : 430 tests, dont les 61 tests différentiels par périphérique sur `cuda:0` (parité) ; Mac : 240 tests (CUDA absent, signalé) |
 
+#### Indices au-delà de 2³¹ éléments (21/11/2026)
+
+Dans un kernel avec index, l'indice aplati `x[i, k]` était calculé en 32 bits : un tableau de plus de
+2³¹ − 1 éléments (8 Gio en f32), gardé entier sur le périphérique, faisait lire au mauvais endroit, sans
+erreur ou par un « illegal memory access » (vérifié sur la RTX en CUDA, 8 Gio). Désormais :
+
+- une **variante à indices 64 bits** (OpenCL `long`, CUDA `long long`) est compilée à la demande, seulement
+  pour un appel dont un tableau dépasse 2³¹ − 1 éléments : la variante 32 bits, plus rapide, reste la norme ;
+- l'interpréteur `cpu:0` calcule toujours ses indices en 64 bits ;
+- wgpu refuse avec une erreur claire (pas d'entiers 64 bits en WGSL ; de toute façon, un buffer wgpu ne
+  dépasse pas quelques Gio) ;
+- tests : variante forcée sur tous les tests d'index (seuil interne `GPUSYNC_WIDE_INDEX_LIMIT`), et vrai cas de
+  8 Gio en option (`GS_BIG=1`), passé en CUDA et sur `cpu:0`.
+
+Ajout au passage : `GPUSYNC_DEVICE` choisit le périphérique par défaut sans toucher au code (après
+`with gs.device(...)` et `gs.set_default_device(...)`).
+
 #### Comparaison avec le prototype v1 (`tools/compare_v1`, 21/11/2026)
 
 Mêmes calculs, même GPU, même API de calcul des deux côtés, chaque mesure dans un processus neuf ; le

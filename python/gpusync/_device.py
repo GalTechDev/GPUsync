@@ -13,6 +13,7 @@ Un périphérique se désigne par un objet `Device`, un identifiant (`"opencl:1"
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 
 from . import _core
@@ -56,7 +57,8 @@ def resolve(device=None) -> str:
     """Identifiant (`"metal:0"`…) du périphérique prévu : demandé, ou premier du classement."""
     if device is None:
         stack = getattr(_local, "stack", None)
-        device = stack[-1] if stack else _default
+        # Ordre : `with gs.device(...)`, `gs.set_default_device(...)`, variable GPUSYNC_DEVICE.
+        device = stack[-1] if stack else (_default or os.environ.get("GPUSYNC_DEVICE") or None)
     devs = ranked()
     if device is None:
         if not devs:

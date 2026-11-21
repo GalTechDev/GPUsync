@@ -288,6 +288,13 @@ pub unsafe fn launch(
     let limits = transfer_limits();
     let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
     let scalars = &full_scalars(k, scalars);
+    // Indices 64 bits si un tableau lu par indice dépasse 2³¹ − 1 éléments (kernels avec index).
+    let wide = indexed
+        && ins
+            .iter()
+            .zip(&arrays)
+            .any(|(i, t)| (i.bytes() / t.size()) as u64 > wide_index_limit());
+    let imp = c.variant(dev, wide)?;
     let result: Planned = if n == 0 {
         Ok((
             outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
@@ -296,7 +303,7 @@ pub unsafe fn launch(
         ))
     } else if indexed {
         let rows = Rows::new(k, scalars, n, &ins, &out_elems);
-        match (dev, &c.imp) {
+        match (dev, &imp) {
             (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
             (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
                 rows_cl_direct(d, ck, k, &rows, &ins, scalars, outs, &limits)
@@ -351,7 +358,7 @@ pub unsafe fn launch(
             )),
         }
     } else {
-        match (dev, &c.imp) {
+        match (dev, &imp) {
             (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
             (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
                 cl_direct(d, ck, k, &ins, &arrays, scalars, n, outs, &limits)
@@ -466,6 +473,18 @@ fn writable_host(k: &Kernel, ins: &[In]) -> Vec<Storage> {
             In::Dev(_) => unreachable!("gs.Out : toujours en mémoire hôte"),
         })
         .collect()
+}
+
+/// Nombre d'éléments au-delà duquel un tableau demande des indices 64 bits : 2³¹ − 1, ou la valeur de
+/// `GPUSYNC_WIDE_INDEX_LIMIT` (tests : forcer la variante large sur de petits tableaux).
+fn wide_index_limit() -> u64 {
+    static L: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *L.get_or_init(|| {
+        std::env::var("GPUSYNC_WIDE_INDEX_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(i32::MAX as u64)
+    })
 }
 
 /// Stockage de chaque sortie, mode retenu, buffers encore adossés à la mémoire hôte.

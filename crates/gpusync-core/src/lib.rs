@@ -169,6 +169,46 @@ impl Device {
 pub struct Compiled {
     pub kernel: Arc<Kernel>,
     pub(crate) imp: Imp,
+    /// Variante à indices 64 bits, compilée à la première demande (tableau de plus de 2³¹ − 1
+    /// éléments dans un kernel avec index).
+    pub(crate) wide: Arc<std::sync::Mutex<Option<Imp>>>,
+}
+
+impl Compiled {
+    /// Implémentation à utiliser : la variante à indices 64 bits si `wide`.
+    pub(crate) fn variant(&self, dev: &Device, wide: bool) -> R<Imp> {
+        if !wide {
+            return Ok(self.imp.clone());
+        }
+        let mut slot = self.wide.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(imp) = slot.as_ref() {
+            return Ok(imp.clone());
+        }
+        let k = &self.kernel;
+        let gen_err = |e: gpusync_codegen::CodegenError| CoreError::Unsupported(e.0);
+        let imp = match dev {
+            Device::Cu(d) => {
+                let src = gpusync_codegen::emit_c_wide(k, true).map_err(gen_err)?;
+                Imp::Cu(d.compile(&src.code, &src.entry).map_err(dev_err)?)
+            }
+            Device::Cl(d) => {
+                let src = gpusync_codegen::emit_c_wide(k, false).map_err(gen_err)?;
+                Imp::Cl(d.compile(&src.code, &src.entry).map_err(dev_err)?)
+            }
+            // Un buffer wgpu ne dépasse pas quelques Gio : un tableau de plus de 2³¹ éléments ne
+            // peut pas y être lié entier.
+            Device::Wg(d) => {
+                return Err(CoreError::Unsupported(format!(
+                    "'{}' : un tableau de plus de 2³¹ − 1 éléments demande des indices 64 bits, \
+                     absents de WGSL ({}) ; utilisez CUDA, OpenCL ou cpu:0",
+                    k.name, d.info.name
+                )));
+            }
+            Device::Cpu => Imp::Cpu,
+        };
+        *slot = Some(imp.clone());
+        Ok(imp)
+    }
 }
 
 #[derive(Clone)]
@@ -237,6 +277,7 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
     Ok(Compiled {
         kernel: k.clone(),
         imp,
+        wide: Default::default(),
     })
 }
 

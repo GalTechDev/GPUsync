@@ -53,6 +53,8 @@ struct Gen<'a> {
     tmp: usize,
     /// CUDA C (NVRTC) plutôt qu'OpenCL C.
     cuda: bool,
+    /// Indices de tableaux calculés en 64 bits (un tableau dépasse 2³¹ − 1 éléments).
+    wide: bool,
 }
 
 impl Gen<'_> {
@@ -71,6 +73,21 @@ impl Gen<'_> {
             format!("{base}f")
         } else {
             base.to_string()
+        }
+    }
+
+    /// Indice aplati d'un tableau. Variante large : additions, soustractions et produits en 64 bits
+    /// (`long` en OpenCL, `long long` en CUDA, où `long` fait 32 bits sous Windows).
+    fn index(&self, e: &Expr) -> String {
+        if !self.wide {
+            return self.expr(e);
+        }
+        let t = if self.cuda { "long long" } else { "long" };
+        match &e.kind {
+            ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), a, b) => {
+                format!("({} {} {})", self.index(a), infix(*op), self.index(b))
+            }
+            _ => format!("(({t}){})", self.expr(e)),
         }
     }
 
@@ -128,7 +145,7 @@ impl Gen<'_> {
                     ),
                 }
             }
-            ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.expr(i)),
+            ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.index(i)),
             ExprKind::LocalLoad(l, i) => format!("{}[{}]", local_name(self.k, *l), self.expr(i)),
             ExprKind::GridIndex(a) => format!("gs_g{a}"),
             ExprKind::Cast(a) if e.ty == Scalar::Bool => format!("({} != 0)", self.expr(a)),
@@ -227,10 +244,15 @@ impl Gen<'_> {
                 let ty = self.k.params[*param].ty;
                 let p = param_name(self.k, *param);
                 let e = param_name(self.k, *err);
-                let (idx, ok, v) = (self.expr(index), self.expr(in_bounds), self.expr(value));
+                let (idx, ok, v) = (self.index(index), self.expr(in_bounds), self.expr(value));
                 self.out.line("{");
                 self.out.depth += 1;
-                self.out.line(format!("const int gs_ai = {idx};"));
+                let it = match (self.wide, self.cuda) {
+                    (false, _) => "int",
+                    (true, true) => "long long",
+                    (true, false) => "long",
+                };
+                self.out.line(format!("const {it} gs_ai = {idx};"));
                 self.out.line(format!("if ({ok}) {{"));
                 let cu = ["atomicAdd", "atomicMin", "atomicMax"][*op as usize];
                 let call = match ty {
@@ -341,15 +363,21 @@ const HELPERS: &[(Helper, &str)] = &[
 
 /// Génère le kernel OpenCL C. Point d'entrée : `gs_<nom>`.
 pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
-    emit_c(k, false)
+    emit_c(k, false, false)
 }
 
 /// Génère le kernel CUDA C (compilé par NVRTC). Point d'entrée : `gs_<nom>` (`extern "C"`).
 pub fn emit_cuda(k: &Kernel) -> Result<KernelSource, CodegenError> {
-    emit_c(k, true)
+    emit_c(k, true, false)
 }
 
-fn emit_c(k: &Kernel, cuda: bool) -> Result<KernelSource, CodegenError> {
+/// Variante à indices 64 bits (OpenCL C ou CUDA C), pour un appel dont un tableau dépasse
+/// 2³¹ − 1 éléments ; plus lente (produits 64 bits), elle n'est compilée qu'à la demande.
+pub fn emit_c_wide(k: &Kernel, cuda: bool) -> Result<KernelSource, CodegenError> {
+    emit_c(k, cuda, true)
+}
+
+fn emit_c(k: &Kernel, cuda: bool, wide: bool) -> Result<KernelSource, CodegenError> {
     let entry = format!("gs_{}", crate::sanitize(&k.name));
     let mut g = Gen {
         k,
@@ -359,6 +387,7 @@ fn emit_c(k: &Kernel, cuda: bool) -> Result<KernelSource, CodegenError> {
         },
         tmp: 0,
         cuda,
+        wide,
     };
     g.out.line(format!(
         "// GPUsync — kernel « {} » ({}, généré)",

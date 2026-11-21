@@ -22,7 +22,8 @@ print(y[:5])                                 # attend la fin et rapatrie
 z = normalize(y, 0.0, 2.0)                   # chaînage : y reste sur le GPU
 np.asarray(z)                                # tableau NumPy
 
-normalize(x, 0.0, 1.0, device="opencl")      # choisir le périphérique (sinon : choix automatique)
+normalize(x, 0.0, 1.0, device="opencl")      # choisir le périphérique (sinon : choix automatique,
+                                             # ou la variable d'environnement GPUSYNC_DEVICE)
 with gs.device("cpu"):                       # interpréteur de référence (lent, toujours disponible)
     normalize(x, 0.0, 1.0)
 

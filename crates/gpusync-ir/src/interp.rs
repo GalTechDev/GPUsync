@@ -239,7 +239,7 @@ impl State<'_, '_> {
                 err,
                 code,
             } => {
-                let idx = index_of(self.eval(index)?);
+                let idx = self.eval_index(index)?;
                 let ok = as_bool(self.eval(in_bounds)?);
                 let ty = self.kernel.params[*param].ty;
                 let v = convert(self.eval(value)?, ty);
@@ -284,11 +284,27 @@ impl State<'_, '_> {
         }
     }
 
+    /// Indice aplati d'un tableau, calculé en 64 bits (sommes et produits d'indices et de
+    /// dimensions) : jamais de débordement, même au-delà de 2³¹ éléments.
+    fn eval_index(&mut self, e: &Expr) -> Result<i64, String> {
+        Ok(match &e.kind {
+            ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), a, b) => {
+                let (x, y) = (self.eval_index(a)?, self.eval_index(b)?);
+                match op {
+                    BinOp::Add => x.wrapping_add(y),
+                    BinOp::Sub => x.wrapping_sub(y),
+                    _ => x.wrapping_mul(y),
+                }
+            }
+            _ => index_of(self.eval(e)?),
+        })
+    }
+
     fn eval(&mut self, e: &Expr) -> Result<Const, String> {
         Ok(match &e.kind {
             ExprKind::GridIndex(a) => Const::I32(self.coords[*a] as i32),
             ExprKind::Load(p, index) => {
-                let idx = index_of(self.eval(index)?);
+                let idx = self.eval_index(index)?;
                 let Arg::Array(bytes) = &self.args[*p] else {
                     return Err("lecture indexée d'un scalaire".into());
                 };
