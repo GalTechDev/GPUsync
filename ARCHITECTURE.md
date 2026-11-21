@@ -38,6 +38,29 @@ En gras : là où le prototype fait mieux. Le DTW 391 du prototype est mesuré c
 tampon épinglé intermédiaire (plus rapide, presque sans mémoire en plus) ; en CUDA, CuPy copie 10 M éléments
 directement depuis la mémoire de l'hôte. Les deux reviennent au « dernier `memcpy` » de §9.3.
 
+##### DTW 1 contre N, jusqu'à 2 M séries (benchmark DTW du prototype)
+
+Repris de `examples/algorithms/dtw/benchmark.py` du prototype : une référence, N cibles, séries de 30 points
+complétées à 32 par des zéros (le DTW porte donc sur 32 points), sans fenêtre. Variantes du prototype : « OOC
+Manuel » (blocs de 20 000, deux en vol) et « OOC Auto » (`compute_dtw_matrix`). Résultats vérifiés entre
+versions ; une variante dont les résultats diffèrent n'est pas retenue dans le gain.
+
+| N | Mac, v1 Manuel / Auto (OpenCL) | Mac, v2 OpenCL / Metal | RTX, v1 Manuel (OpenCL) | RTX, v2 CUDA / OpenCL / Vulkan |
+|---|---|---|---|---|
+| 100 000 | 7,5 / 9,4 ms | 3,2 / 3,4 ms | 18,4 ms | 1,8 / 2,5 / 2,3 ms |
+| 500 000 | 20,7 / 17,7 ms | 7,1 / 9,5 ms | 83,3 ms | 9,2 / 11,8 / 12,9 ms |
+| 1 000 000 | 40,1 / 20,5 ms | 14,1 / 18,5 ms | 204 ms | 16,8 / 19,5 / 26,3 ms |
+| 2 000 000 | 87,7 / 35,6 ms | 27,2 / 36,2 ms | 307 ms | 32,4 / 35,7 / 55,3 ms |
+
+- **Mac** : v2 OpenCL 1,3 à 2,5 fois plus rapide que la meilleure variante du prototype ; Metal à égalité à 2 M.
+- **RTX** : v2 7 à 12 fois plus rapide que la seule variante correcte du prototype.
+- **Défauts du prototype trouvés** : en CUDA, ce kernel ne compile pas (`mad`, fonction OpenCL, émise telle
+  quelle en CUDA) ; en OpenCL sur la RTX, « OOC Auto » rend des distances fausses sans erreur (premières valeurs
+  toutes identiques, sommes décalées de 2,6e-4) alors qu'elle est juste sur le Mac.
+- **Piste pour v2** : sur ce kernel très calculatoire, le prototype déroule le DTW avec une taille constante (32)
+  et garde la ligne en registres ; v2 boucle sur une taille lue à l'exécution avec un tableau local. La
+  spécialisation sur les tailles connues à l'appel (§5.4) comblerait cet écart.
+
 #### Mesures M6 (RTX 4080 SUPER, à chaud ; mêmes scripts qu'aux jalons précédents)
 
 | | `cuda:0` | `opencl:0` | `vulkan:0` |

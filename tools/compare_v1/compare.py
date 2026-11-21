@@ -29,6 +29,7 @@ def run(py, impl, backend, tasks):
 
 def measure(py, impl, backend):
     res = run(py, impl, backend, ["lat", "big", "dtw391", "dtw2000"])
+    res.update(run(py, impl, backend, ["dtw1n"]))
     res.update(run(py, impl, backend, ["huge"]))
     if "import_s" in res:
         res["import_ms"] = res["import_s"] * 1e3
@@ -98,6 +99,50 @@ def report(v1, v2, b1, b2):
             corner = np.abs(np.array(v1["dtw2000_corner"]) - np.array(v2["dtw2000_corner"])).max()
             checks.append(f"DTW 2000 v1 = v2 : somme écart relatif {rel:.1e}, coin 4×4 écart {corner:.1e}")
         print("\nvérifications : " + " ; ".join(checks))
+        report_1n(v1, v2)
+
+
+def report_1n(v1, v2):
+    """DTW 1 contre N (benchmark DTW du prototype) : temps par N et par variante, et accord des résultats."""
+    a, b = v1.get("dtw1n"), v2.get("dtw1n")
+    if not (a or b):
+        return
+    variants = list((a or {}).keys()) + list((b or {}).keys())
+    rows = {**(a or {}), **(b or {})}
+    sizes = sorted({int(n) for v in rows.values() for n in v})
+    print("\nDTW 1 contre N (séries de 30 points complétées à 32, sans fenêtre) :\n")
+    print("| N | " + " | ".join(f"v1 {k}" if k != "Rust" else "v2 Rust" for k in variants) + " | gain (meilleur v1 / v2) |")
+    print("|---" * (len(variants) + 2) + "|")
+    ref_rows = rows.get("Rust", {})
+
+    def correct(k, n, c):
+        """Résultat d'accord avec v2 (et la variante manuelle du prototype) ? Sinon, temps non retenu."""
+        r = ref_rows.get(str(n), ref_rows.get(n))
+        return k == "Rust" or r is None or abs(c["sum"] - r["sum"]) <= 1e-6 * abs(r["sum"])
+
+    for n in sizes:
+        cells = [rows[k].get(str(n), rows[k].get(n)) for k in variants]
+        ok = [c is not None and correct(k, n, c) for k, c in zip(variants, cells)]
+        ms = [c["ms"] if c else None for c in cells]
+        v1_best = min((m for k, m, g in zip(variants, ms, ok) if k != "Rust" and m and g), default=None)
+        v2_ms = next((m for k, m in zip(variants, ms) if k == "Rust"), None)
+        gain = f"× {v1_best / v2_ms:.1f}" if v1_best and v2_ms else ""
+        txt = [fmt(m, "ms") + ("" if g or m is None else " ✗ faux") for m, g in zip(ms, ok)]
+        print(f"| {n:,} | ".replace(",", " ") + " | ".join(txt) + f" | {gain} |")
+    ref = rows.get("Rust", {})
+    for k in variants:
+        if k == "Rust":
+            continue
+        diffs = []
+        for n, c in rows[k].items():
+            r = ref.get(n)
+            if c and r:
+                diffs.append(abs(c["sum"] - r["sum"]) / max(abs(r["sum"]), 1e-30))
+        if diffs:
+            print(f"accord v1 {k} / v2 : écart relatif des sommes ≤ {max(diffs):.1e}")
+    errs = {k: v for k, v in {**v1, **v2}.items() if k == "dtw1n_error"}
+    if errs:
+        print(f"erreur : {errs['dtw1n_error'][:160]}")
 
 
 if __name__ == "__main__":
