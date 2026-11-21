@@ -16,6 +16,27 @@
 | M5 Mode explicite | ✅ `@gs.kernel(grid="x")` ou `grid=("n", "n")`, sorties `gs.Out[gs.i32[10]]` (valeur de départ : `gs.Out[gs.f32["m"], gs.inf]`), `gs.atomic_add` / `atomic_min` / `atomic_max` en i32, u32, f32 (f32 émulé par comparaison-échange en OpenCL 1.2 et en WGSL), indices multiples `(a, b)`, accumulation avec `out=` ; écriture hors limites jamais faite et signalée (`gs.OutOfBounds`) | Mac : 239 tests ; PC : 364 tests |
 | M6 CUDA | ✅ émetteur CUDA C (même générateur qu'OpenCL C, autre dialecte), backend CUDA à liaisons dynamiques maison (driver + NVRTC), moteur de transferts commun à OpenCL et CUDA (trait `Gpu`), réserve de buffers, cache disque du PTX, NVRTC par le toolkit ou `pip install nvidia-cuda-nvrtc-cu12` | PC : 430 tests, dont les 61 tests différentiels par périphérique sur `cuda:0` (parité) ; Mac : 240 tests (CUDA absent, signalé) |
 
+#### Spécialisation des tailles (21/11/2026, §5.4)
+
+| DTW 1 contre N, 2 M séries | sans | avec | gain |
+|---|---|---|---|
+| Mac, OpenCL | 27,3 ms | 5,1 ms | × 5,3 |
+| Mac, Metal | 35,6 ms | 12,0 ms | × 3,0 |
+| RTX, CUDA | 32,4 ms | 21,4 ms | × 1,5 |
+| RTX, OpenCL | 36,2 ms | 24,7 ms | × 1,5 |
+| RTX, Vulkan | 55,4 ms | 28,8 ms | × 1,9 |
+| UHD 770, OpenCL | 691 ms | 30,7 ms | × 22 |
+| UHD 770, Vulkan | 2490 ms | 62,3 ms | × 40 |
+
+DTW tous contre tous 4000 × 4000 (fenêtre 5) : OpenCL Mac 1142 → 575 ms, CUDA 419 → 364 ms, OpenCL RTX
+426 → 370 ms ; Metal et Vulkan inchangés (bornes de la fenêtre non constantes, tableaux indexés par une
+variable : restent en mémoire). Contre le prototype, à 2 M : × 6,8 sur le Mac (OpenCL), × 14 sur la RTX
+(`tools/compare_v1/results/dtw1n_v1_v2_spec.png`).
+
+Corrigé au passage : après `for k in range(n)`, `k` valait `n` (au lieu de `n − 1`) partout, interpréteur
+compris, et le réaffecter dans le corps changeait l'itération. Un compteur caché mène désormais la boucle,
+comme en Python (test ajouté).
+
 #### Indices au-delà de 2³¹ éléments (21/11/2026)
 
 Dans un kernel avec index, l'indice aplati `x[i, k]` était calculé en 32 bits : un tableau de plus de
@@ -704,7 +725,15 @@ Un `@gs.kernel` est un **modèle**. Une version compilée est identifiée par :
 (hash de l'IR, dtypes, rangs, cible, capacités du périphérique)
 ```
 
-Les tailles des dimensions ne font **pas** partie de la clé : elles sont passées en paramètres, pour ne pas recompiler à chaque taille.
+Les tailles des dimensions ne font en général **pas** partie de la clé : elles sont passées en paramètres,
+pour ne pas recompiler à chaque taille. **Exception (21/11/2026)** : dans un kernel avec index, une dimension
+qui n'est pas un axe de la grille (ex. la longueur `t` des séries) et vaut au plus 1024 devient une constante
+du code généré. Le compilateur peut alors dérouler les boucles et garder les tableaux locaux en registres ;
+WGSL étant réécrit par naga (boucles que Metal et Vulkan ne déroulent plus), le générateur déroule lui-même
+les boucles les plus intérieures à bornes constantes (≤ 64 tours), en propageant les locales constantes
+(`t = len(ref)`). Les axes de la grille restent des paramètres (changer `n` ne recompile rien) ; au plus 8
+variantes spécialisées par kernel et par périphérique, au-delà la version générique sert.
+`GPUSYNC_SPECIALIZE=0` la désactive, `GPUSYNC_DUMP_DIR` écrit chaque code compilé (débogage).
 
 Tableaux non contigus (vues NumPy) : copiés en contigu à l'upload dans le MVP ; strides en paramètres plus tard si le besoin est mesuré.
 

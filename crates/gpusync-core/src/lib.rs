@@ -6,6 +6,7 @@
 //! - [`launch`] : exécute sur `n` éléments, en blocs, selon le mode choisi (moteur de transferts,
 //!   ARCHITECTURE.md §9) et renvoie un [`DeviceArray`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpusync_backend_cuda::{CuDevice, CuKernel};
@@ -169,44 +170,48 @@ impl Device {
 pub struct Compiled {
     pub kernel: Arc<Kernel>,
     pub(crate) imp: Imp,
-    /// Variante à indices 64 bits, compilée à la première demande (tableau de plus de 2³¹ − 1
-    /// éléments dans un kernel avec index).
-    pub(crate) wide: Arc<std::sync::Mutex<Option<Imp>>>,
+    /// Variantes compilées à la demande : indices 64 bits (tableau de plus de 2³¹ − 1 éléments) et
+    /// tailles connues à l'appel remplacées par des constantes (§5.4).
+    pub(crate) variants: Arc<std::sync::Mutex<HashMap<VariantKey, Imp>>>,
 }
 
+/// (indices 64 bits, paramètres spécialisés).
+pub(crate) type VariantKey = (bool, Vec<(usize, i64)>);
+
+/// Variantes spécialisées gardées au plus par kernel et par périphérique ; au-delà (tailles qui
+/// changent à chaque appel), la version générique sert, sans recompiler.
+const MAX_SPECIALIZED: usize = 8;
+
 impl Compiled {
-    /// Implémentation à utiliser : la variante à indices 64 bits si `wide`.
-    pub(crate) fn variant(&self, dev: &Device, wide: bool) -> R<Imp> {
-        if !wide {
+    /// Implémentation à utiliser pour cet appel.
+    pub(crate) fn variant(&self, dev: &Device, wide: bool, spec: Vec<(usize, i64)>) -> R<Imp> {
+        if !wide && spec.is_empty() {
             return Ok(self.imp.clone());
         }
-        let mut slot = self.wide.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(imp) = slot.as_ref() {
+        let mut cache = self.variants.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (wide, spec);
+        if let Some(imp) = cache.get(&key) {
             return Ok(imp.clone());
         }
-        let k = &self.kernel;
-        let gen_err = |e: gpusync_codegen::CodegenError| CoreError::Unsupported(e.0);
-        let imp = match dev {
-            Device::Cu(d) => {
-                let src = gpusync_codegen::emit_c_wide(k, true).map_err(gen_err)?;
-                Imp::Cu(d.compile(&src.code, &src.entry).map_err(dev_err)?)
-            }
-            Device::Cl(d) => {
-                let src = gpusync_codegen::emit_c_wide(k, false).map_err(gen_err)?;
-                Imp::Cl(d.compile(&src.code, &src.entry).map_err(dev_err)?)
-            }
-            // Un buffer wgpu ne dépasse pas quelques Gio : un tableau de plus de 2³¹ éléments ne
-            // peut pas y être lié entier.
-            Device::Wg(d) => {
-                return Err(CoreError::Unsupported(format!(
-                    "'{}' : un tableau de plus de 2³¹ − 1 éléments demande des indices 64 bits, \
-                     absents de WGSL ({}) ; utilisez CUDA, OpenCL ou cpu:0",
-                    k.name, d.info.name
-                )));
-            }
-            Device::Cpu => Imp::Cpu,
+        let key = if !key.1.is_empty()
+            && cache
+                .keys()
+                .filter(|(w, s)| *w == wide && !s.is_empty())
+                .count()
+                >= MAX_SPECIALIZED
+        {
+            (wide, Vec::new()) // trop de tailles différentes : version générique
+        } else {
+            key
         };
-        *slot = Some(imp.clone());
+        if !key.0 && key.1.is_empty() {
+            return Ok(self.imp.clone());
+        }
+        if let Some(imp) = cache.get(&key) {
+            return Ok(imp.clone());
+        }
+        let imp = build(dev, &self.kernel, key.0, &key.1)?;
+        cache.insert(key, imp.clone());
         Ok(imp)
     }
 }
@@ -242,23 +247,55 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     None
 }
 
-/// Vérifie les capacités du périphérique (§6.2), génère le code et le compile.
-pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
-    let info = dev.info();
-    if let Some(msg) = unsupported(&info, k) {
-        return Err(CoreError::Unsupported(msg));
+/// Débogage : avec `GPUSYNC_DUMP_DIR`, chaque code compilé est écrit dans ce dossier
+/// (`<kernel>.<variante>.<cl|cu|wgsl>`).
+fn dump(k: &Kernel, wide: bool, spec: &[(usize, i64)], ext: &str, code: &str) {
+    if let Some(dir) = std::env::var_os("GPUSYNC_DUMP_DIR") {
+        let tag: Vec<String> = spec
+            .iter()
+            .map(|(p, v)| format!("{}={v}", k.params[*p].name))
+            .collect();
+        let name = format!(
+            "{}.{}{}.{ext}",
+            k.name,
+            if wide { "i64." } else { "" },
+            if tag.is_empty() {
+                "generique".into()
+            } else {
+                tag.join(",")
+            }
+        );
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(std::path::Path::new(&dir).join(name), code);
     }
-    let imp = match dev {
+}
+
+/// Génère et compile une variante de `k` pour `dev`.
+fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> {
+    let gen_err = |e: gpusync_codegen::CodegenError| CoreError::Unsupported(e.0);
+    Ok(match dev {
         Device::Cu(d) => {
-            let src = gpusync_codegen::emit_cuda(k).map_err(|e| CoreError::Unsupported(e.0))?;
+            let src = gpusync_codegen::emit_c_variant(k, true, wide, spec).map_err(gen_err)?;
+            dump(k, wide, spec, "cu", &src.code);
             Imp::Cu(d.compile(&src.code, &src.entry).map_err(dev_err)?)
         }
         Device::Cl(d) => {
-            let src = gpusync_codegen::emit_opencl(k).map_err(|e| CoreError::Unsupported(e.0))?;
+            let src = gpusync_codegen::emit_c_variant(k, false, wide, spec).map_err(gen_err)?;
+            dump(k, wide, spec, "cl", &src.code);
             Imp::Cl(d.compile(&src.code, &src.entry).map_err(dev_err)?)
         }
+        // Un buffer wgpu ne dépasse pas quelques Gio : un tableau de plus de 2³¹ éléments ne peut pas
+        // y être lié entier ; et WGSL n'a pas d'entiers 64 bits.
+        Device::Wg(d) if wide => {
+            return Err(CoreError::Unsupported(format!(
+                "'{}' : un tableau de plus de 2³¹ − 1 éléments demande des indices 64 bits, \
+                 absents de WGSL ({}) ; utilisez CUDA, OpenCL ou cpu:0",
+                k.name, d.info.name
+            )));
+        }
         Device::Wg(d) => {
-            let src = gpusync_codegen::emit_wgsl(k).map_err(|e| CoreError::Unsupported(e.0))?;
+            let src = gpusync_codegen::emit_wgsl_variant(k, spec).map_err(gen_err)?;
+            dump(k, wide, spec, "wgsl", &src.code);
             Imp::Wg(
                 d.compile(
                     &src.code,
@@ -273,11 +310,19 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
             )
         }
         Device::Cpu => Imp::Cpu,
-    };
+    })
+}
+
+/// Vérifie les capacités du périphérique (§6.2), génère le code et le compile.
+pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
+    let info = dev.info();
+    if let Some(msg) = unsupported(&info, k) {
+        return Err(CoreError::Unsupported(msg));
+    }
     Ok(Compiled {
         kernel: k.clone(),
-        imp,
-        wide: Default::default(),
+        imp: build(dev, k, false, &[])?,
+        variants: Default::default(),
     })
 }
 

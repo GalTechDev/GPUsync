@@ -294,7 +294,7 @@ pub unsafe fn launch(
             .iter()
             .zip(&arrays)
             .any(|(i, t)| (i.bytes() / t.size()) as u64 > wide_index_limit());
-    let imp = c.variant(dev, wide)?;
+    let imp = c.variant(dev, wide, specialization(k, scalars))?;
     let result: Planned = if n == 0 {
         Ok((
             outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
@@ -473,6 +473,37 @@ fn writable_host(k: &Kernel, ins: &[In]) -> Vec<Storage> {
             In::Dev(_) => unreachable!("gs.Out : toujours en mémoire hôte"),
         })
         .collect()
+}
+
+/// Tailles remplacées par des constantes pour cet appel (§5.4) : dimensions d'un kernel avec index qui
+/// ne sont pas des axes de la grille (ex. la longueur `t` des séries) et valent au plus 1024. Les axes
+/// de la grille restent des paramètres : changer leur taille ne recompile rien.
+/// `GPUSYNC_SPECIALIZE=0` désactive la spécialisation (mesures).
+fn specialization(k: &Kernel, scalars: &[Const]) -> Vec<(usize, i64)> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var("GPUSYNC_SPECIALIZE").map_or(true, |v| v != "0"));
+    let Grid::Indexed { axes, .. } = &k.grid else {
+        return Vec::new();
+    };
+    if !on {
+        return Vec::new();
+    }
+    let mut pos = 0;
+    let mut out = Vec::new();
+    for (i, p) in k.params.iter().enumerate() {
+        if p.kind != ParamKind::Scalar {
+            continue;
+        }
+        if p.hidden && p.name.starts_with("gs_dim_") && !axes.contains(&i) {
+            if let Const::I32(v) = interp::convert(scalars[pos], Scalar::I32) {
+                if (1..=1024).contains(&v) {
+                    out.push((i, v as i64));
+                }
+            }
+        }
+        pos += 1;
+    }
+    out
 }
 
 /// Nombre d'éléments au-delà duquel un tableau demande des indices 64 bits : 2³¹ − 1, ou la valeur de

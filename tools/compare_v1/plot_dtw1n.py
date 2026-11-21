@@ -67,14 +67,14 @@ for ax, (title, v1_key, v2s, ref_key, names) in zip(axes, panels):
         ax.plot(x, m, style, color=color, lw=2, marker="o", ms=8, mfc=color, mec=SURFACE, mew=2,
                 label=label, solid_capstyle="round", zorder=3)
     # Étiquettes directes en bout de ligne (texte en encre, pas en couleur de série), écartées si proches.
-    ends = sorted(((m[-1], label) for label, _, m, _, _ in lines), reverse=True)
-    placed = []
+    # Du bas vers le haut : chaque étiquette au moins un écart au-dessus de la précédente (jamais
+    # sous l'axe).
+    ends = sorted((m[-1], label) for label, _, m, _, _ in lines)
+    gap = ymax * 0.07
+    prev = None
     for y, label in ends:
-        yy = y
-        for p in placed:
-            if abs(yy - p) < ymax * 0.06:
-                yy = p - ymax * 0.06
-        placed.append(yy)
+        yy = y if prev is None else max(y, prev + gap)
+        prev = yy
         ax.annotate(f"{label}  {y:.0f} ms", xy=(2.0, y), xytext=(2.06, yy), textcoords="data",
                     va="center", ha="left", fontsize=10, color=INK)
     v1_end = lines[0][2][-1]

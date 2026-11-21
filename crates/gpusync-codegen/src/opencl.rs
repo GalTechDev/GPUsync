@@ -55,6 +55,8 @@ struct Gen<'a> {
     cuda: bool,
     /// Indices de tableaux calculés en 64 bits (un tableau dépasse 2³¹ − 1 éléments).
     wide: bool,
+    /// Paramètres remplacés par une constante (spécialisation).
+    spec: Vec<(usize, i64)>,
 }
 
 impl Gen<'_> {
@@ -97,7 +99,10 @@ impl Gen<'_> {
             ExprKind::Local(i) => local_name(self.k, *i),
             ExprKind::Param(i) => match self.k.params[*i].kind {
                 ParamKind::Array => format!("{}[gs_i]", param_name(self.k, *i)),
-                ParamKind::Scalar => param_name(self.k, *i),
+                ParamKind::Scalar => match crate::spec_value(&self.spec, *i) {
+                    Some(v) => format!("{v}"),
+                    None => param_name(self.k, *i),
+                },
             },
             ExprKind::Unary(UnOp::Neg, a) => format!("(-{})", self.expr(a)),
             ExprKind::Unary(UnOp::Not, a) => format!("(!{})", self.expr(a)),
@@ -196,16 +201,20 @@ impl Gen<'_> {
                 self.out.line(format!("const {t} gs_start{n} = {s0};"));
                 self.out.line(format!("const {t} gs_stop{n} = {e0};"));
                 self.out.line(format!("const {t} gs_step{n} = {t0};"));
+                // Compteur caché (comme en Python) : la variable reçoit sa valeur à chaque tour et
+                // garde la dernière après la boucle.
+                let it = format!("gs_it{n}");
                 let cond = if start.ty == Scalar::U32 {
-                    format!("gs_step{n} > 0u && {v} < gs_stop{n}")
+                    format!("gs_step{n} > 0u && {it} < gs_stop{n}")
                 } else {
                     format!(
-                        "(gs_step{n} > 0 && {v} < gs_stop{n}) || (gs_step{n} < 0 && {v} > gs_stop{n})"
+                        "(gs_step{n} > 0 && {it} < gs_stop{n}) || (gs_step{n} < 0 && {it} > gs_stop{n})"
                     )
                 };
                 self.out.line(format!(
-                    "for ({v} = gs_start{n}; {cond}; {v} += gs_step{n}) {{"
+                    "for ({t} {it} = gs_start{n}; {cond}; {it} += gs_step{n}) {{"
                 ));
+                self.out.line(format!("    {v} = {it};"));
                 self.indent(body);
                 self.out.line("}");
                 self.out.depth -= 1;
@@ -363,21 +372,32 @@ const HELPERS: &[(Helper, &str)] = &[
 
 /// Génère le kernel OpenCL C. Point d'entrée : `gs_<nom>`.
 pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
-    emit_c(k, false, false)
+    emit_c(k, false, false, &[])
 }
 
 /// Génère le kernel CUDA C (compilé par NVRTC). Point d'entrée : `gs_<nom>` (`extern "C"`).
 pub fn emit_cuda(k: &Kernel) -> Result<KernelSource, CodegenError> {
-    emit_c(k, true, false)
+    emit_c(k, true, false, &[])
 }
 
-/// Variante à indices 64 bits (OpenCL C ou CUDA C), pour un appel dont un tableau dépasse
-/// 2³¹ − 1 éléments ; plus lente (produits 64 bits), elle n'est compilée qu'à la demande.
-pub fn emit_c_wide(k: &Kernel, cuda: bool) -> Result<KernelSource, CodegenError> {
-    emit_c(k, cuda, true)
+/// Variante (OpenCL C ou CUDA C) : indices 64 bits si `wide` (un tableau dépasse 2³¹ − 1 éléments ;
+/// plus lente), et paramètres de `spec` remplacés par des constantes (tailles connues à l'appel : le
+/// compilateur peut dérouler les boucles et garder les tableaux locaux en registres).
+pub fn emit_c_variant(
+    k: &Kernel,
+    cuda: bool,
+    wide: bool,
+    spec: &crate::Spec,
+) -> Result<KernelSource, CodegenError> {
+    emit_c(k, cuda, wide, spec)
 }
 
-fn emit_c(k: &Kernel, cuda: bool, wide: bool) -> Result<KernelSource, CodegenError> {
+fn emit_c(
+    k: &Kernel,
+    cuda: bool,
+    wide: bool,
+    spec: &crate::Spec,
+) -> Result<KernelSource, CodegenError> {
     let entry = format!("gs_{}", crate::sanitize(&k.name));
     let mut g = Gen {
         k,
@@ -388,6 +408,7 @@ fn emit_c(k: &Kernel, cuda: bool, wide: bool) -> Result<KernelSource, CodegenErr
         tmp: 0,
         cuda,
         wide,
+        spec: spec.to_vec(),
     };
     g.out.line(format!(
         "// GPUsync — kernel « {} » ({}, généré)",

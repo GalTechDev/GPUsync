@@ -351,3 +351,30 @@ def test_tableau_plus_grand_qu_un_buffer_wgpu():
     out = np.asarray(y)
     for i in (0, 1, n // 2, n - 2, n - 1):  # extrémités et frontières de blocs
         assert out[i] == (np.float32(i) - 1) / 2
+
+
+@gs.kernel
+def loop_var(x: gs.f32["n", "t"], m: gs.i32) -> (gs.i32["n"], gs.i32["n"], gs.i32["n"]):
+    """Variable de boucle comme en Python : dernière valeur après la boucle, inchangée si aucun tour,
+    et la réaffecter dans le corps ne change pas l'itération."""
+    i = gs.index()
+    k = -1
+    for k in range(x.shape[1]):
+        pass
+    j = -1
+    for j in range(m, 0):  # aucun tour si m >= 0
+        pass
+    count = 0
+    for q in range(x.shape[1]):
+        q = q + 100
+        count += 1
+    return k, j, count
+
+
+@pytest.mark.parametrize("dev", DEVICES)
+def test_variable_de_boucle_comme_en_python(dev):
+    x = np.zeros((5, 7), np.float32)
+    k, j, count = loop_var(x, 3, device=dev)
+    check(k, np.full(5, 6, np.int32))
+    check(j, np.full(5, -1, np.int32))
+    check(count, np.full(5, 7, np.int32))

@@ -183,22 +183,24 @@ impl State<'_, '_> {
                 step,
                 body,
             } => {
+                // Comme en Python : un compteur caché mène la boucle ; la variable reçoit sa valeur
+                // à chaque tour (la modifier dans le corps ne change pas l'itération) et garde la
+                // dernière après la boucle (inchangée si aucun tour).
                 let (start, stop, step) = (self.eval(start)?, self.eval(stop)?, self.eval(step)?);
-                self.locals[*var] = start;
+                let mut it = start;
                 loop {
-                    let v = self.locals[*var];
-                    let go = (gt(step, zero(step.ty())) && lt(v, stop))
-                        || (lt(step, zero(step.ty())) && gt(v, stop));
+                    let go = (gt(step, zero(step.ty())) && lt(it, stop))
+                        || (lt(step, zero(step.ty())) && gt(it, stop));
                     if !go {
                         break;
                     }
+                    self.locals[*var] = it;
                     match self.block(body)? {
                         Flow::Break => break,
                         Flow::Return(r) => return Ok(Flow::Return(r)),
                         Flow::Normal | Flow::Continue => {}
                     }
-                    let v = self.locals[*var];
-                    self.locals[*var] = arith(BinOp::Add, v, step);
+                    it = arith(BinOp::Add, it, step);
                 }
                 Ok(Flow::Normal)
             }

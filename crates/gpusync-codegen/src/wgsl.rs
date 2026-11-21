@@ -51,6 +51,11 @@ struct Gen<'a> {
     k: &'a Kernel,
     out: Out,
     tmp: usize,
+    /// Paramètres remplacés par une constante (spécialisation).
+    spec: Vec<(usize, i64)>,
+    /// Locales de valeur entière constante (affectées une seule fois, au premier niveau, à une
+    /// expression constante : `t = len(ref)` une fois la taille spécialisée).
+    const_locals: Vec<(usize, i64)>,
 }
 
 impl Gen<'_> {
@@ -68,7 +73,10 @@ impl Gen<'_> {
             ExprKind::Local(i) => local_name(self.k, *i),
             ExprKind::Param(i) => match self.k.params[*i].kind {
                 ParamKind::Array => format!("{}[gs_i]", param_name(self.k, *i)),
-                ParamKind::Scalar => param_name(self.k, *i),
+                ParamKind::Scalar => match crate::spec_value(&self.spec, *i) {
+                    Some(v) => format!("{v}i"),
+                    None => param_name(self.k, *i),
+                },
             },
             ExprKind::Unary(UnOp::Neg, a) => format!("(-{})", self.expr(a)),
             ExprKind::Unary(UnOp::Not, a) => format!("(!{})", self.expr(a)),
@@ -134,6 +142,110 @@ impl Gen<'_> {
         self.out.depth += 1;
         self.block(b);
         self.out.depth -= 1;
+    }
+
+    /// Locales affectées une seule fois, au premier niveau du kernel, à une expression constante.
+    fn find_const_locals(&self) -> Vec<(usize, i64)> {
+        fn count(b: &Block, c: &mut Vec<usize>) {
+            for s in b {
+                match s {
+                    Stmt::Assign { local, .. } => c[*local] += 1,
+                    Stmt::For { var, body, .. } => {
+                        c[*var] += 2; // variable de boucle : jamais constante
+                        count(body, c);
+                    }
+                    Stmt::If {
+                        then, otherwise, ..
+                    } => {
+                        count(then, c);
+                        count(otherwise, c);
+                    }
+                    Stmt::While { body, .. } => count(body, c),
+                    _ => {}
+                }
+            }
+        }
+        let mut assigns = vec![0usize; self.k.locals.len()];
+        count(&self.k.body, &mut assigns);
+        let mut out: Vec<(usize, i64)> = Vec::new();
+        for s in &self.k.body {
+            if let Stmt::Assign { local, value } = s {
+                if assigns[*local] == 1 && self.k.locals[*local].len.is_none() {
+                    let g = Gen {
+                        k: self.k,
+                        out: Out {
+                            buf: String::new(),
+                            depth: 0,
+                        },
+                        tmp: 0,
+                        spec: self.spec.clone(),
+                        const_locals: out.clone(),
+                    };
+                    if let Some(v) = g.const_int(value) {
+                        out.push((*local, v));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Valeur entière constante d'une expression (littéral, taille spécialisée, + − ×).
+    fn const_int(&self, e: &Expr) -> Option<i64> {
+        match &e.kind {
+            ExprKind::Const(Const::I32(v)) => Some(*v as i64),
+            ExprKind::Const(Const::U32(v)) => Some(*v as i64),
+            ExprKind::Param(i) => crate::spec_value(&self.spec, *i),
+            ExprKind::Local(l) => crate::spec_value(&self.const_locals, *l),
+            ExprKind::Binary(op, a, b) => {
+                let (x, y) = (self.const_int(a)?, self.const_int(b)?);
+                match op {
+                    BinOp::Add => Some(x + y),
+                    BinOp::Sub => Some(x - y),
+                    BinOp::Mul => Some(x * y),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Valeurs successives de la variable si la boucle peut être déroulée : bornes constantes, au plus
+    /// 64 itérations, boucle la plus intérieure, sans `break`, `continue` ni `return`.
+    fn unrollable(&self, start: &Expr, stop: &Expr, step: &Expr, body: &Block) -> Option<Vec<i64>> {
+        fn plain(b: &Block) -> bool {
+            b.iter().all(|s| match s {
+                Stmt::If {
+                    then, otherwise, ..
+                } => plain(then) && plain(otherwise),
+                Stmt::For { .. }
+                | Stmt::While { .. }
+                | Stmt::Break
+                | Stmt::Continue
+                | Stmt::Return(_) => false,
+                _ => true,
+            })
+        }
+        let (a, b, c) = (
+            self.const_int(start)?,
+            self.const_int(stop)?,
+            self.const_int(step)?,
+        );
+        if c == 0 || !plain(body) {
+            return None;
+        }
+        let values: Vec<i64> = if c > 0 {
+            (a..b).step_by(c as usize).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut x = a;
+            while x > b {
+                v.push(x);
+                x += c;
+            }
+            v
+        };
+        (values.len() <= 64).then_some(values)
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -215,28 +327,46 @@ impl Gen<'_> {
                 step,
                 body,
             } => {
+                let v = local_name(self.k, *var);
+                if let Some(values) = self.unrollable(start, stop, step, body) {
+                    // Boucle déroulée : bornes constantes (après spécialisation), peu d'itérations.
+                    // Les indices des tableaux locaux deviennent constants : Metal et Vulkan peuvent
+                    // les garder en registres (naga réécrit les boucles, ce qui empêche le pilote de
+                    // les dérouler lui-même).
+                    let suffix = if start.ty == Scalar::U32 { "u" } else { "i" };
+                    for val in values {
+                        self.out.line(format!("{v} = {val}{suffix};"));
+                        self.out.line("{");
+                        self.indent(body);
+                        self.out.line("}");
+                    }
+                    return;
+                }
                 let n = self.tmp;
                 self.tmp += 1;
-                let v = local_name(self.k, *var);
                 let (s0, e0, t0) = (self.expr(start), self.expr(stop), self.expr(step));
                 self.out.line("{");
                 self.out.depth += 1;
                 self.out.line(format!("let gs_stop{n} = {e0};"));
                 self.out.line(format!("let gs_step{n} = {t0};"));
-                self.out.line(format!("{v} = {s0};"));
+                // Compteur caché (comme en Python) : la variable reçoit sa valeur à chaque tour et
+                // garde la dernière après la boucle.
+                let it = format!("gs_it{n}");
+                self.out.line(format!("var {it} = {s0};"));
                 let cond = if start.ty == Scalar::U32 {
-                    format!("gs_step{n} > 0u && {v} < gs_stop{n}")
+                    format!("gs_step{n} > 0u && {it} < gs_stop{n}")
                 } else {
                     format!(
-                        "(gs_step{n} > 0i && {v} < gs_stop{n}) || (gs_step{n} < 0i && {v} > gs_stop{n})"
+                        "(gs_step{n} > 0i && {it} < gs_stop{n}) || (gs_step{n} < 0i && {it} > gs_stop{n})"
                     )
                 };
                 self.out.line("loop {");
                 self.out.depth += 1;
                 self.out.line(format!("if (!({cond})) {{ break; }}"));
+                self.out.line(format!("{v} = {it};"));
                 self.block(body);
                 self.out
-                    .line(format!("continuing {{ {v} = {v} + gs_step{n}; }}"));
+                    .line(format!("continuing {{ {it} = {it} + gs_step{n}; }}"));
                 self.out.depth -= 1;
                 self.out.line("}");
                 self.out.depth -= 1;
@@ -315,6 +445,11 @@ pub fn has_f64_params(k: &Kernel) -> bool {
 
 /// Génère le module WGSL. Point d'entrée : `main`.
 pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
+    emit_wgsl_variant(k, &[])
+}
+
+/// Variante dont les paramètres de `spec` (tailles i32 connues à l'appel) sont des constantes.
+pub fn emit_wgsl_variant(k: &Kernel, spec: &crate::Spec) -> Result<KernelSource, CodegenError> {
     let req = k.requirements();
     if let Some(op) = req.f64_math_op {
         return Err(CodegenError(format!(
@@ -328,7 +463,10 @@ pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
             depth: 0,
         },
         tmp: 0,
+        spec: spec.to_vec(),
+        const_locals: Vec::new(),
     };
+    g.const_locals = g.find_const_locals();
     g.out
         .line(format!("// GPUsync — kernel « {} » (WGSL, généré)", k.name));
     let mut binding = 0;

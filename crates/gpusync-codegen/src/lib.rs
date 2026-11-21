@@ -14,8 +14,16 @@ use std::collections::BTreeSet;
 
 use gpusync_ir::*;
 
-pub use opencl::{emit_c_wide, emit_cuda, emit_opencl};
-pub use wgsl::{WGSL_WORKGROUP_SIZE, emit_wgsl, has_f64_params};
+pub use opencl::{emit_c_variant, emit_cuda, emit_opencl};
+pub use wgsl::{WGSL_WORKGROUP_SIZE, emit_wgsl, emit_wgsl_variant, has_f64_params};
+
+/// Paramètres scalaires remplacés par une constante dans le code généré (spécialisation, §5.4) :
+/// (indice du paramètre, valeur). Le paramètre reste dans la signature, inutilisé.
+pub type Spec = [(usize, i64)];
+
+pub(crate) fn spec_value(spec: &Spec, i: usize) -> Option<i64> {
+    spec.iter().find(|(p, _)| *p == i).map(|(_, v)| *v)
+}
 
 /// Code généré, prêt à compiler.
 #[derive(Debug, Clone, PartialEq)]
