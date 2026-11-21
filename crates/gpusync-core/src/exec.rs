@@ -9,8 +9,8 @@
 //! Dans tous les modes, la mémoire hôte en plus est bornée (anneau de 3 blocs) : aucune copie
 //! complète des données n'est faite en RAM.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 
 use gpusync_backend_cuda::{CuBuffer, CuEvent};
 use gpusync_backend_opencl::{ClBuffer, ClDevice, ClEvent, ClKernel, wait};
@@ -71,7 +71,12 @@ impl Mode {
 /// Où se trouve le résultat d'un kernel.
 pub enum Storage {
     /// Mode Direct (OpenCL, mémoire unifiée) : blocs adossés à la mémoire hôte `ptr`.
-    ClDirect { bufs: Vec<ClBuffer>, ptr: *mut u8 },
+    /// `done` : fin du dernier lancement (un autre kernel peut lire le résultat sans attendre l'hôte).
+    ClDirect {
+        bufs: Vec<ClBuffer>,
+        ptr: *mut u8,
+        done: Option<Arc<ClEvent>>,
+    },
     /// Mode Résident (OpenCL) : en mémoire du périphérique ; `done` signale la fin du calcul.
     Cl { buf: ClBuffer, done: Arc<ClEvent> },
     /// Mode Résident (CUDA).
@@ -123,7 +128,7 @@ impl DeviceArray {
         let n = self.bytes();
         let chunk = transfer_limits().chunk_bytes;
         match (&self.storage, &self.device) {
-            (Storage::ClDirect { bufs, ptr }, Device::Cl(d)) => {
+            (Storage::ClDirect { bufs, ptr, .. }, Device::Cl(d)) => {
                 for b in bufs {
                     d.sync_host(b).map_err(dev_err)?;
                 }
@@ -271,10 +276,17 @@ pub unsafe fn launch(
         idx_staged.push(None);
     }
     let mut ins: Vec<In> = Vec::with_capacity(inputs.len());
-    for (i, st) in inputs.iter().zip(&idx_staged) {
+    let mut direct_input = false;
+    for ((i, st), (pi, _)) in inputs.iter().zip(&idx_staged).zip(k.array_params()) {
         ins.push(match (i, st) {
             (_, Some(s)) => In::Host(staged[*s].as_ptr(), staged[*s].len()),
             (Input::Host { ptr, bytes }, None) => In::Host(*ptr, *bytes),
+            // Résultat Direct de ce périphérique, d'un seul bloc : son buffer resert tel quel, la file
+            // ordonnant les calculs (sans attendre ici sa fin ni ré-envelopper sa mémoire).
+            (Input::Device(a), None) if !k.writable().contains(&pi) && reusable_direct(a, dev) => {
+                direct_input = true;
+                In::Dev(a)
+            }
             (Input::Device(a), None) => match a.host_ptr() {
                 Some(p) => {
                     unsafe { a.read_into(p)? }; // synchronisation seulement
@@ -305,7 +317,7 @@ pub unsafe fn launch(
         let rows = Rows::new(k, scalars, n, &ins, &out_elems);
         match (dev, &imp) {
             (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
-            (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
+            (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory && all_host(&ins) => unsafe {
                 rows_cl_direct(d, ck, k, &rows, &ins, scalars, outs, &limits)
             },
             (Device::Cl(d), Imp::Cl(ck)) => unsafe {
@@ -360,7 +372,7 @@ pub unsafe fn launch(
     } else {
         match (dev, &imp) {
             (Device::Cpu, Imp::Cpu) => unsafe { run_cpu(k, &ins, scalars, n, outs) },
-            (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory => unsafe {
+            (Device::Cl(d), Imp::Cl(ck)) if d.info.unified_memory && all_host(&ins) => unsafe {
                 cl_direct(d, ck, k, &ins, &arrays, scalars, n, outs, &limits)
             },
             (Device::Cl(d), Imp::Cl(ck)) => {
@@ -396,12 +408,12 @@ pub unsafe fn launch(
                                 ptr: *p,
                                 elem: ty.size(),
                             }),
-                            In::Dev(a) => match &a.storage {
-                                Storage::Wg(b) => Ok(FluxIn::Dev {
+                            In::Dev(a) => match wg_buf(&a.storage) {
+                                Some(b) => Ok(FluxIn::Dev {
                                     buf: b,
                                     elem: ty.size(),
                                 }),
-                                _ => Err(other_kind()),
+                                None => Err(other_kind()),
                             },
                         })
                         .collect::<R<_>>()?;
@@ -430,6 +442,8 @@ pub unsafe fn launch(
         }
     };
     let (storages, mode, mut host_backed_io) = result?;
+    // Le calcul lit la mémoire hôte d'un résultat Direct : attendre sa fin avant de la libérer.
+    host_backed_io |= direct_input;
     // Entrées rapatriées d'un autre périphérique : copies locales libérées au retour.
     if !staged.is_empty() && host_backed_io {
         dev.finish()?;
@@ -520,6 +534,40 @@ fn wide_index_limit() -> u64 {
 
 /// Stockage de chaque sortie, mode retenu, buffers encore adossés à la mémoire hôte.
 type Planned = R<(Vec<Storage>, Mode, bool)>;
+
+/// Buffer wgpu d'un résultat lisible par un autre kernel : Résident, ou Direct d'un seul bloc (le
+/// buffer `NoCopy` déjà créé sur la mémoire de l'hôte resert tel quel ; la file unique de wgpu
+/// ordonne les deux calculs, sans attente de l'hôte).
+fn wg_buf(s: &Storage) -> Option<&WgBuffer> {
+    match s {
+        Storage::Wg(b) => Some(b),
+        Storage::WgDirect { bufs, .. } => bufs.first(),
+        _ => None,
+    }
+}
+
+/// Résultat Direct de `dev` couvert par un seul buffer (tout le tableau) : réutilisable comme
+/// entrée d'un kernel sur le même périphérique.
+fn reusable_direct(a: &DeviceArray, dev: &Device) -> bool {
+    if a.device.id() != dev.id() {
+        return false;
+    }
+    match &a.storage {
+        Storage::WgDirect { bufs, .. } => bufs.first().is_some_and(|b| b.bytes >= a.bytes()),
+        Storage::ClDirect {
+            bufs,
+            done: Some(_),
+            ..
+        } => bufs.first().is_some_and(|b| b.bytes >= a.bytes()),
+        _ => false,
+    }
+}
+
+/// Entrées toutes en mémoire hôte : mode Direct possible sur mémoire unifiée. Sinon (chaîne de
+/// kernels), les résultats restent dans des buffers du périphérique réutilisés (mode Résident).
+fn all_host(ins: &[In]) -> bool {
+    ins.iter().all(|i| matches!(i, In::Host(..)))
+}
 
 fn other_kind() -> CoreError {
     CoreError::Device("entrée sur un autre type de périphérique".into())
@@ -736,6 +784,7 @@ unsafe fn cl_direct(
         .min(max_alloc);
     let chunk = (chunk_bytes / elem_max(arrays, &out_elems)).clamp(1, u32::MAX as usize);
     let mut out_bufs: Vec<Vec<ClBuffer>> = outs.iter().map(|_| Vec::new()).collect();
+    let mut last: Option<ClEvent> = None;
     for (start, len) in blocks(n, chunk) {
         let mut bufs = Vec::new();
         for (i, ty) in ins.iter().zip(arrays) {
@@ -753,23 +802,30 @@ unsafe fn cl_direct(
         }
         let refs: Vec<&ClBuffer> = bufs.iter().collect();
         let orefs: Vec<&ClBuffer> = obs.iter().collect();
-        Gpu::launch(
-            d,
-            ck,
-            &gargs(k, &refs, scalars, &orefs, len as u32),
-            len,
-            &[],
-        )
-        .map_err(dev_err)?;
+        last = Some(
+            Gpu::launch(
+                d,
+                ck,
+                &gargs(k, &refs, scalars, &orefs, len as u32),
+                len,
+                &[],
+            )
+            .map_err(dev_err)?,
+        );
         for (dst, ob) in out_bufs.iter_mut().zip(obs) {
             dst.push(ob);
         }
     }
+    let done = last.map(Arc::new);
     Ok((
         out_bufs
             .into_iter()
             .zip(outs)
-            .map(|(bufs, ptr)| Storage::ClDirect { bufs, ptr: *ptr })
+            .map(|(bufs, ptr)| Storage::ClDirect {
+                bufs,
+                ptr: *ptr,
+                done: done.clone(),
+            })
             .collect(),
         Mode::Direct,
         true,
@@ -880,10 +936,7 @@ unsafe fn wg_resident(
         .iter()
         .map(|i| match i {
             In::Host(..) => Ok(own.next().unwrap()),
-            In::Dev(a) => match &a.storage {
-                Storage::Wg(b) => Ok(b),
-                _ => Err(other_kind()),
-            },
+            In::Dev(a) => wg_buf(&a.storage).ok_or_else(other_kind),
         })
         .collect::<R<_>>()?;
     let obufs: Vec<WgBuffer> = out_elems
@@ -1357,9 +1410,36 @@ struct Pacer {
     rate: Option<f64>,
     calibrated: bool,
     last: usize,
+    /// (kernel, périphérique) et cases par ligne : le débit est retenu d'un appel à l'autre.
+    key: Option<((usize, usize), usize)>,
 }
 
+/// Débits mesurés (cases par seconde, fiable ?) par (kernel, périphérique) : sans eux, chaque appel
+/// chronométrerait de nouveau ses premiers lancements, en attendant leur fin (aucun recouvrement
+/// entre appels successifs, ex. une boucle de 240 étages de NTT).
+type RateMap = HashMap<(usize, usize), (f64, bool)>;
+
+static RATES: std::sync::LazyLock<Mutex<RateMap>> = std::sync::LazyLock::new(Default::default);
+
 impl Pacer {
+    fn for_kernel<D>(k: &Kernel, d: &D, rest: usize) -> Pacer {
+        let key = (k as *const Kernel as usize, d as *const D as usize);
+        let rest = rest.max(1);
+        let known = RATES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied();
+        Pacer {
+            rate: known.map(|(cells, _)| cells / rest as f64),
+            calibrated: known.is_some_and(|(_, c)| c),
+            last: known.map_or(0, |(cells, _)| {
+                ((cells / rest as f64) * MIN_TIMED_S) as usize
+            }),
+            key: Some((key, rest)),
+        }
+    }
+
     /// Calcule les lignes `[a, b)` ; `step(première ligne, lignes, attendre la fin)`.
     fn run(
         &mut self,
@@ -1393,6 +1473,18 @@ impl Pacer {
             s += len;
         }
         Ok(())
+    }
+}
+
+impl Drop for Pacer {
+    fn drop(&mut self) {
+        if let (Some((key, rest)), Some(r)) = (self.key, self.rate) {
+            let mut g = RATES.lock().unwrap_or_else(|e| e.into_inner());
+            // Une mesure fiable n'est pas remplacée par une moins fiable.
+            if self.calibrated || !g.get(&key).is_some_and(|(_, c)| *c) {
+                g.insert(key, (r * rest as f64, self.calibrated));
+            }
+        }
     }
 }
 
@@ -1434,8 +1526,9 @@ unsafe fn rows_cl_direct(
             Some(unsafe { d.wrap_host(*p as *mut u8, *bytes) }.map_err(dev_err)?)
         });
     }
-    let mut pacer = Pacer::default();
+    let mut pacer = Pacer::for_kernel(k, d, rows.rest);
     let mut out_bufs: Vec<Vec<ClBuffer>> = outs.iter().map(|_| Vec::new()).collect();
+    let mut last: Option<ClEvent> = None;
     for (r0, len) in rows.blocks(cap / rows.max_row()) {
         let mut parts: Vec<Option<ClBuffer>> = Vec::new();
         for (i, input) in ins.iter().enumerate() {
@@ -1474,6 +1567,7 @@ unsafe fn rows_cl_direct(
             if sync {
                 wait(&e).map_err(dev_err)?;
             }
+            last = Some(e);
             Ok(())
         })?;
         for (dst, ob) in out_bufs.iter_mut().zip(obs) {
@@ -1481,16 +1575,22 @@ unsafe fn rows_cl_direct(
         }
         // Les buffers d'entrée du bloc peuvent être libérés : la file garde ses références.
     }
+    let done = last.map(Arc::new);
     let mut storages: Vec<Storage> = out_bufs
         .into_iter()
         .zip(outs)
-        .map(|(bufs, ptr)| Storage::ClDirect { bufs, ptr: *ptr })
+        .map(|(bufs, ptr)| Storage::ClDirect {
+            bufs,
+            ptr: *ptr,
+            done: done.clone(),
+        })
         .collect();
     // gs.Out : importés entiers, ils sont eux-mêmes les résultats.
     for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
         storages.push(Storage::ClDirect {
             bufs: whole[i].take().into_iter().collect(),
             ptr: host_ptr(&ins[i]),
+            done: done.clone(),
         });
     }
     // Les autres imports entiers doivent survivre aux calculs : rattachés au premier résultat.
@@ -1549,7 +1649,7 @@ unsafe fn rows_q<G: Gpu>(
             In::Host(..) => unreachable!(),
         }
     };
-    let mut pacer = Pacer::default();
+    let mut pacer = Pacer::for_kernel(k, d, rows.rest);
 
     if fits {
         let mut refs: Vec<&G::Buf> = Vec::new();
@@ -1799,7 +1899,7 @@ unsafe fn rows_wg_direct(
         });
     }
     let refused = || CoreError::Device("Metal a refusé une partie de la mémoire hôte".into());
-    let mut pacer = Pacer::default();
+    let mut pacer = Pacer::for_kernel(k, d, rows.rest);
     let mut out_bufs: Vec<Vec<WgBuffer>> = outs.iter().map(|_| Vec::new()).collect();
     let mut keep: Vec<WgBuffer> = Vec::new();
     for (r0, len) in rows.blocks(br) {
@@ -1916,14 +2016,11 @@ unsafe fn rows_wg(
     }
     let dev_buf = |i: usize| -> R<&WgBuffer> {
         match &ins[i] {
-            In::Dev(a) => match &a.storage {
-                Storage::Wg(b) => Ok(b),
-                _ => Err(other_kind()),
-            },
+            In::Dev(a) => wg_buf(&a.storage).ok_or_else(other_kind),
             In::Host(..) => unreachable!(),
         }
     };
-    let mut pacer = Pacer::default();
+    let mut pacer = Pacer::for_kernel(k, d, rows.rest);
     let mut launch = |refs: &[&WgBuffer],
                       orefs: &[&WgBuffer],
                       r0: usize,

@@ -167,6 +167,12 @@ impl Gpu for ClDevice {
     fn resident(s: &Storage) -> Option<(&ClBuffer, &ClEvent)> {
         match s {
             Storage::Cl { buf, done } => Some((buf, done)),
+            // Résultat Direct d'un seul bloc (vérifié par l'appelant) : son buffer resert tel quel.
+            Storage::ClDirect {
+                bufs,
+                done: Some(done),
+                ..
+            } => bufs.first().map(|b| (b, &**done)),
             _ => None,
         }
     }

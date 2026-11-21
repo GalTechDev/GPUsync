@@ -99,8 +99,8 @@ Chaque appel est exécuté dans le mode le plus économe (`y.mode`) :
 
 | Mode | Quand | Mémoire en plus |
 |---|---|---|
-| `direct` | GPU à mémoire unifiée (Metal, OpenCL sur Apple Silicon et GPU intégrés) : aucune copie | ≈ 0 |
-| `resident` | GPU dédié, l'appel tient dans le budget (`gs.set_memory_budget`, 50 % de la VRAM) | bornée |
+| `direct` | GPU à mémoire unifiée (Metal, OpenCL sur Apple Silicon et GPU intégrés), entrées NumPy : aucune copie | ≈ 0 |
+| `resident` | GPU dédié, l'appel tient dans le budget (`gs.set_memory_budget`, 50 % de la VRAM) ; ou mémoire unifiée, une entrée est le résultat d'un kernel (chaîne `y = f(y)` : buffers du GPU réutilisés, copie à la lecture) | bornée |
 | `flux` | au-delà : par blocs, transferts recouverts par le calcul | bornée (~0,3 à 1,2 Gio) |
 
 Les erreurs disent ce qui ne va pas, où et comment corriger :
