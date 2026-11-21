@@ -625,6 +625,9 @@ fn wg_params(k: &Kernel, scalars: &[Const]) -> R<(Vec<u32>, Vec<f64>)> {
             Const::F32(v) => w.push(v.to_bits()),
             Const::Bool(v) => w.push(v as u32),
             Const::F64(v) => f.push(v),
+            // Entier 64 bits : deux mots, poids faible puis fort (relus par le code WGSL).
+            Const::I64(v) => w.extend([v as u64 as u32, ((v as u64) >> 32) as u32]),
+            Const::U64(v) => w.extend([v as u32, (v >> 32) as u32]),
         }
     }
     Ok((w, f))
@@ -637,6 +640,8 @@ fn gscalar<'a, B>(c: Const) -> GArg<'a, B> {
         Const::F32(v) => GArg::F32(v),
         Const::F64(v) => GArg::F64(v),
         Const::Bool(v) => GArg::I32(v as i32),
+        Const::I64(v) => GArg::I64(v),
+        Const::U64(v) => GArg::U64(v),
     }
 }
 

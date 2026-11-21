@@ -90,6 +90,7 @@ pub(crate) fn enumerate() -> Result<Vec<(sys::CUdevice, DeviceInfo)>, BackendErr
                 // Tous les GPU NVIDIA calculent en f64, fonctions mathématiques comprises.
                 f64: true,
                 f64_math: true,
+                int64: true,
                 // Jetson : mémoire partagée, mais traitée comme un GPU dédié (pas de mode Direct à M6).
                 unified_memory: false,
                 memory_bytes: Some(mem as u64),

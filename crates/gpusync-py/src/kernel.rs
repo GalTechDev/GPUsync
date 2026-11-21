@@ -140,6 +140,7 @@ impl KernelIR {
         d.set_item("f64", r.f64)?;
         d.set_item("f64_math", r.f64_math)?;
         d.set_item("f64_math_op", r.f64_math_op)?;
+        d.set_item("int64", r.int64)?;
         Ok(d.unbind())
     }
 
@@ -200,8 +201,8 @@ impl KernelIR {
                             .unwrap_or_default()
                     ))
                 })?),
-                Scalar::I32 | Scalar::U32 => {
-                    let i: i64 = v.extract().map_err(|_| {
+                Scalar::I32 | Scalar::U32 | Scalar::I64 | Scalar::U64 => {
+                    let i: i128 = v.extract().map_err(|_| {
                         TypeMismatch::new_err(format!(
                             "paramètre '{}' ({}) : entier attendu, reçu {}",
                             p.name,
@@ -209,19 +210,17 @@ impl KernelIR {
                             v.repr().map(|r| r.to_string()).unwrap_or_default()
                         ))
                     })?;
+                    let range = || {
+                        TypeMismatch::new_err(format!(
+                            "paramètre '{}' : {i} hors de la plage de {}",
+                            p.name, p.ty
+                        ))
+                    };
                     match p.ty {
-                        Scalar::I32 => Const::I32(i32::try_from(i).map_err(|_| {
-                            TypeMismatch::new_err(format!(
-                                "paramètre '{}' : {i} hors de la plage de i32",
-                                p.name
-                            ))
-                        })?),
-                        _ => Const::U32(u32::try_from(i).map_err(|_| {
-                            TypeMismatch::new_err(format!(
-                                "paramètre '{}' : {i} hors de la plage de u32",
-                                p.name
-                            ))
-                        })?),
+                        Scalar::I32 => Const::I32(i32::try_from(i).map_err(|_| range())?),
+                        Scalar::U32 => Const::U32(u32::try_from(i).map_err(|_| range())?),
+                        Scalar::I64 => Const::I64(i64::try_from(i).map_err(|_| range())?),
+                        _ => Const::U64(u64::try_from(i).map_err(|_| range())?),
                     }
                 }
                 Scalar::Bool => Const::Bool(v.is_truthy()?),

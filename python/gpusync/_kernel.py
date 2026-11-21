@@ -116,7 +116,9 @@ class Kernel:
         if capable(_by_id(planned), self._req):
             return planned, None
         plan = _by_id(planned)
-        if self._req["f64_math"] and plan.f64:
+        if self._req.get("int64") and not getattr(plan, "int64", True):
+            what = "le calcul en entiers 64 bits (gs.i64, gs.u64)"
+        elif self._req["f64_math"] and plan.f64:
             what = f"{self._req['f64_math_op']} en f64"
         else:
             what = "f64"

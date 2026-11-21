@@ -30,6 +30,8 @@ pub enum Scalar {
     U32,
     F32,
     F64,
+    I64,
+    U64,
 }
 
 impl Scalar {
@@ -40,6 +42,8 @@ impl Scalar {
             Scalar::U32 => "u32",
             Scalar::F32 => "f32",
             Scalar::F64 => "f64",
+            Scalar::I64 => "i64",
+            Scalar::U64 => "u64",
         }
     }
 
@@ -50,6 +54,8 @@ impl Scalar {
             "u32" => Scalar::U32,
             "f32" => Scalar::F32,
             "f64" => Scalar::F64,
+            "i64" => Scalar::I64,
+            "u64" => Scalar::U64,
             _ => return None,
         })
     }
@@ -59,7 +65,17 @@ impl Scalar {
     }
 
     pub fn is_int(self) -> bool {
-        matches!(self, Scalar::I32 | Scalar::U32)
+        matches!(self, Scalar::I32 | Scalar::U32 | Scalar::I64 | Scalar::U64)
+    }
+
+    /// Entier non signé (u32, u64).
+    pub fn is_unsigned(self) -> bool {
+        matches!(self, Scalar::U32 | Scalar::U64)
+    }
+
+    /// Entier 64 bits (demande la capacité `int64` du périphérique).
+    pub fn is_int64(self) -> bool {
+        matches!(self, Scalar::I64 | Scalar::U64)
     }
 
     pub fn is_numeric(self) -> bool {
@@ -71,7 +87,7 @@ impl Scalar {
         match self {
             Scalar::Bool => 1,
             Scalar::I32 | Scalar::U32 | Scalar::F32 => 4,
-            Scalar::F64 => 8,
+            Scalar::F64 | Scalar::I64 | Scalar::U64 => 8,
         }
     }
 }
@@ -90,6 +106,8 @@ pub enum Const {
     U32(u32),
     F32(f32),
     F64(f64),
+    I64(i64),
+    U64(u64),
 }
 
 impl Const {
@@ -100,6 +118,8 @@ impl Const {
             Const::U32(_) => Scalar::U32,
             Const::F32(_) => Scalar::F32,
             Const::F64(_) => Scalar::F64,
+            Const::I64(_) => Scalar::I64,
+            Const::U64(_) => Scalar::U64,
         }
     }
 }
@@ -363,6 +383,8 @@ pub struct Requirements {
     pub f64_math: bool,
     /// Première opération qui exige `f64_math`, pour les messages (ex. « gs.exp »).
     pub f64_math_op: Option<&'static str>,
+    /// Le kernel manipule des entiers 64 bits (i64, u64).
+    pub int64: bool,
 }
 
 impl Intrinsic {
@@ -407,8 +429,12 @@ impl Kernel {
             || self.params.iter().any(|p| p.ty == Scalar::F64)
             || self.locals.iter().any(|l| l.ty == Scalar::F64);
         let mut f64_math_op: Option<&'static str> = None;
+        let mut int64 = self.outputs.iter().any(|t| t.is_int64())
+            || self.params.iter().any(|p| p.ty.is_int64())
+            || self.locals.iter().any(|l| l.ty.is_int64());
         visit_exprs(&self.body, &mut |e| {
             f64 |= e.ty == Scalar::F64;
+            int64 |= e.ty.is_int64();
             let op = match &e.kind {
                 ExprKind::Call(f, args)
                     if args.first().is_some_and(|a| a.ty == Scalar::F64)
@@ -427,6 +453,7 @@ impl Kernel {
             f64,
             f64_math: f64_math_op.is_some(),
             f64_math_op,
+            int64,
         }
     }
 
@@ -526,6 +553,32 @@ pub fn floordiv_i32(a: i32, b: i32) -> i32 {
 
 /// Reste entier « à la Python » (signe du diviseur), diviseur nul → 0.
 pub fn mod_i32(a: i32, b: i32) -> i32 {
+    if b == 0 {
+        return 0;
+    }
+    let r = a.wrapping_rem(b);
+    if r != 0 && ((r < 0) != (b < 0)) {
+        r.wrapping_add(b)
+    } else {
+        r
+    }
+}
+
+/// Quotient entier 64 bits « à la Python » (arrondi vers −∞), diviseur nul → 0.
+pub fn floordiv_i64(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0;
+    }
+    let q = a.wrapping_div(b);
+    if a.wrapping_rem(b) != 0 && ((a < 0) != (b < 0)) {
+        q.wrapping_sub(1)
+    } else {
+        q
+    }
+}
+
+/// Reste entier 64 bits « à la Python » (signe du diviseur), diviseur nul → 0.
+pub fn mod_i64(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 0;
     }

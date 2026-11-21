@@ -15,6 +15,8 @@ fn w_type(t: Scalar) -> &'static str {
         Scalar::U32 => "u32",
         Scalar::F32 => "f32",
         Scalar::F64 => "f64",
+        Scalar::I64 => "i64",
+        Scalar::U64 => "u64",
     }
 }
 
@@ -44,6 +46,10 @@ fn lit(c: Const) -> String {
         .into(),
         Const::F64(v) if v < 0.0 => format!("({}lf)", float_repr(format!("{v:?}"))),
         Const::F64(v) => format!("{}lf", float_repr(format!("{v:?}"))),
+        Const::I64(i64::MIN) => "(-9223372036854775807li - 1li)".into(),
+        Const::I64(v) if v < 0 => format!("({v}li)"),
+        Const::I64(v) => format!("{v}li"),
+        Const::U64(v) => format!("{v}lu"),
     }
 }
 
@@ -85,6 +91,10 @@ impl Gen<'_> {
                 match (op, a.ty) {
                     (BinOp::FloorDiv, Scalar::I32) => format!("gs_floordiv_i32({x}, {y})"),
                     (BinOp::FloorDiv, Scalar::U32) => format!("gs_floordiv_u32({x}, {y})"),
+                    (BinOp::FloorDiv, Scalar::I64) => format!("gs_floordiv_i64({x}, {y})"),
+                    (BinOp::FloorDiv, Scalar::U64) => format!("gs_floordiv_u64({x}, {y})"),
+                    (BinOp::Mod, Scalar::I64) => format!("gs_mod_i64({x}, {y})"),
+                    (BinOp::Mod, Scalar::U64) => format!("gs_mod_u64({x}, {y})"),
                     (BinOp::FloorDiv, _) => format!("floor({x} / {y})"),
                     (BinOp::Mod, Scalar::I32) => format!("gs_mod_i32({x}, {y})"),
                     (BinOp::Mod, Scalar::U32) => format!("gs_mod_u32({x}, {y})"),
@@ -121,7 +131,7 @@ impl Gen<'_> {
                 let a: Vec<String> = args.iter().map(|x| self.expr(x)).collect();
                 match f {
                     Intrinsic::Pow => format!("gs_pow_f32({}, {})", a[0], a[1]),
-                    Intrinsic::Abs if args[0].ty == Scalar::U32 => a[0].clone(),
+                    Intrinsic::Abs if args[0].ty.is_unsigned() => a[0].clone(),
                     _ => format!("{}({})", intrinsic_name(*f), a.join(", ")),
                 }
             }
@@ -422,6 +432,22 @@ const HELPERS: &[(Helper, &str)] = &[
         "fn gs_mod_u32(a: u32, b: u32) -> u32 { if (b == 0u) { return 0u; } return a % b; }",
     ),
     (
+        Helper::FloorDivI64,
+        "fn gs_floordiv_i64(a: i64, b: i64) -> i64 {\n    if (b == 0li) { return 0li; }\n    var q = a / b;\n    if ((a % b != 0li) && ((a < 0li) != (b < 0li))) { q = q - 1li; }\n    return q;\n}",
+    ),
+    (
+        Helper::FloorDivU64,
+        "fn gs_floordiv_u64(a: u64, b: u64) -> u64 { if (b == 0lu) { return 0lu; } return a / b; }",
+    ),
+    (
+        Helper::ModI64,
+        "fn gs_mod_i64(a: i64, b: i64) -> i64 {\n    if (b == 0li) { return 0li; }\n    var r = a % b;\n    if (r != 0li && ((r < 0li) != (b < 0li))) { r = r + b; }\n    return r;\n}",
+    ),
+    (
+        Helper::ModU64,
+        "fn gs_mod_u64(a: u64, b: u64) -> u64 { if (b == 0lu) { return 0lu; } return a % b; }",
+    ),
+    (
         Helper::ModF32,
         "fn gs_mod_f32(a: f32, b: f32) -> f32 {\n    var r = a % b;\n    if (r != 0.0f && ((r < 0.0f) != (b < 0.0f))) { r = r + b; }\n    return r;\n}",
     ),
@@ -436,6 +462,29 @@ const HELPERS: &[(Helper, &str)] = &[
     ),
 ];
 
+/// Metal : division euclidienne 64 bits par décalages et soustractions (64 tours), sans `/` ni `%`.
+const METAL_U64_DIVREM: &str = "fn gs_udiv_u64(a: u64, b: u64) -> u64 {\n    if (b == 0lu) { return 0lu; }\n    var q = 0lu;\n    var r = 0lu;\n    for (var i = 63i; i >= 0i; i = i - 1i) {\n        r = (r << 1u) | ((a >> u32(i)) & 1lu);\n        if (r >= b) { r = r - b; q = q | (1lu << u32(i)); }\n    }\n    return q;\n}\nfn gs_urem_u64(a: u64, b: u64) -> u64 {\n    if (b == 0lu) { return 0lu; }\n    var r = 0lu;\n    for (var i = 63i; i >= 0i; i = i - 1i) {\n        r = (r << 1u) | ((a >> u32(i)) & 1lu);\n        if (r >= b) { r = r - b; }\n    }\n    return r;\n}\nfn gs_uabs_i64(a: i64) -> u64 {\n    if (a < 0li) { return u64(0li - a); }\n    return u64(a);\n}";
+
+/// Metal : mêmes fonctions que `HELPERS` (sémantique de Python), sur `gs_udiv_u64` / `gs_urem_u64`.
+const METAL_INT64: &[(Helper, &str)] = &[
+    (
+        Helper::FloorDivI64,
+        "fn gs_floordiv_i64(a: i64, b: i64) -> i64 {\n    if (b == 0li) { return 0li; }\n    var q = i64(gs_udiv_u64(gs_uabs_i64(a), gs_uabs_i64(b)));\n    let r = gs_urem_u64(gs_uabs_i64(a), gs_uabs_i64(b));\n    if ((a < 0li) != (b < 0li)) {\n        q = 0li - q;\n        if (r != 0lu) { q = q - 1li; }\n    }\n    return q;\n}",
+    ),
+    (
+        Helper::FloorDivU64,
+        "fn gs_floordiv_u64(a: u64, b: u64) -> u64 { return gs_udiv_u64(a, b); }",
+    ),
+    (
+        Helper::ModI64,
+        "fn gs_mod_i64(a: i64, b: i64) -> i64 {\n    if (b == 0li) { return 0li; }\n    var r = i64(gs_urem_u64(gs_uabs_i64(a), gs_uabs_i64(b)));\n    if (a < 0li) { r = 0li - r; }\n    if (r != 0li && ((r < 0li) != (b < 0li))) { r = r + b; }\n    return r;\n}",
+    ),
+    (
+        Helper::ModU64,
+        "fn gs_mod_u64(a: u64, b: u64) -> u64 { return gs_urem_u64(a, b); }",
+    ),
+];
+
 /// Le kernel a-t-il des paramètres scalaires f64 (binding `gs_fparams`) ?
 pub fn has_f64_params(k: &Kernel) -> bool {
     k.params
@@ -445,11 +494,17 @@ pub fn has_f64_params(k: &Kernel) -> bool {
 
 /// Génère le module WGSL. Point d'entrée : `main`.
 pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
-    emit_wgsl_variant(k, &[])
+    emit_wgsl_variant(k, &[], false)
 }
 
 /// Variante dont les paramètres de `spec` (tailles i32 connues à l'appel) sont des constantes.
-pub fn emit_wgsl_variant(k: &Kernel, spec: &crate::Spec) -> Result<KernelSource, CodegenError> {
+/// `metal` : division et reste entiers 64 bits sans les opérateurs `/` et `%` (naga 30 traduit ceux-ci
+/// en MSL invalide : « call to 'select' is ambiguous »).
+pub fn emit_wgsl_variant(
+    k: &Kernel,
+    spec: &crate::Spec,
+    metal: bool,
+) -> Result<KernelSource, CodegenError> {
     let req = k.requirements();
     if let Some(op) = req.f64_math_op {
         return Err(CodegenError(format!(
@@ -507,16 +562,30 @@ pub fn emit_wgsl_variant(k: &Kernel, spec: &crate::Spec) -> Result<KernelSource,
         ));
     }
     let used = helpers(k);
+    let int64_div = [
+        Helper::FloorDivI64,
+        Helper::FloorDivU64,
+        Helper::ModI64,
+        Helper::ModU64,
+    ];
+    if metal && int64_div.iter().any(|h| used.contains(h)) {
+        g.out.line(METAL_U64_DIVREM);
+    }
     for (h, code) in HELPERS {
         if used.contains(h) {
-            g.out.line(*code);
+            match METAL_INT64.iter().find(|(m, _)| metal && m == h) {
+                Some((_, alt)) => g.out.line(*alt),
+                None => g.out.line(*code),
+            }
         }
     }
-    let n_scalars = k
+    // Mots u32 des scalaires (deux par entier 64 bits : poids faible, puis fort), puis n.
+    let n_scalars: usize = k
         .params
         .iter()
         .filter(|p| p.kind == ParamKind::Scalar && p.ty != Scalar::F64)
-        .count();
+        .map(|p| if p.ty.is_int64() { 2 } else { 1 })
+        .sum();
     g.out
         .line(format!("@compute @workgroup_size({WGSL_WORKGROUP_SIZE})"));
     g.out.line("fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {");
@@ -537,6 +606,15 @@ pub fn emit_wgsl_variant(k: &Kernel, spec: &crate::Spec) -> Result<KernelSource,
                 Scalar::U32 => {
                     word += 1;
                     format!("gs_params[{}]", word - 1)
+                }
+                t @ (Scalar::I64 | Scalar::U64) => {
+                    word += 2;
+                    let w = w_type(t);
+                    format!(
+                        "(({w}(gs_params[{}]) << 32u) | {w}(gs_params[{}]))",
+                        word - 1,
+                        word - 2
+                    )
                 }
                 t => {
                     word += 1;

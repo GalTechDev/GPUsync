@@ -68,7 +68,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
         if !t.is_numeric() {
             return Err(err(
                 ErrorKind::Type,
-                "le type de retour doit être numérique (f32, f64, i32, u32)".into(),
+                "le type de retour doit être numérique (f32, f64, i32, u32, i64, u64)".into(),
                 None,
             ));
         }
@@ -104,7 +104,9 @@ pub fn lower(spec: &J) -> R<Kernel> {
         if !ty.is_numeric() {
             return Err(err(
                 ErrorKind::Type,
-                format!("paramètre '{pname}' : type {ty} non supporté (f32, f64, i32, u32)"),
+                format!(
+                    "paramètre '{pname}' : type {ty} non supporté (f32, f64, i32, u32, i64, u64)"
+                ),
                 None,
             ));
         }
@@ -118,11 +120,11 @@ pub fn lower(spec: &J) -> R<Kernel> {
                         None,
                     ));
                 }
-                if ty == Scalar::F64 {
+                if ty == Scalar::F64 || ty.is_int64() {
                     return Err(err(
                         ErrorKind::Type,
                         format!(
-                            "paramètre '{pname}' : sortie gs.Out en f64 non supportée (les opérations atomiques existent en i32, u32 et f32)"
+                            "paramètre '{pname}' : sortie gs.Out en {ty} non supportée (les opérations atomiques existent en i32, u32 et f32)"
                         ),
                         None,
                     ));
@@ -545,6 +547,15 @@ fn parse_dtype(v: &J, what: &str) -> R<Scalar> {
         .ok_or_else(|| err(ErrorKind::Type, format!("{what} : type inconnu {v}"), None))
 }
 
+/// Conversion implicite sans perte entre entiers (comme les entiers de Python, sans limite) :
+/// i32 → i64, u32 → i64, u32 → u64.
+fn widens(from: Scalar, to: Scalar) -> bool {
+    matches!(
+        (from, to),
+        (Scalar::I32, Scalar::I64) | (Scalar::U32, Scalar::I64) | (Scalar::U32, Scalar::U64)
+    )
+}
+
 /// Littéral non encore typé (« faible ») : prend le type de son contexte.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Lit {
@@ -651,6 +662,13 @@ impl Lowerer<'_> {
                     format!("{v} hors de la plage de u32 (entiers positifs < 2³²)"),
                 )
             })?),
+            (Lit::Int(v), Scalar::I64) => Const::I64(v),
+            (Lit::Int(v), Scalar::U64) => Const::U64(u64::try_from(v).map_err(|_| {
+                self.e(
+                    ErrorKind::Type,
+                    format!("{v} hors de la plage de u64 (entiers positifs)"),
+                )
+            })?),
             (Lit::Int(v), Scalar::F32) => Const::F32(v as f32),
             (Lit::Int(v), Scalar::F64) => Const::F64(v as f64),
             (Lit::Float(v), Scalar::F32) => Const::F32(v as f32),
@@ -672,11 +690,13 @@ impl Lowerer<'_> {
     }
 
     /// Valeur → expression du type exact `ty`, avec les conversions implicites de Python
-    /// (entier → flottant, f32 → f64). Les autres conversions doivent être explicites.
+    /// (entier → flottant, f32 → f64, entier 32 bits → entier 64 bits sans perte). Les autres
+    /// conversions doivent être explicites.
     fn to_ty(&self, v: Val, ty: Scalar, what: &str) -> R<Expr> {
         match v {
             Val::Lit(l) => self.lit_to(l, ty),
             Val::E(e) if e.ty == ty => Ok(e),
+            Val::E(e) if widens(e.ty, ty) => Ok(cast(e, ty)),
             Val::E(e) if e.ty.is_int() && ty.is_float() => Ok(cast(e, ty)),
             Val::E(e) if e.ty == Scalar::F32 && ty == Scalar::F64 => Ok(cast(e, ty)),
             Val::E(e) => Err(self.e(
@@ -729,12 +749,14 @@ impl Lowerer<'_> {
                     Scalar::F64
                 } else if ta.is_float() {
                     ta
-                } else if tb.is_float() {
+                } else if tb.is_float() || widens(ta, tb) {
                     tb
+                } else if widens(tb, ta) {
+                    ta
                 } else {
                     return Err(self.e(
                         ErrorKind::Type,
-                        format!("« {op} » entre {ta} et {tb} : conversion explicite nécessaire (gs.i32(...) ou gs.u32(...))"),
+                        format!("« {op} » entre {ta} et {tb} : conversion explicite nécessaire (ex. gs.{ta}(...) ou gs.{tb}(...))"),
                     ));
                 }
             }
@@ -1161,12 +1183,12 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Indice entier i32 (les u32 et les littéraux sont convertis).
+    /// Indice entier i32 (les u32, i64, u64 et les littéraux sont convertis).
     fn index_expr(&mut self, node: &J) -> R<Expr> {
         let v = self.expr(node)?;
         match v.ty() {
             Scalar::I32 => self.to_ty(v, Scalar::I32, "indice"),
-            Scalar::U32 => Ok(cast(self.materialize(v)?, Scalar::I32)),
+            Scalar::U32 | Scalar::I64 | Scalar::U64 => Ok(cast(self.materialize(v)?, Scalar::I32)),
             t => Err(self.e(
                 ErrorKind::Type,
                 format!("indice de type {t} : un indice doit être entier (int(...) si besoin)"),

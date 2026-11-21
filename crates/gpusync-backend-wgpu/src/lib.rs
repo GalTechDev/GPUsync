@@ -74,6 +74,7 @@ struct Candidate {
     kind: DeviceKind,
     driver: String,
     f64: bool,
+    int64: bool,
     max_buffer_bytes: u64,
 }
 
@@ -107,6 +108,8 @@ fn candidate(i: usize, a: &wgpu::Adapter) -> Option<Candidate> {
         driver,
         f64: info.backend == wgpu::Backend::Vulkan
             && a.features().contains(wgpu::Features::SHADER_F64),
+        // Entiers 64 bits en WGSL : extension native (Vulkan, DX12, Metal avec MSL 2.3+).
+        int64: a.features().contains(wgpu::Features::SHADER_INT64),
         max_buffer_bytes: a
             .limits()
             .max_buffer_size
@@ -163,6 +166,7 @@ fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
                 version,
                 f64: c.f64,
                 f64_math: false,
+                int64: c.int64,
                 unified_memory: c.kind == DeviceKind::IntegratedGpu,
                 memory_bytes: None,
                 max_buffer_bytes: Some(c.max_buffer_bytes),
@@ -204,6 +208,7 @@ mod tests {
             kind,
             driver: String::new(),
             f64: api == "vulkan",
+            int64: true,
             max_buffer_bytes: 1 << 30,
         }
     }

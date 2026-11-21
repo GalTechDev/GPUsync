@@ -64,6 +64,8 @@ pub struct DeviceInfo {
     pub f64: bool,
     /// … y compris les fonctions transcendantes (exp, log, sin…) en f64 ?
     pub f64_math: bool,
+    /// Entiers 64 bits (i64, u64) dans les kernels ?
+    pub int64: bool,
     /// Mémoire partagée avec l'hôte (zéro-copie possible, §8.4 de l'architecture).
     pub unified_memory: bool,
     /// Mémoire globale en octets, si le backend l'expose (wgpu ne l'expose pas).
@@ -182,6 +184,7 @@ mod tests {
                         version: "1".into(),
                         f64: true,
                         f64_math: true,
+                        int64: true,
                         unified_memory: false,
                         memory_bytes: None,
                         max_buffer_bytes: None,

@@ -107,10 +107,15 @@ impl WgDevice {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gpusync"),
             // f64 en WGSL (Vulkan) : extension native de wgpu, demandée seulement si disponible.
-            required_features: if info.f64 {
-                wgpu::Features::SHADER_F64
-            } else {
-                wgpu::Features::empty()
+            required_features: {
+                let mut f = wgpu::Features::empty();
+                if info.f64 {
+                    f |= wgpu::Features::SHADER_F64;
+                }
+                if info.int64 {
+                    f |= wgpu::Features::SHADER_INT64;
+                }
+                f
             },
             required_limits: limits.clone(),
             ..Default::default()

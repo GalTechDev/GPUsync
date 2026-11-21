@@ -70,6 +70,10 @@ pub(crate) enum Helper {
     ModF32,
     ModF64,
     PowF32,
+    FloorDivI64,
+    FloorDivU64,
+    ModI64,
+    ModU64,
 }
 
 pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
@@ -94,6 +98,18 @@ pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
                 }
                 (BinOp::Mod, Scalar::F64) => {
                     set.insert(Helper::ModF64);
+                }
+                (BinOp::FloorDiv, Scalar::I64) => {
+                    set.insert(Helper::FloorDivI64);
+                }
+                (BinOp::FloorDiv, Scalar::U64) => {
+                    set.insert(Helper::FloorDivU64);
+                }
+                (BinOp::Mod, Scalar::I64) => {
+                    set.insert(Helper::ModI64);
+                }
+                (BinOp::Mod, Scalar::U64) => {
+                    set.insert(Helper::ModU64);
                 }
                 (BinOp::Pow, Scalar::F32) => {
                     set.insert(Helper::PowF32);

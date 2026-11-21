@@ -205,6 +205,8 @@ pub enum CuArg<'a> {
     U32(u32),
     F32(f32),
     F64(f64),
+    I64(i64),
+    U64(u64),
 }
 
 static OPEN: OnceLock<Mutex<HashMap<usize, Arc<CuDevice>>>> = OnceLock::new();
@@ -573,6 +575,8 @@ impl CuDevice {
                     CuArg::U32(x) => v[..4].copy_from_slice(&x.to_ne_bytes()),
                     CuArg::F32(x) => v[..4].copy_from_slice(&x.to_ne_bytes()),
                     CuArg::F64(x) => v.copy_from_slice(&x.to_ne_bytes()),
+                    CuArg::I64(x) => v.copy_from_slice(&x.to_ne_bytes()),
+                    CuArg::U64(x) => v.copy_from_slice(&x.to_ne_bytes()),
                 }
                 v
             })

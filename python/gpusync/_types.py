@@ -109,6 +109,8 @@ f32 = DType("f32", np.float32)
 f64 = DType("f64", np.float64)
 i32 = DType("i32", np.int32)
 u32 = DType("u32", np.uint32)
+i64 = DType("i64", np.int64)
+u64 = DType("u64", np.uint64)
 
-DTYPES = {d.name: d for d in (f32, f64, i32, u32)}
+DTYPES = {d.name: d for d in (f32, f64, i32, u32, i64, u64)}
 BY_NUMPY = {d.np: d for d in DTYPES.values()}

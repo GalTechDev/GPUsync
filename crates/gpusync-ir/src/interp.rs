@@ -144,8 +144,22 @@ fn index_of(c: Const) -> i64 {
     match c {
         Const::I32(v) => v as i64,
         Const::U32(v) => v as i64,
+        Const::I64(v) => v,
+        Const::U64(v) => v.min(i64::MAX as u64) as i64,
         _ => -1,
     }
+}
+
+/// Valeur exacte d'un entier (ou d'un booléen), pour les conversions entre entiers.
+fn int_value(c: Const) -> Option<i128> {
+    Some(match c {
+        Const::Bool(b) => b as i128,
+        Const::I32(v) => v as i128,
+        Const::U32(v) => v as i128,
+        Const::I64(v) => v as i128,
+        Const::U64(v) => v as i128,
+        _ => return None,
+    })
 }
 
 impl State<'_, '_> {
@@ -350,6 +364,8 @@ impl State<'_, '_> {
                     (UnOp::Neg, Const::U32(v)) => Const::U32(v.wrapping_neg()),
                     (UnOp::Neg, Const::F32(v)) => Const::F32(-v),
                     (UnOp::Neg, Const::F64(v)) => Const::F64(-v),
+                    (UnOp::Neg, Const::I64(v)) => Const::I64(v.wrapping_neg()),
+                    (UnOp::Neg, Const::U64(v)) => Const::U64(v.wrapping_neg()),
                     (UnOp::Neg, Const::Bool(_)) => return Err("négation d'un booléen".into()),
                 }
             }
@@ -395,6 +411,8 @@ pub fn zero(ty: Scalar) -> Const {
         Scalar::U32 => Const::U32(0),
         Scalar::F32 => Const::F32(0.0),
         Scalar::F64 => Const::F64(0.0),
+        Scalar::I64 => Const::I64(0),
+        Scalar::U64 => Const::U64(0),
     }
 }
 
@@ -405,30 +423,44 @@ fn as_bool(c: Const) -> bool {
         Const::U32(v) => v != 0,
         Const::F32(v) => v != 0.0,
         Const::F64(v) => v != 0.0,
+        Const::I64(v) => v != 0,
+        Const::U64(v) => v != 0,
     }
 }
 
-/// Conversion de type (flottant → entier : troncature vers 0, saturée).
+/// Conversion de type, comme en C : entier → entier par troncature des bits (exacte, aussi en 64 bits) ;
+/// flottant → entier : troncature vers 0, saturée.
 pub fn convert(c: Const, to: Scalar) -> Const {
+    if c.ty() == to {
+        return c;
+    }
+    if to == Scalar::Bool {
+        return Const::Bool(as_bool(c));
+    }
+    if let Some(v) = int_value(c) {
+        return match to {
+            Scalar::I32 => Const::I32(v as i32),
+            Scalar::U32 => Const::U32(v as u32),
+            Scalar::I64 => Const::I64(v as i64),
+            Scalar::U64 => Const::U64(v as u64),
+            Scalar::F32 => Const::F32(v as f32),
+            Scalar::F64 => Const::F64(v as f64),
+            Scalar::Bool => unreachable!(),
+        };
+    }
     let f = match c {
-        Const::Bool(b) => b as i64 as f64,
-        Const::I32(v) => v as f64,
-        Const::U32(v) => v as f64,
         Const::F32(v) => v as f64,
         Const::F64(v) => v,
+        _ => 0.0,
     };
-    match (to, c) {
-        (t, c) if c.ty() == t => c,
-        (Scalar::Bool, c) => Const::Bool(as_bool(c)),
-        (Scalar::I32, Const::U32(v)) => Const::I32(v as i32),
-        (Scalar::U32, Const::I32(v)) => Const::U32(v as u32),
-        (Scalar::F32, Const::F64(v)) => Const::F32(v as f32),
-        (Scalar::F32, Const::I32(v)) => Const::F32(v as f32),
-        (Scalar::F32, Const::U32(v)) => Const::F32(v as f32),
-        (Scalar::I32, _) => Const::I32(f as i32),
-        (Scalar::U32, _) => Const::U32(f as u32),
-        (Scalar::F32, _) => Const::F32(f as f32),
-        (Scalar::F64, _) => Const::F64(f),
+    match to {
+        Scalar::I32 => Const::I32(f as i32),
+        Scalar::U32 => Const::U32(f as u32),
+        Scalar::I64 => Const::I64(f as i64),
+        Scalar::U64 => Const::U64(f as u64),
+        Scalar::F32 => Const::F32(f as f32),
+        Scalar::F64 => Const::F64(f),
+        Scalar::Bool => unreachable!(),
     }
 }
 
@@ -439,6 +471,8 @@ fn eq(a: Const, b: Const) -> bool {
         (Const::U32(x), Const::U32(y)) => x == y,
         (Const::F32(x), Const::F32(y)) => x == y,
         (Const::F64(x), Const::F64(y)) => x == y,
+        (Const::I64(x), Const::I64(y)) => x == y,
+        (Const::U64(x), Const::U64(y)) => x == y,
         _ => false,
     }
 }
@@ -449,6 +483,8 @@ fn lt(a: Const, b: Const) -> bool {
         (Const::U32(x), Const::U32(y)) => x < y,
         (Const::F32(x), Const::F32(y)) => x < y,
         (Const::F64(x), Const::F64(y)) => x < y,
+        (Const::I64(x), Const::I64(y)) => x < y,
+        (Const::U64(x), Const::U64(y)) => x < y,
         (Const::Bool(x), Const::Bool(y)) => !x & y,
         _ => false,
     }
@@ -469,6 +505,22 @@ fn arith(op: BinOp, a: Const, b: Const) -> Const {
             BinOp::Pow | BinOp::And | BinOp::Or => 0,
         }),
         (Const::U32(x), Const::U32(y)) => Const::U32(match op {
+            BinOp::Add => x.wrapping_add(y),
+            BinOp::Sub => x.wrapping_sub(y),
+            BinOp::Mul => x.wrapping_mul(y),
+            BinOp::FloorDiv | BinOp::Div => x.checked_div(y).unwrap_or(0),
+            BinOp::Mod => x.checked_rem(y).unwrap_or(0),
+            BinOp::Pow | BinOp::And | BinOp::Or => 0,
+        }),
+        (Const::I64(x), Const::I64(y)) => Const::I64(match op {
+            BinOp::Add => x.wrapping_add(y),
+            BinOp::Sub => x.wrapping_sub(y),
+            BinOp::Mul => x.wrapping_mul(y),
+            BinOp::FloorDiv | BinOp::Div => floordiv_i64(x, y),
+            BinOp::Mod => mod_i64(x, y),
+            BinOp::Pow | BinOp::And | BinOp::Or => 0,
+        }),
+        (Const::U64(x), Const::U64(y)) => Const::U64(match op {
             BinOp::Add => x.wrapping_add(y),
             BinOp::Sub => x.wrapping_sub(y),
             BinOp::Mul => x.wrapping_mul(y),
@@ -509,6 +561,12 @@ fn intrinsic(f: Intrinsic, v: &[Const]) -> Const {
         (Max, [Const::I32(x), Const::I32(y)]) => Const::I32(*x.max(y)),
         (Min, [Const::U32(x), Const::U32(y)]) => Const::U32(*x.min(y)),
         (Max, [Const::U32(x), Const::U32(y)]) => Const::U32(*x.max(y)),
+        (Abs, [Const::I64(x)]) => Const::I64(x.wrapping_abs()),
+        (Abs, [Const::U64(x)]) => Const::U64(*x),
+        (Min, [Const::I64(x), Const::I64(y)]) => Const::I64(*x.min(y)),
+        (Max, [Const::I64(x), Const::I64(y)]) => Const::I64(*x.max(y)),
+        (Min, [Const::U64(x), Const::U64(y)]) => Const::U64(*x.min(y)),
+        (Max, [Const::U64(x), Const::U64(y)]) => Const::U64(*x.max(y)),
         (_, [Const::F32(x)]) => Const::F32(f32_1(f, *x)),
         (_, [Const::F64(x)]) => Const::F64(f64_1(f, *x)),
         (_, [Const::F32(x), Const::F32(y)]) => Const::F32(match f {
@@ -559,6 +617,8 @@ pub fn load(ty: Scalar, b: &[u8]) -> Const {
         Scalar::U32 => Const::U32(u32::from_ne_bytes(b[..4].try_into().unwrap())),
         Scalar::F32 => Const::F32(f32::from_ne_bytes(b[..4].try_into().unwrap())),
         Scalar::F64 => Const::F64(f64::from_ne_bytes(b[..8].try_into().unwrap())),
+        Scalar::I64 => Const::I64(i64::from_ne_bytes(b[..8].try_into().unwrap())),
+        Scalar::U64 => Const::U64(u64::from_ne_bytes(b[..8].try_into().unwrap())),
     }
 }
 
@@ -569,6 +629,8 @@ pub fn store(c: Const, out: &mut [u8]) {
         Const::U32(v) => out.copy_from_slice(&v.to_ne_bytes()),
         Const::F32(v) => out.copy_from_slice(&v.to_ne_bytes()),
         Const::F64(v) => out.copy_from_slice(&v.to_ne_bytes()),
+        Const::I64(v) => out.copy_from_slice(&v.to_ne_bytes()),
+        Const::U64(v) => out.copy_from_slice(&v.to_ne_bytes()),
     }
 }
 

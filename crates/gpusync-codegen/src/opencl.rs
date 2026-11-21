@@ -13,6 +13,9 @@ fn c_type(t: Scalar) -> &'static str {
         Scalar::U32 => "uint",
         Scalar::F32 => "float",
         Scalar::F64 => "double",
+        // Alias définis en tête du code : `long` / `ulong` en OpenCL, `long long` en CUDA.
+        Scalar::I64 => "gs_i64",
+        Scalar::U64 => "gs_u64",
     }
 }
 
@@ -35,6 +38,9 @@ fn lit(c: Const) -> String {
         })
         .into(),
         Const::F64(v) => float_repr(format!("{v:?}")),
+        Const::I64(i64::MIN) => "((gs_i64)(-9223372036854775807 - 1))".into(),
+        Const::I64(v) => format!("((gs_i64){v})"),
+        Const::U64(v) => format!("((gs_u64){v}u)"),
     }
 }
 
@@ -111,6 +117,10 @@ impl Gen<'_> {
                 match (op, a.ty) {
                     (BinOp::FloorDiv, Scalar::I32) => format!("gs_floordiv_i32({x}, {y})"),
                     (BinOp::FloorDiv, Scalar::U32) => format!("gs_floordiv_u32({x}, {y})"),
+                    (BinOp::FloorDiv, Scalar::I64) => format!("gs_floordiv_i64({x}, {y})"),
+                    (BinOp::FloorDiv, Scalar::U64) => format!("gs_floordiv_u64({x}, {y})"),
+                    (BinOp::Mod, Scalar::I64) => format!("gs_mod_i64({x}, {y})"),
+                    (BinOp::Mod, Scalar::U64) => format!("gs_mod_u64({x}, {y})"),
                     (BinOp::FloorDiv, t) => format!("{}({x} / {y})", self.math("floor", t)),
                     (BinOp::Mod, Scalar::I32) => format!("gs_mod_i32({x}, {y})"),
                     (BinOp::Mod, Scalar::U32) => format!("gs_mod_u32({x}, {y})"),
@@ -134,6 +144,16 @@ impl Gen<'_> {
                         format!("{}({})", self.math("fabs", args[0].ty), a[0])
                     }
                     Intrinsic::Abs if args[0].ty == Scalar::I32 => format!("((int)abs({}))", a[0]),
+                    Intrinsic::Abs if args[0].ty == Scalar::I64 => {
+                        format!("(({0}) < 0 ? -({0}) : ({0}))", a[0])
+                    }
+                    // min / max 64 bits : expression ternaire (surcharges variables selon le dialecte).
+                    Intrinsic::Min if args[0].ty.is_int64() => {
+                        format!("(({0}) < ({1}) ? ({0}) : ({1}))", a[0], a[1])
+                    }
+                    Intrinsic::Max if args[0].ty.is_int64() => {
+                        format!("(({0}) > ({1}) ? ({0}) : ({1}))", a[0], a[1])
+                    }
                     Intrinsic::Abs => a[0].clone(),
                     Intrinsic::Min if float => {
                         format!("{}({}, {})", self.math("fmin", args[0].ty), a[0], a[1])
@@ -368,6 +388,22 @@ const HELPERS: &[(Helper, &str)] = &[
         Helper::ModF64,
         "inline double gs_mod_f64(double a, double b) {\n    double r = fmod(a, b);\n    if (r != 0.0 && ((r < 0.0) != (b < 0.0))) r += b;\n    return r;\n}",
     ),
+    (
+        Helper::FloorDivI64,
+        "inline gs_i64 gs_floordiv_i64(gs_i64 a, gs_i64 b) {\n    if (b == 0) return 0;\n    gs_i64 q = a / b;\n    if ((a % b != 0) && ((a < 0) != (b < 0))) q -= 1;\n    return q;\n}",
+    ),
+    (
+        Helper::FloorDivU64,
+        "inline gs_u64 gs_floordiv_u64(gs_u64 a, gs_u64 b) { return b == 0 ? 0 : a / b; }",
+    ),
+    (
+        Helper::ModI64,
+        "inline gs_i64 gs_mod_i64(gs_i64 a, gs_i64 b) {\n    if (b == 0) return 0;\n    gs_i64 r = a % b;\n    if (r != 0 && ((r < 0) != (b < 0))) r += b;\n    return r;\n}",
+    ),
+    (
+        Helper::ModU64,
+        "inline gs_u64 gs_mod_u64(gs_u64 a, gs_u64 b) { return b == 0 ? 0 : a % b; }",
+    ),
 ];
 
 /// Génère le kernel OpenCL C. Point d'entrée : `gs_<nom>`.
@@ -418,10 +454,18 @@ fn emit_c(
     if cuda {
         // NVRTC sans en-têtes : types et constantes du dialecte OpenCL utilisés par l'émetteur.
         g.out.line("typedef unsigned int uint;");
+        g.out.line("typedef long long gs_i64;");
+        g.out.line("typedef unsigned long long gs_u64;");
         g.out.line("#define INFINITY __int_as_float(0x7f800000)");
         g.out.line("#define NAN __int_as_float(0x7fffffff)");
-    } else if k.requirements().f64 {
-        g.out.line("#pragma OPENCL EXTENSION cl_khr_fp64 : enable");
+    } else {
+        if k.requirements().f64 {
+            g.out.line("#pragma OPENCL EXTENSION cl_khr_fp64 : enable");
+        }
+        if k.requirements().int64 {
+            g.out.line("typedef long gs_i64;");
+            g.out.line("typedef ulong gs_u64;");
+        }
     }
     let used = helpers(k);
     for (h, code) in HELPERS {

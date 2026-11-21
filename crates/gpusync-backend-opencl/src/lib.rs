@@ -59,6 +59,8 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
                 f64: d.double_fp_config().map(|c| c != 0).unwrap_or(false),
                 // OpenCL fournit toute la bibliothèque mathématique en double précision.
                 f64_math: d.double_fp_config().map(|c| c != 0).unwrap_or(false),
+                // `long` / `ulong` font partie d'OpenCL C (profil complet), sauf profil embarqué.
+                int64: !d.profile().unwrap_or_default().contains("EMBEDDED"),
                 unified_memory: unified,
                 memory_bytes: d.global_mem_size().ok(),
                 max_buffer_bytes: d.max_mem_alloc_size().ok(),

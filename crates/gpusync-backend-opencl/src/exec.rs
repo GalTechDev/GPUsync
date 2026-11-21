@@ -84,6 +84,8 @@ pub enum ClArg<'a> {
     U32(u32),
     F32(f32),
     F64(f64),
+    I64(i64),
+    U64(u64),
 }
 
 static OPEN: OnceLock<Mutex<HashMap<usize, Arc<ClDevice>>>> = OnceLock::new();
@@ -344,6 +346,8 @@ impl ClDevice {
                     ClArg::U32(v) => exec.set_arg(v),
                     ClArg::F32(v) => exec.set_arg(v),
                     ClArg::F64(v) => exec.set_arg(v),
+                    ClArg::I64(v) => exec.set_arg(v),
+                    ClArg::U64(v) => exec.set_arg(v),
                 };
             }
             exec.set_global_work_size(n)

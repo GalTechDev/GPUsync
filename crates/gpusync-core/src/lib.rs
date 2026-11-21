@@ -65,7 +65,10 @@ pub fn source(k: &Kernel, target: &str) -> R<String> {
         "opencl" => gpusync_codegen::emit_opencl(k)
             .map(|s| s.code)
             .map_err(|e| CoreError::Unsupported(e.0)),
-        "wgsl" | "metal" | "vulkan" | "dx12" => gpusync_codegen::emit_wgsl(k)
+        "metal" => gpusync_codegen::emit_wgsl_variant(k, &[], true)
+            .map(|s| s.code)
+            .map_err(|e| CoreError::Unsupported(e.0)),
+        "wgsl" | "vulkan" | "dx12" => gpusync_codegen::emit_wgsl(k)
             .map(|s| s.code)
             .map_err(|e| CoreError::Unsupported(e.0)),
         "ir" => Ok(format!("{k:#?}")),
@@ -86,6 +89,7 @@ pub fn cpu_info() -> DeviceInfo {
         version: env!("CARGO_PKG_VERSION").into(),
         f64: true,
         f64_math: true,
+        int64: true,
         unified_memory: true,
         memory_bytes: None,
         max_buffer_bytes: None,
@@ -235,6 +239,14 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
             info.id()
         ));
     }
+    if req.int64 && !info.int64 {
+        return Some(format!(
+            "le kernel '{}' utilise des entiers 64 bits (i64, u64), non supportés par '{}' ({})",
+            k.name,
+            info.name,
+            info.id()
+        ));
+    }
     if let Some(op) = req.f64_math_op.filter(|_| !info.f64_math) {
         return Some(format!(
             "le kernel '{}' utilise {op} en f64, non disponible sur '{}' ({}) : seuls OpenCL, CUDA et cpu:0 \
@@ -294,7 +306,8 @@ fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> 
             )));
         }
         Device::Wg(d) => {
-            let src = gpusync_codegen::emit_wgsl_variant(k, spec).map_err(gen_err)?;
+            let metal = d.info.backend == "metal";
+            let src = gpusync_codegen::emit_wgsl_variant(k, spec, metal).map_err(gen_err)?;
             dump(k, wide, spec, "wgsl", &src.code);
             Imp::Wg(
                 d.compile(

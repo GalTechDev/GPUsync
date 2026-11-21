@@ -51,6 +51,8 @@ struct PyDevice {
     f64: bool,
     /// Fonctions transcendantes (exp, log, sin…) en float64 supportées.
     f64_math: bool,
+    /// Entiers 64 bits (gs.i64, gs.u64) supportés.
+    int64: bool,
     /// Mémoire partagée avec l'hôte (zéro-copie possible).
     unified_memory: bool,
     /// Mémoire globale en octets (None si le backend ne l'expose pas).
@@ -70,6 +72,7 @@ impl From<&DeviceInfo> for PyDevice {
             version: d.version.clone(),
             f64: d.f64,
             f64_math: d.f64_math,
+            int64: d.int64,
             unified_memory: d.unified_memory,
             memory_bytes: d.memory_bytes,
             max_buffer_bytes: d.max_buffer_bytes,
@@ -94,6 +97,9 @@ impl PyDevice {
         );
         if self.f64 && !self.f64_math {
             s.push_str(", f64_math=False");
+        }
+        if !self.int64 {
+            s.push_str(", int64=False");
         }
         s.push_str(&format!(
             ", unified_memory={}",

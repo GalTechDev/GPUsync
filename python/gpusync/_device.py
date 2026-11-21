@@ -46,7 +46,11 @@ def ranked() -> list:
 
 def capable(dev, req: dict) -> bool:
     """Le périphérique sait-il exécuter un kernel ayant ces besoins ?"""
-    return (dev.f64 or not req["f64"]) and (dev.f64_math or not req["f64_math"])
+    return (
+        (dev.f64 or not req["f64"])
+        and (dev.f64_math or not req["f64_math"])
+        and (getattr(dev, "int64", True) or not req.get("int64"))
+    )
 
 
 def _by_id(dev_id: str):

@@ -16,6 +16,8 @@ pub(crate) enum GArg<'a, B> {
     U32(u32),
     F32(f32),
     F64(f64),
+    I64(i64),
+    U64(u64),
 }
 
 type Res<T> = Result<T, BackendError>;
@@ -144,6 +146,8 @@ impl Gpu for ClDevice {
                 GArg::U32(v) => ClArg::U32(*v),
                 GArg::F32(v) => ClArg::F32(*v),
                 GArg::F64(v) => ClArg::F64(*v),
+                GArg::I64(v) => ClArg::I64(*v),
+                GArg::U64(v) => ClArg::U64(*v),
             })
             .collect();
         ClDevice::launch(self, k, &a, n, wait)
@@ -235,6 +239,8 @@ impl Gpu for CuDevice {
                 GArg::U32(v) => CuArg::U32(*v),
                 GArg::F32(v) => CuArg::F32(*v),
                 GArg::F64(v) => CuArg::F64(*v),
+                GArg::I64(v) => CuArg::I64(*v),
+                GArg::U64(v) => CuArg::U64(*v),
             })
             .collect();
         CuDevice::launch(self, k, &a, n, wait)
