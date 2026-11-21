@@ -742,7 +742,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn genere_un_module_wgsl() {
+    fn emits_wgsl_module() {
         let src = emit_wgsl(&crate::tests::sample()).unwrap();
         let c = &src.code;
         assert!(
@@ -754,7 +754,7 @@ mod tests {
             "{c}"
         );
         assert!(
-            c.contains("let p1_moyenne = bitcast<f32>(gs_params[0]);"),
+            c.contains("let p1_mean = bitcast<f32>(gs_params[0]);"),
             "{c}"
         );
         assert!(
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn f64_arithmetique_accepte_mais_pas_les_fonctions_transcendantes() {
+    fn f64_arithmetic_accepted_but_not_transcendental_functions() {
         let mut k = crate::tests::sample();
         // Tout en f64 : le sample utilise ** (pow) → refusé.
         k.outputs = vec![Scalar::F64];
@@ -820,7 +820,7 @@ mod tests {
             c.contains("var<storage, read> gs_fparams: array<f64>;"),
             "{c}"
         );
-        assert!(c.contains("let p1_moyenne = gs_fparams[0];"), "{c}");
+        assert!(c.contains("let p1_mean = gs_fparams[0];"), "{c}");
         assert!(c.contains("gs_mod_f64(p0_x[gs_i], 3.0lf)"), "{c}");
         assert!(c.contains("if (gs_i >= gs_params[1]) { return; }"), "{c}");
     }

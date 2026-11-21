@@ -17,17 +17,17 @@ for dev in sys.argv[1].split(","):
     t = time.perf_counter()
     for _ in range(K):
         z = plus1(x, device=dev)
-    z.numpy(); neuve = (time.perf_counter() - t) / K
+    z.numpy(); fresh = (time.perf_counter() - t) / K
     o = np.empty(N, np.uint32)
     plus1(x, device=dev, out=o).numpy()
     t = time.perf_counter()
     for _ in range(K):
         z = plus1(x, device=dev, out=o)
         z.numpy()
-    reut = (time.perf_counter() - t) / K
+    reused = (time.perf_counter() - t) / K
     t = time.perf_counter()
     for _ in range(K):
         a = np.empty(N, np.uint32); a[::1024] = 1
-    pf = (time.perf_counter() - t) / K
-    print(f"{dev:9} mode {z.mode} : sortie neuve {neuve*1e3:.3f} ms, out= réutilisé {reut*1e3:.3f} ms ; "
-          f"np.empty + toucher les pages {pf*1e3:.3f} ms", flush=True)
+    page_faults = (time.perf_counter() - t) / K
+    print(f"{dev:9} mode {z.mode} : sortie neuve {fresh*1e3:.3f} ms, out= réutilisé {reused*1e3:.3f} ms ; "
+          f"np.empty + toucher les pages {page_faults*1e3:.3f} ms", flush=True)

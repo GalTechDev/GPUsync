@@ -635,7 +635,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn division_et_modulo_comme_python() {
+    fn division_and_modulo_like_python() {
         // Valeurs de référence : Python 3.
         assert_eq!(floordiv_i32(7, 2), 3);
         assert_eq!(floordiv_i32(-7, 2), -4);

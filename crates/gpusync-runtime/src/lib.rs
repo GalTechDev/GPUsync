@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn un_backend_en_erreur_ou_qui_panique_n_empeche_pas_les_autres() {
+    fn failing_or_panicking_backend_does_not_block_others() {
         let ok = Fake("ok", Ok(2));
         let ko = Fake("ko", Err("bibliothèque introuvable"));
         let st = discover(&[&ko, &Panics, &ok]);

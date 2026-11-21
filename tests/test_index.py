@@ -150,21 +150,21 @@ def test_distances(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_matvec_dimension_partagee(dev):
+def test_matvec_shared_dimension(dev):
     a = RNG.random((300, 17), dtype=np.float32)
     v = RNG.random(17, dtype=np.float32)
     check(matvec(a, v, device=dev), (a @ v).astype(np.float32), rtol=1e-5)
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_dimensions_sans_nom_et_shape(dev):
+def test_unnamed_dimensions_and_shape(dev):
     a = RNG.integers(-100, 100, (5, 9), dtype=np.int32)
     b = np.zeros((9, 5), dtype=np.int32)
     check(transpose(a, b, device=dev), a.T.copy())
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_plusieurs_sorties_avec_index(dev):
+def test_multiple_outputs_with_index(dev):
     x = RNG.standard_normal((211, 13)).astype(np.float32)
     mean, std, arg = moments(x, device=dev)
     check(mean, x.mean(1), rtol=1e-5)
@@ -173,7 +173,7 @@ def test_plusieurs_sorties_avec_index(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_plusieurs_sorties_element_par_element(dev):
+def test_multiple_outputs_elementwise(dev):
     x = RNG.random(1001, dtype=np.float32)
     y = RNG.random(1001, dtype=np.float32)
     s, p = split(x, y, device=dev)
@@ -182,21 +182,21 @@ def test_plusieurs_sorties_element_par_element(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_tableau_local(dev):
+def test_local_array(dev):
     x = RNG.random((40, 30), dtype=np.float32)
     c = np.cumsum(x, axis=1, dtype=np.float32)
     check(prefix(x, device=dev), c - c[:, ::-1], rtol=1e-5)
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_trois_dimensions(dev):
+def test_three_dimensions(dev):
     x = RNG.random((4, 5, 6), dtype=np.float32)
     ref = np.transpose(x, (2, 0, 1)) * 2.0 + np.arange(6, dtype=np.float32)[:, None, None]
     check(cube(x, device=dev), ref.astype(np.float32))
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_dtw_comme_le_prototype(dev):
+def test_dtw_like_prototype(dev):
     x = np.load(DATA / "oxygene_series.npy")
     proto = np.load(DATA / "oxygene_dtw_w5_prototype.npy")
     y = np.asarray(dtw(x, 5, device=dev))
@@ -206,7 +206,7 @@ def test_dtw_comme_le_prototype(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_enchainement_sur_le_peripherique(dev):
+def test_chaining_on_device(dev):
     """La sortie d'un kernel avec index sert d'entrée au suivant, sans repasser par l'hôte."""
     x = RNG.random((60, 4), dtype=np.float32)
     d = pairwise(x, device=dev)
@@ -225,7 +225,7 @@ def test_out_tuple(dev):
     check(outs[2], x.argmax(1).astype(np.int32))
 
 
-def test_reductions_sur_l_hote():
+def test_reductions_on_host():
     x = RNG.random((30, 3), dtype=np.float32)
     d = pairwise(x)
     ref = np.asarray(d)
@@ -234,7 +234,7 @@ def test_reductions_sur_l_hote():
     np.testing.assert_allclose(d.std(), ref.std())
 
 
-def test_erreurs_de_forme():
+def test_shape_errors():
     with pytest.raises(gs.ShapeMismatch, match="dimension 'k' incohérente : 'a' → 4, 'v' → 5"):
         matvec(np.zeros((3, 4), np.float32), np.zeros(5, np.float32))
     with pytest.raises(gs.ShapeMismatch, match=r"'x' doit avoir 2 dimension\(s\) \[n, t\]"):
@@ -245,6 +245,6 @@ def test_erreurs_de_forme():
         split(np.zeros(4, np.float32), np.zeros(4, np.float32), out=(np.zeros(4, np.float32), np.zeros(3, np.float32)))
 
 
-def test_signature_lisible():
+def test_readable_signature():
     assert repr(moments) == "<gs.kernel moments(x: gs.f32['n', 't']) -> (gs.f32['n'], gs.f32['n'], gs.i32['n'])>"
     assert "gs_out2" in moments.source("opencl")

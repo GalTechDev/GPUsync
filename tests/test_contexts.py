@@ -77,7 +77,7 @@ def same(got, ref):
 
 
 @pytest.mark.parametrize("variant", ["script", "asyncio"])
-def test_script_et_asyncio(variant, tmp_path):
+def test_script_and_asyncio(variant, tmp_path):
     body = SYNC if variant == "script" else ASYNC
     path = tmp_path / f"variante_{variant}.py"
     path.write_text("import asyncio, json\n" + KERNEL + body)

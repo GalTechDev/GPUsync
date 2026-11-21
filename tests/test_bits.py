@@ -162,7 +162,7 @@ def test_montgomery(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_booleens(dev):
+def test_booleans(dev):
     x = RNG.integers(-5, 5, 1000, dtype=np.int32)
     y = RNG.integers(-5, 5, 1000, dtype=np.int32)
     a, b = x > 0, y > 0
@@ -188,10 +188,10 @@ def test_messages(tmp_path):
 
 
 @gs.kernel
-def litteraux(x: gs.i64[:]) -> gs.i64[:]:
+def literals(x: gs.i64[:]) -> gs.i64[:]:
     return x + ((1 << 40) | 0xFF) - (~5 ^ 3) + (-17 >> 2)
 
 
-def test_repli_des_litteraux():
+def test_literal_folding():
     x = np.arange(10, dtype=np.int64)
-    check(litteraux(x, device="cpu"), x + ((1 << 40) | 0xFF) - (~5 ^ 3) + (-17 >> 2))
+    check(literals(x, device="cpu"), x + ((1 << 40) | 0xFF) - (~5 ^ 3) + (-17 >> 2))

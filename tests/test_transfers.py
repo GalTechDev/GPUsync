@@ -35,7 +35,7 @@ def f64_axpy(x: gs.f64[:], s: gs.f64) -> gs.f64[:]:
 # Réglages forcés : (taille de bloc, budget, taille de bloc Direct)
 CONFIGS = {
     "flux": dict(chunk_bytes=4000, budget_bytes=1, direct_chunk_bytes=12_000),
-    "resident_par_blocs": dict(chunk_bytes=4000, budget_bytes=None, direct_chunk_bytes=12_000),
+    "resident_by_blocks": dict(chunk_bytes=4000, budget_bytes=None, direct_chunk_bytes=12_000),
 }
 
 
@@ -64,7 +64,7 @@ def expected_mode(dev_id, config):
     return "flux" if config == "flux" else "resident"
 
 
-def test_modes_et_resultats(device, config):
+def test_modes_and_results(device, config):
     x, y = RNG.random(N).astype(np.float32), RNG.random(N).astype(np.float32)
     r = affine(x, y, 2.5, device=device)
     assert r.mode == expected_mode(device, config)
@@ -76,14 +76,14 @@ def test_modes_et_resultats(device, config):
         np.testing.assert_array_equal(np.asarray(int_mix(a, b, device=device)), a // 7 + b % 5 - a * b)
 
 
-def test_f64_par_blocs(device, config):
+def test_f64_by_blocks(device, config):
     if not info(device).f64:
         pytest.skip("pas de f64 sur ce périphérique")
     x = RNG.random(N)
     np.testing.assert_allclose(np.asarray(f64_axpy(x, 1.5, device=device)), x * 1.5 + 0.5, rtol=1e-15)
 
 
-def test_chainage_dans_un_mode_puis_l_autre(device, config):
+def test_chaining_from_one_mode_to_another(device, config):
     x, y = RNG.random(N).astype(np.float32), RNG.random(N).astype(np.float32)
     _set_transfer_limits()  # premier appel en mode par défaut (Résident ou Direct)
     r1 = affine(x, y, 2.0, device=device)
@@ -92,7 +92,7 @@ def test_chainage_dans_un_mode_puis_l_autre(device, config):
     np.testing.assert_allclose(np.asarray(r2), (x * 2 + y) * np.float32(0.5) + y, rtol=1e-6)
 
 
-def test_out_et_memmap(device, config, tmp_path):
+def test_out_and_memmap(device, config, tmp_path):
     x, y = RNG.random(N).astype(np.float32), RNG.random(N).astype(np.float32)
     src = np.memmap(tmp_path / "x.f32", dtype=np.float32, mode="w+", shape=(N,))
     src[:] = x
@@ -112,7 +112,7 @@ def test_stream(device, config):
         np.testing.assert_allclose(g, b * 2 + 1, rtol=1e-6)
 
 
-def test_out_invalide():
+def test_invalid_out():
     x = np.ones(10, np.float32)
     with pytest.raises(gs.ShapeMismatch, match="out"):
         affine(x, x, 1.0, device="cpu", out=np.empty(11, np.float32))
@@ -122,7 +122,7 @@ def test_out_invalide():
         affine(x, x, 1.0, device="cpu", out=np.empty(20, np.float32)[::2])
 
 
-def test_out_of_memory_suggere_out(monkeypatch):
+def test_out_of_memory_suggests_out(monkeypatch):
     import gpusync._kernel as kmod
 
     def fail(*a, **k):
@@ -133,7 +133,7 @@ def test_out_of_memory_suggere_out(monkeypatch):
         affine(np.ones(10, np.float32), np.ones(10, np.float32), 1.0, device="cpu")
 
 
-def test_budget_public():
+def test_public_budget():
     gs.set_memory_budget(1)
     try:
         d = next((d for d in gs.devices() if not (d.backend == "opencl" and d.unified_memory) and d.backend not in ("cpu", "metal")), None)

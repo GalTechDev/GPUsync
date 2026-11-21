@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn un_gpu_vu_par_vulkan_et_dx12_n_apparait_qu_une_fois_en_vulkan() {
+    fn gpu_seen_by_vulkan_and_dx12_listed_once_as_vulkan() {
         let devs = select(vec![
             cand(0, "dx12", "RTX", 1, DeviceKind::DiscreteGpu),
             cand(1, "vulkan", "RTX", 1, DeviceKind::DiscreteGpu),
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn la_decouverte_ne_plante_jamais() {
+    fn discovery_never_crashes() {
         let _ = WgpuBackend.devices();
     }
 }

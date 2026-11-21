@@ -71,13 +71,13 @@ def test_cache_ptx(tmp_path):
 
 
 @needs_cuda
-def test_sans_nvrtc(tmp_path):
+def test_without_nvrtc(tmp_path):
     out = run(tmp_path, without_toolkit(GPUSYNC_NVRTC_DIRS="", GPUSYNC_CACHE="0"))
     assert "CUDA indisponible" in out and "pip install nvidia-cuda-nvrtc-cu12" in out
 
 
 @needs_cuda
-def test_nvrtc_par_pip(tmp_path):
+def test_nvrtc_from_pip(tmp_path):
     import glob
 
     if not any(glob.glob(os.path.join(p, "nvidia", "cuda_nvrtc", "bin", "*nvrtc*")) or
@@ -88,7 +88,7 @@ def test_nvrtc_par_pip(tmp_path):
 
 
 @needs_cuda
-def test_f64_complet():
+def test_f64_full():
     """CUDA fournit toute la bibliothèque mathématique en f64 (contrairement à Vulkan)."""
     @gs.kernel
     def f(x: gs.f64[:]) -> gs.f64[:]:

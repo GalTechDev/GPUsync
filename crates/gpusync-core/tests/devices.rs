@@ -27,7 +27,7 @@ fn all_device_ids() -> Vec<String> {
 }
 
 #[test]
-fn frontend_types_des_locales() {
+fn frontend_local_types() {
     let k = parse(SAMPLE).unwrap();
     let ty = |n: &str| k.locals.iter().find(|l| l.name == n).unwrap().ty;
     assert_eq!(ty("acc"), Scalar::F32, "acc = 0 puis acc += x*m → f32");
@@ -37,7 +37,7 @@ fn frontend_types_des_locales() {
 }
 
 #[test]
-fn meme_resultat_sur_tous_les_peripheriques() {
+fn same_result_on_all_devices() {
     let k = parse(SAMPLE).unwrap();
     let n = 10_007; // pas un multiple de la taille de groupe
     let x: Vec<f32> = (0..n).map(|i| -5.0 + 10.0 * i as f32 / n as f32).collect();

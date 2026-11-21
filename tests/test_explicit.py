@@ -79,7 +79,7 @@ def unbounded(data: gs.f32["n"], counts: gs.Out[gs.i32[BINS]]):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_histogramme(dev, limits):
+def test_histogram(dev, limits):
     data = RNG.random(200_003, dtype=np.float32)
     want = np.bincount(np.minimum((data * BINS).astype(np.int64), BINS - 1), minlength=BINS).astype(np.int32)
     c = histogram(data, device=dev)
@@ -88,14 +88,14 @@ def test_histogramme(dev, limits):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_histogramme_2d(dev, limits):
+def test_histogram_2d(dev, limits):
     xy = RNG.random((50_000, 2), dtype=np.float32)
     want, _, _ = np.histogram2d(xy[:, 0], xy[:, 1], bins=8, range=[[0, 1], [0, 1]])
     check(histogram2d(xy, device=dev), want.astype(np.uint32))
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_par_case_flottants(dev, limits):
+def test_per_cell_floats(dev, limits):
     n, m = 30_000, 97
     idx = RNG.integers(0, m, n).astype(np.int32)
     w = RNG.standard_normal(n).astype(np.float32)
@@ -113,7 +113,7 @@ def test_par_case_flottants(dev, limits):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_grille_nommee_et_return(dev):
+def test_named_grid_and_return(dev):
     p = RNG.random((400, 3), dtype=np.float32)
     d2 = ((p[:, None] - p[None]) ** 2).sum(-1)
     want = int((np.triu(d2 < 0.2**2, k=1)).sum())
@@ -121,7 +121,7 @@ def test_grille_nommee_et_return(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_accumulation_avec_out(dev):
+def test_accumulate_with_out(dev):
     a = RNG.random(10_000, dtype=np.float32)
     b = RNG.random(7_000, dtype=np.float32)
     acc = np.zeros(BINS, np.int32)
@@ -133,7 +133,7 @@ def test_accumulation_avec_out(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_indice_hors_limites(dev):
+def test_index_out_of_bounds(dev):
     data = RNG.random(5000, dtype=np.float32)
     data[[10, 20, 30]] = [1.0, 1.5, -0.5]  # cases 16, 24 et -8 : hors de [0, 16)
     c = unbounded(data, device=dev)
@@ -155,7 +155,7 @@ def test_await(dev):
     assert c.ready and int(np.asarray(c).sum()) == 20_000
 
 
-def test_signature_et_code():
+def test_signature_and_code():
     assert repr(histogram) == "<gs.kernel histogram(data: gs.f32['n'], counts: gs.Out[gs.i32[16]]) grid='data'>"
     cl, wg = per_bin.source("opencl"), per_bin.source("wgsl")
     assert "gs_atomic_add_f32" in cl and "atomic_cmpxchg" in cl and "atomic_max(&" in cl
@@ -190,13 +190,13 @@ ERRORS = [
 
 
 @pytest.mark.parametrize("src,fragments", ERRORS)
-def test_erreurs(src, fragments, tmp_path):
+def test_errors(src, fragments, tmp_path):
     msg = compile_error(src, tmp_path)
     for f in fragments:
         assert f in msg, f"« {f} » absent de : {msg}"
 
 
-def test_dimension_de_sortie_inconnue():
+def test_unknown_output_dimension():
     @gs.kernel(grid="x")
     def k(x: gs.f32["n"], c: gs.Out[gs.i32["m"]]):
         i = gs.index()
@@ -217,7 +217,7 @@ def flag_multiples(x: gs.i32["n"], flags: gs.Out[gs.i32["w"], 1]):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_dimension_de_sortie_donnee_par_out(dev):
+def test_output_dimension_given_by_out(dev):
     steps = np.array([3, 5, 7], np.int32)
     flags = np.ones(100, np.int32)
     flag_multiples(steps, device=dev, out=flags).numpy()

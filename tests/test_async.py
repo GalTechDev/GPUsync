@@ -41,7 +41,7 @@ def test_await(dev):
 
 
 @pytest.mark.parametrize("dev", GPUS)
-def test_boucle_libre_pendant_l_attente(dev):
+def test_event_loop_free_while_waiting(dev):
     """Pendant `await y`, la boucle asyncio continue de tourner (attente sur un thread)."""
     x = RNG.random((1200, 48), dtype=np.float32)
 
@@ -73,7 +73,7 @@ def test_boucle_libre_pendant_l_attente(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_appel_dans_un_thread(dev):
+def test_call_in_thread(dev):
     """`asyncio.to_thread(kernel, …)` : l'appel entier (même par blocs) hors de la boucle, GIL libéré."""
     x = RNG.random((300, 8), dtype=np.float32)
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
@@ -87,7 +87,7 @@ def test_appel_dans_un_thread(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_plusieurs_threads(dev):
+def test_multiple_threads(dev):
     """Le même kernel lancé et lu en parallèle depuis 8 threads, sur le même périphérique."""
     xs = [RNG.random(20_000, dtype=np.float32) for _ in range(8)]
     out = [None] * 8
@@ -110,7 +110,7 @@ def test_plusieurs_threads(dev):
         check(out[i], float(i) * xs[i] + xs[i])
 
 
-def test_lecture_concurrente_du_meme_resultat():
+def test_concurrent_read_of_same_result():
     x = RNG.random((500, 6), dtype=np.float32)
     y = pairwise(x)
     got = []

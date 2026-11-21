@@ -20,17 +20,17 @@ for dev in sys.argv[1].split(","):
     for _ in range(K):
         z = plus1(x0, device=dev)
     t1 = time.perf_counter(); z.numpy(); t2 = time.perf_counter()
-    ind = ((t1 - t) / K, (t2 - t) / K)
+    indep = ((t1 - t) / K, (t2 - t) / K)
     # 2. chaîne
     t = time.perf_counter(); z = x0
     for _ in range(K):
         z = plus1(z, device=dev)
     t1 = time.perf_counter(); v = int(z.numpy()[0]); t2 = time.perf_counter()
-    ch = ((t1 - t) / K, (t2 - t) / K)
+    chain = ((t1 - t) / K, (t2 - t) / K)
     # 3. lecture seule
-    t = time.perf_counter(); z.numpy(); lec = time.perf_counter() - t
-    t = time.perf_counter(); w2 = plus1(x0, device=dev); w2.numpy(); un = time.perf_counter() - t
+    t = time.perf_counter(); z.numpy(); read_only = time.perf_counter() - t
+    t = time.perf_counter(); w = plus1(x0, device=dev); w.numpy(); single = time.perf_counter() - t
     gb = 2 * 4 * N / 1e9
-    print(f"{dev:9} N={N:>9} | indépendants : soumission {ind[0]*1e3:.3f} ms, total {ind[1]*1e3:.3f} ms/appel ({gb/ind[1]:.0f} Go/s)"
-          f" | chaîne : soumission {ch[0]*1e3:.3f}, total {ch[1]*1e3:.3f} ms/appel ({gb/ch[1]:.0f} Go/s) [{v}]"
-          f" | 1 appel+lecture {un*1e3:.2f} ms, lecture seule (prête) {lec*1e3:.2f} ms", flush=True)
+    print(f"{dev:9} N={N:>9} | indépendants : soumission {indep[0]*1e3:.3f} ms, total {indep[1]*1e3:.3f} ms/appel ({gb/indep[1]:.0f} Go/s)"
+          f" | chaîne : soumission {chain[0]*1e3:.3f}, total {chain[1]*1e3:.3f} ms/appel ({gb/chain[1]:.0f} Go/s) [{v}]"
+          f" | 1 appel+lecture {single*1e3:.2f} ms, lecture seule (prête) {read_only*1e3:.2f} ms", flush=True)

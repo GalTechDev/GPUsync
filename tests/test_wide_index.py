@@ -20,19 +20,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WGPU = ("metal", "vulkan", "dx12")
 
 
-def test_code_genere():
+def test_generated_code():
     from test_index import pairwise
 
     narrow = pairwise.source("opencl")
     assert "(long)" not in narrow  # variante par défaut : indices 32 bits, plus rapide
 
 
-def test_suites_avec_indices_larges():
+def test_series_with_wide_indices():
     """Les tests des kernels avec index et du mode explicite, avec indices 64 bits forcés (hors wgpu)."""
     # Tests sans `device=` : sur un périphérique qui a les indices 64 bits.
     env = dict(os.environ, GPUSYNC_WIDE_INDEX_LIMIT="16", GPUSYNC_DEVICE=next(d.id for d in gs.devices() if d.id.split(":")[0] not in WGPU))
-    # test_mode_par_blocs parcourt lui-même les GPU dédiés, Vulkan compris : exclu ici.
-    skip = " and ".join([f"not {b}" for b in WGPU] + ["not mode_par_blocs"])
+    # test_block_mode parcourt lui-même les GPU dédiés, Vulkan compris : exclu ici.
+    skip = " and ".join([f"not {b}" for b in WGPU] + ["not block_mode"])
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", "-k", skip,
          "test_index.py", "test_rows.py", "test_explicit.py"],
@@ -58,7 +58,7 @@ SCRIPT = textwrap.dedent('''
 ''')
 
 
-def test_wgpu_refuse_clairement(tmp_path):
+def test_wgpu_refuses_clearly(tmp_path):
     env = dict(os.environ, GPUSYNC_WIDE_INDEX_LIMIT="16")
     script = tmp_path / "large.py"  # dans un fichier : le source d'un kernel doit être lisible
     script.write_text(SCRIPT)
@@ -74,7 +74,7 @@ def test_wgpu_refuse_clairement(tmp_path):
 
 @pytest.mark.skipif(os.environ.get("GS_BIG") != "1", reason="8 Gio de données : GS_BIG=1 pour l'activer")
 @pytest.mark.parametrize("dev", [d.id for d in gs.devices() if d.id.split(":")[0] in ("cuda", "opencl", "cpu")])
-def test_plus_de_2_31_elements(dev):
+def test_more_than_2_31_elements(dev):
     """Tableau de 2³¹ + 2048 éléments f32 (8 Gio), gardé entier : lu à la ligne `n − 1 − i`."""
     n, t = (1 << 20) + 1, 2048
     x = np.empty((n, t), dtype=np.float32)

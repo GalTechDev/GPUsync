@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_boucle_et_ternaire() {
+    fn runs_loop_and_ternary() {
         let k = sample();
         let xs: Vec<u8> = [1.0f32, -2.0, 0.5]
             .iter()
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn range_comme_python() {
+    fn range_like_python() {
         // range(5, 0, -2) → 5, 3, 1 ; pas nul → aucune itération (au lieu d'une boucle infinie).
         for (start, stop, step, expected) in
             [(5, 0, -2, 3), (0, 5, 1, 5), (0, 5, 0, 0), (3, 3, 1, 0)]

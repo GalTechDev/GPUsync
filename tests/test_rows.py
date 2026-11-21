@@ -62,7 +62,7 @@ def needs_whole(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_lignes_decoupees(dev, limits):
+def test_split_rows(dev, limits):
     x = RNG.standard_normal((300, 9)).astype(np.float32)
     mean, std, arg = moments(x, device=dev)
     check(mean, x.mean(1), rtol=1e-5)
@@ -73,7 +73,7 @@ def test_lignes_decoupees(dev, limits):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_entree_entiere_et_sortie_decoupee(dev, limits):
+def test_whole_input_and_split_output(dev, limits):
     x = RNG.random((150, 6), dtype=np.float32)
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
     v = RNG.random(6, dtype=np.float32)
@@ -103,7 +103,7 @@ def test_entree_entiere_et_sortie_decoupee(dev, limits):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_dtw_par_blocs(dev, limits):
+def test_dtw_by_blocks(dev, limits):
     x = RNG.random((90, 12), dtype=np.float32)
     try:
         y = dtw(x, 3, device=dev)
@@ -114,7 +114,7 @@ def test_dtw_par_blocs(dev, limits):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_entree_restee_sur_le_peripherique(dev):
+def test_input_left_on_device(dev):
     """Une sortie restée sur le GPU, relue par blocs de lignes par le kernel suivant."""
     x = RNG.random((200, 5), dtype=np.float32)
     d = pairwise(x, device=dev)  # réglages par défaut : Résident sur GPU dédié
@@ -129,7 +129,7 @@ def test_entree_restee_sur_le_peripherique(dev):
 
 
 @pytest.mark.parametrize("dev", [d for d in DEVICES if d != "cpu:0"])
-def test_lancements_cadences(dev):
+def test_paced_launches(dev):
     """Grille de plus de 65 536 cases : plusieurs lancements chronométrés, résultat identique."""
     x = RNG.random((700, 4), dtype=np.float32)
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
@@ -138,7 +138,7 @@ def test_lancements_cadences(dev):
     check(moments(y, device=dev)[0], y.mean(1), rtol=1e-5)
 
 
-def test_mode_par_blocs():
+def test_block_mode():
     """Sur GPU dédié, un appel au-delà du budget passe en mode « flux » (par blocs de lignes)."""
     dedicated = [d.id for d in gs.devices() if not d.unified_memory]
     if not dedicated:

@@ -247,7 +247,7 @@ mod tests {
                     hidden: false,
                 },
                 Param {
-                    name: "moyenne".into(),
+                    name: "mean".into(),
                     kind: ParamKind::Scalar,
                     ty: Scalar::F32,
                     dims: vec![],
@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn helpers_detectes() {
+    fn helpers_detected() {
         let h = helpers(&sample());
         assert!(h.contains(&Helper::ModF32) && h.contains(&Helper::PowF32));
         assert!(!h.contains(&Helper::FloorDivI32));

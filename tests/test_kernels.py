@@ -149,7 +149,7 @@ def test_normalize(device):
     check(normalize(x, 0.5, 0.25, device=device), (x - np.float32(0.5)) / np.float32(0.25))
 
 
-def test_boucle_et_locale_retypee(device):
+def test_loop_and_retyped_local(device):
     x = f32(RNG.uniform(-1, 1, N))
     ref = np.zeros_like(x)
     for _ in range(7):
@@ -158,7 +158,7 @@ def test_boucle_et_locale_retypee(device):
     check(horner(x, 0, device=device), np.zeros_like(x))
 
 
-def test_branches_and_or_not_comparaisons_chainees(device):
+def test_branches_and_or_not_chained_comparisons(device):
     x, y = f32(RNG.uniform(-1, 1, N)), f32(RNG.uniform(-1, 1, N))
     ref = np.where((x > 0.5) & (y > 0.5), x + y,
                    np.where((x < -0.5) | ~(y < 0.0), x - y,
@@ -166,7 +166,7 @@ def test_branches_and_or_not_comparaisons_chainees(device):
     check(branches(x, y, device=device), ref.astype(np.float32))
 
 
-def test_entiers_comme_python(device):
+def test_integers_like_python(device):
     a = RNG.integers(-1000, 1000, N).astype(np.int32)
     b = RNG.integers(-50, 50, N).astype(np.int32)
     b[::17] = 0  # division par zéro : 0, comme NumPy
@@ -175,25 +175,25 @@ def test_entiers_comme_python(device):
     check(int_ops(a, b, device=device), ref.astype(np.int32))
 
 
-def test_entiers_non_signes_enroulement(device):
+def test_unsigned_integers_wraparound(device):
     a = RNG.integers(0, 2**31, N, dtype=np.uint32)
     b = RNG.integers(0, 2**32 - 1, N, dtype=np.uint32)
     ref = (a - b) * np.uint32(3) + a // np.uint32(7) + b % np.uint32(5)
     check(uint_wrap(a, b, device=device), ref)
 
 
-def test_fonctions_mathematiques(device):
+def test_math_functions(device):
     x, y = f32(RNG.uniform(-3, 3, N)), f32(RNG.uniform(-3, 3, N))
     check(maths(x, y, device=device), maths.py_func(x, y).astype(np.float32), rtol=2e-5, atol=2e-5)
 
 
-def test_modulo_et_division_entiere_flottants(device):
+def test_float_modulo_and_floor_division(device):
     x, y = f32(RNG.uniform(-10, 10, N)), f32(RNG.uniform(-10, 10, N))
     ref = np.remainder(x, np.float32(1.7)) + np.remainder(y, np.float32(-0.9)) * 10 + np.floor(x / np.float32(0.3)) * 100
     check(py_mod_div(x, y, device=device), ref.astype(np.float32), rtol=1e-5, atol=1e-4)
 
 
-def test_puissance_base_negative(device):
+def test_power_negative_base(device):
     x = f32(RNG.uniform(-4, 4, N))
     check(negative_pow(x, device=device), negative_pow.py_func(x), rtol=1e-5, atol=1e-5)
 
@@ -235,7 +235,7 @@ def test_f64(device):
     check(y, x * 1e-12 + 1.0, rtol=1e-15, atol=0)
 
 
-def test_f64_operations_sans_fonctions_transcendantes(device):
+def test_f64_ops_without_transcendental_functions(device):
     x = RNG.uniform(-3, 3, N)
     x = np.abs(x)  # sqrt
     y = (np.remainder(x, 0.7) + np.floor(x / 0.3) * 1.25 + np.sqrt(x) + np.floor(x * 3.0) + np.abs(x - 0.5)
@@ -246,7 +246,7 @@ def test_f64_operations_sans_fonctions_transcendantes(device):
         check(f64_ops(x, 1.25, device=device), ref, rtol=1e-14, atol=1e-14)
 
 
-def test_f64_fonctions_mathematiques(device):
+def test_f64_math_functions(device):
     """exp / log en f64 : jamais sur Vulkan (précision f32 silencieuse ou plantage du pilote, mesuré)."""
     x = RNG.random(N)
     ref = np.exp(x) + np.log(1.0 + x * x)
@@ -262,7 +262,7 @@ def test_f64_fonctions_mathematiques(device):
     check(y, ref, rtol=1e-14, atol=0)
 
 
-def test_choix_automatique_selon_les_besoins():
+def test_automatic_choice_by_requirements():
     """Sans device= : premier du classement s'il convient, sinon repli averti vers un périphérique capable."""
     from gpusync._device import capable, ranked
 
@@ -282,7 +282,7 @@ def test_choix_automatique_selon_les_besoins():
                 assert chosen.backend == "opencl"
 
 
-def test_formes_quelconques_et_tableau_vide(device):
+def test_arbitrary_shapes_and_empty_array(device):
     x = f32(RNG.random((37, 3, 5)))
     y = normalize(x, 0.0, 2.0, device=device)
     assert y.shape == (37, 3, 5)
@@ -291,21 +291,21 @@ def test_formes_quelconques_et_tableau_vide(device):
     assert empty.shape == (0, 4) and np.asarray(empty).size == 0
 
 
-def test_chainage_et_vue_non_contigue(device):
+def test_chaining_and_non_contiguous_view(device):
     x = f32(RNG.random((64, 64)))
     view = x[:, ::2]  # non contigu : copié en contigu
     y = normalize(normalize(view, 1.0, 2.0, device=device), -0.5, 0.5, device=device)
     check(y, ((view - np.float32(1)) / np.float32(2) + np.float32(0.5)) / np.float32(0.5))
 
 
-def test_chainage_entre_peripheriques():
+def test_chaining_across_devices():
     x = f32(RNG.random(N))
     y = normalize(x, 0.0, 2.0, device=DEVICES[0])
     z = normalize(y, 0.0, 0.5, device=DEVICES[-1])
     check(z, x)
 
 
-def test_zero_copie_opencl_memoire_unifiee():
+def test_zero_copy_opencl_unified_memory():
     unified = [d for d in gs.devices() if d.backend == "opencl" and d.unified_memory]
     if not unified:
         pytest.skip("pas de périphérique OpenCL à mémoire unifiée")
@@ -317,7 +317,7 @@ def test_zero_copie_opencl_memoire_unifiee():
     check(out, x)
 
 
-def test_resultat_inutilise_et_entrees_liberees(device):
+def test_unused_result_and_released_inputs(device):
     # Le résultat est abandonné et l'entrée libérée avant la fin du calcul : rien ne doit planter.
     for _ in range(20):
         normalize(f32(RNG.random(1 << 16)), 0.0, 1.0, device=device)
@@ -325,7 +325,7 @@ def test_resultat_inutilise_et_entrees_liberees(device):
     check(y, np.ones(8, np.float32))
 
 
-def test_choix_du_peripherique():
+def test_device_choice():
     from gpusync._device import ranked
 
     assert gs.default_device().id == ranked()[0].id
@@ -337,7 +337,7 @@ def test_choix_du_peripherique():
         normalize(f32([1.0]), 0.0, 1.0, device="opencl:42")
 
 
-def test_tableau_plus_grand_qu_un_buffer_wgpu():
+def test_array_larger_than_a_wgpu_buffer():
     # Sur l'UHD 770 en Vulkan, un buffer lié est limité à 1 Gio − 4 o. Avant M1.5 : résultat faux sans
     # erreur, puis erreur claire ; depuis M1.5 : traité par blocs (mode Flux), sans limite.
     small = [d for d in gs.devices() if d.backend in ("metal", "vulkan", "dx12")
@@ -372,7 +372,7 @@ def loop_var(x: gs.f32["n", "t"], m: gs.i32) -> (gs.i32["n"], gs.i32["n"], gs.i3
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_variable_de_boucle_comme_en_python(dev):
+def test_loop_variable_like_python(dev):
     x = np.zeros((5, 7), np.float32)
     k, j, count = loop_var(x, 3, device=dev)
     check(k, np.full(5, 6, np.int32))

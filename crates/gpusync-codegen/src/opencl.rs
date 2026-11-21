@@ -657,7 +657,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn genere_un_kernel_lisible() {
+    fn emits_readable_kernel() {
         let src = emit_opencl(&crate::tests::sample()).unwrap();
         assert_eq!(src.entry, "gs_normalize");
         let c = &src.code;
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn litteraux() {
+    fn literals() {
         assert_eq!(lit(Const::F32(3.0)), "3.0f");
         assert_eq!(lit(Const::F32(1e-7)), "1e-7f");
         assert_eq!(lit(Const::F32(f32::INFINITY)), "INFINITY");

@@ -100,14 +100,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn type_de_peripherique() {
+    fn device_type() {
         assert_eq!(kind_of(CL_DEVICE_TYPE_GPU, true), DeviceKind::IntegratedGpu);
         assert_eq!(kind_of(CL_DEVICE_TYPE_GPU, false), DeviceKind::DiscreteGpu);
         assert_eq!(kind_of(CL_DEVICE_TYPE_CPU, true), DeviceKind::Cpu);
     }
 
     #[test]
-    fn la_decouverte_ne_plante_jamais() {
+    fn discovery_never_crashes() {
         // Disponible ou non selon la machine : seul compte l'absence de panique.
         let _ = OpenClBackend.devices();
     }

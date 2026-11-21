@@ -52,7 +52,7 @@ def ints(n, lo, hi, dtype=np.int64):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_arithmetique_i64(dev):
+def test_arithmetic_i64(dev):
     x = ints(5000, -BIG, BIG)
     y = ints(5000, 1, 1 << 30) * RNG.choice([-1, 1], 5000)
     c = (1 << 45) + 7
@@ -64,7 +64,7 @@ def test_arithmetique_i64(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_arithmetique_u64(dev):
+def test_arithmetic_u64(dev):
     x = ints(4000, 0, 1 << 62, np.uint64)
     y = ints(4000, 1, 1 << 40, np.uint64)
     s, q, r = arith_u(x, y, device=dev)
@@ -74,7 +74,7 @@ def test_arithmetique_u64(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_elargissement_et_conversions(dev):
+def test_widening_and_conversions(dev):
     a = ints(3000, -(1 << 31), 1 << 31, np.int32)
     b = ints(3000, -BIG, BIG)
     u = ints(3000, 0, 1 << 32, np.uint32)
@@ -86,14 +86,14 @@ def test_elargissement_et_conversions(dev):
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_comparaison_et_constante(dev):
+def test_comparison_and_constant(dev):
     x = ints(2000, -BIG, BIG)
     y = ints(2000, -BIG, BIG)
     check(cmp_select(x, y, device=dev), np.where(x > y, x, y - BIG))
 
 
 @pytest.mark.parametrize("dev", DEVICES)
-def test_restes_d_un_grand_nombre(dev):
+def test_residues_of_big_number(dev):
     """Le cœur du crible profond : grand nombre (1 000 chiffres base 256) modulo d < 2⁴⁰."""
     n = 300
     number = int.from_bytes(RNG.bytes(1000), "big")
@@ -124,6 +124,6 @@ def test_messages(tmp_path):
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
 
-def test_scalaire_hors_plage():
+def test_scalar_out_of_range():
     with pytest.raises(gs.TypeMismatch, match="hors de la plage de i64"):
         arith(np.zeros(4, np.int64), np.ones(4, np.int64), 1 << 70)

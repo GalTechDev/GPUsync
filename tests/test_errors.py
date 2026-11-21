@@ -53,7 +53,7 @@ CASES = [
 
 
 @pytest.mark.parametrize("src,exc,fragments", CASES)
-def test_erreurs_de_compilation(src, exc, fragments, tmp_path):
+def test_compile_errors(src, exc, fragments, tmp_path):
     if exc is None:  # cas valides (locale retypée en f32 puis convertie, constante globale)
         path = tmp_path / "ok.py"
         path.write_text("import math\nimport gpusync as gs\n\nLIMITE = 3\n\n@gs.kernel\n" + src)
@@ -84,7 +84,7 @@ def scale(a: gs.i32[:], s: gs.u32) -> gs.i32[:]:
     return a * gs.i32(s)
 
 
-def test_type_de_tableau():
+def test_array_type():
     with pytest.raises(gs.TypeMismatch, match=r"'a' : gs.f32\[:\] attendu, reçu un tableau float64.*astype"):
         add(np.ones(3), np.ones(3, np.float32), device="cpu")
 
@@ -94,12 +94,12 @@ def test_cast_auto():
     assert np.asarray(y).tolist() == [1.0, 2.0, 3.0]
 
 
-def test_formes_incompatibles():
+def test_incompatible_shapes():
     with pytest.raises(gs.ShapeMismatch, match=r"'a' \(3,\), 'b' \(4,\)"):
         add(np.ones(3, np.float32), np.ones(4, np.float32), device="cpu")
 
 
-def test_scalaires():
+def test_scalars():
     a = np.arange(4, dtype=np.int32)
     assert np.asarray(scale(a, 3, device="cpu")).tolist() == [0, 3, 6, 9]
     with pytest.raises(gs.TypeMismatch, match="hors de la plage de u32"):
@@ -112,13 +112,13 @@ def test_scalaires():
         scale(a)
 
 
-def test_code_genere_visible():
+def test_generated_code_visible():
     assert "__kernel void gs_add" in add.source("opencl")
     assert "@compute" in add.source("wgsl")
     assert "Kernel" in add.source("ir")
     assert repr(add) == "<gs.kernel add(a: gs.f32[:], b: gs.f32[:]) -> gs.f32[:]>"
 
 
-def test_fonction_python_d_origine_utilisable():
+def test_original_python_function_usable():
     a = np.array([1.0, 2.0], np.float32)
     assert add.py_func(a, a).tolist() == [2.0, 4.0]

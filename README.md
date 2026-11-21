@@ -126,7 +126,7 @@ Visual Studio Build Tools « C++ » sur Windows).
 ```bash
 python3 tools/dev.py setup                       # .venv + maturin, pytest, numpy + compilation
 python3 tools/dev.py test                        # recompile, puis cargo test + pytest + diagnostic
-python3 tools/dev.py run tools/bench_m1.py tout  # surcoût par appel, débit, pic mémoire
+python3 tools/dev.py run tools/bench_m1.py all  # surcoût par appel, débit, pic mémoire
 python3 tools/dev.py run tools/bench_m15.py ram 4 opencl:0   # gros volumes (§9.8 de l'architecture)
 python3 tools/dev.py run tools/bench_m2.py       # DTW sur chaque périphérique
 python3 tools/dev.py run tools/bench_m3.py pairwise 72000 16 vulkan:0   # sortie plus grosse que la VRAM

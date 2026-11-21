@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Mesures du jalon M1 : surcoût par appel, débit, pic mémoire (zéro-copie).
 
-    python tools/bench_m1.py latence            # tous les périphériques
-    python tools/bench_m1.py memoire opencl:0   # pic mémoire sur 1 Gio (un processus par mesure)
-    python tools/bench_m1.py tout               # latence + mémoire de chaque périphérique
+    python tools/bench_m1.py latency            # tous les périphériques
+    python tools/bench_m1.py memory opencl:0    # pic mémoire sur 1 Gio (un processus par mesure)
+    python tools/bench_m1.py all                # latence + mémoire de chaque périphérique
 
 Le surcoût est mesuré de bout en bout : appel du kernel + lecture du résultat (np.asarray), sur
 1 000 éléments, là où le calcul lui-même est négligeable. Référence prototype (M5 Pro, OpenCL) :
@@ -107,18 +107,18 @@ def memory(dev: str) -> None:
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "tout"
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "all"
     devs = [d.id for d in gs.devices()]
-    if cmd == "memoire" and len(sys.argv) > 2:
+    if cmd == "memory" and len(sys.argv) > 2:
         memory(sys.argv[2])
-    elif cmd in ("latence", "tout"):
+    elif cmd in ("latency", "all"):
         print("Surcoût par appel (appel + lecture du résultat) et débit :")
         for d in devs:
             latency(d)
-        if cmd == "tout":
+        if cmd == "all":
             print("\nPic mémoire (un processus par périphérique) :", flush=True)
             for d in devs:
                 if d != "cpu:0":
-                    subprocess.run([sys.executable, __file__, "memoire", d], check=False)
+                    subprocess.run([sys.executable, __file__, "memory", d], check=False)
     else:
         sys.exit(__doc__)
