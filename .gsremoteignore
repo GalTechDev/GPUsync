@@ -1,5 +1,11 @@
-# Prototype v1 : référence locale, inutile sur les agents
-GPUsync-python
+# Prototype v1 : seul son code est utile sur les agents (comparaison tools/compare_v1)
+GPUsync-python/site
+GPUsync-python/docs
+GPUsync-python/tests
+GPUsync-python/examples/results
+# Environnement Python du prototype : chaque machine crée le sien
+.venv-v1
 # Extension compilée localement : chaque machine compile la sienne
 python/gpusync/*.so
 python/gpusync/*.pyd
+.gpusync_debug

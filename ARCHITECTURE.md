@@ -16,6 +16,28 @@
 | M5 Mode explicite | ✅ `@gs.kernel(grid="x")` ou `grid=("n", "n")`, sorties `gs.Out[gs.i32[10]]` (valeur de départ : `gs.Out[gs.f32["m"], gs.inf]`), `gs.atomic_add` / `atomic_min` / `atomic_max` en i32, u32, f32 (f32 émulé par comparaison-échange en OpenCL 1.2 et en WGSL), indices multiples `(a, b)`, accumulation avec `out=` ; écriture hors limites jamais faite et signalée (`gs.OutOfBounds`) | Mac : 239 tests ; PC : 364 tests |
 | M6 CUDA | ✅ émetteur CUDA C (même générateur qu'OpenCL C, autre dialecte), backend CUDA à liaisons dynamiques maison (driver + NVRTC), moteur de transferts commun à OpenCL et CUDA (trait `Gpu`), réserve de buffers, cache disque du PTX, NVRTC par le toolkit ou `pip install nvidia-cuda-nvrtc-cu12` | PC : 430 tests, dont les 61 tests différentiels par périphérique sur `cuda:0` (parité) ; Mac : 240 tests (CUDA absent, signalé) |
 
+#### Comparaison avec le prototype v1 (`tools/compare_v1`, 21/11/2026)
+
+Mêmes calculs, même GPU, même API de calcul des deux côtés, chaque mesure dans un processus neuf ; le
+prototype tourne dans son propre environnement (`.venv-v1` : numpy, pyopencl, llvmlite, cupy). Résultats
+identiques partout (DTW 391 : écart nul au référentiel ; DTW 2000 : sommes égales au bit près).
+
+| mesure | Mac, OpenCL (v1 → v2) | PC RTX, CUDA (CuPy → `cuda:0`) | PC RTX, OpenCL (v1 → v2) |
+|---|---|---|---|
+| import de la bibliothèque | 42 → 6 ms | 229 → 7 ms | 234 → 6 ms |
+| 1er appel (compilation) | 8,3 → 3,3 ms | 59 → 52 ms | **35 → 66 ms** |
+| surcoût par appel | 3,28 → 0,25 ms (× 13) | 0,28 → 0,08 ms (× 3,3) | 0,67 → 0,06 ms (× 11) |
+| 10 M éléments | 4,7 → 0,9 ms (× 5) | **10,0 → 11,3 ms** | 28,6 → 13,9 ms (× 2) |
+| 1 Gio (durée ; mémoire en plus) | 0,09 → 0,03 s ; non mesurable sous macOS | 0,40 s ; 1,02 Gio → 0,31 s ; 0,27 Gio | **0,28 s ; 0,01 Gio → 0,38 s ; 0,28 Gio** |
+| DTW 391 séries OXYGENE | 959 → 2,5 ms (× 380) | 60 → 0,95 ms (× 63) | 1241 → 1,0 ms (× 1218) |
+| DTW 2000 × 64 | 5023 → 286 ms (× 18) | 568 → 104 ms (× 5,5) | 2484 → 105 ms (× 24) |
+
+En gras : là où le prototype fait mieux. Le DTW 391 du prototype est mesuré comme son propre script
+(`run_xlsx_dtw.py` : 25 appels de 16 références, avec la machinerie hors mémoire à chaque appel) ; le DTW
+2000 reflète mieux le débit des kernels. Pistes : sur GPU dédié en OpenCL, le prototype transfère 1 Gio sans
+tampon épinglé intermédiaire (plus rapide, presque sans mémoire en plus) ; en CUDA, CuPy copie 10 M éléments
+directement depuis la mémoire de l'hôte. Les deux reviennent au « dernier `memcpy` » de §9.3.
+
 #### Mesures M6 (RTX 4080 SUPER, à chaud ; mêmes scripts qu'aux jalons précédents)
 
 | | `cuda:0` | `opencl:0` | `vulkan:0` |

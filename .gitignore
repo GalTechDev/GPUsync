@@ -21,3 +21,6 @@ build/
 # Extension compilée par maturin (pip install -e .)
 python/gpusync/*.so
 python/gpusync/*.pyd
+.venv-v1/
+# Noyaux générés par le prototype v1 (tools/compare_v1)
+.gpusync_debug/
