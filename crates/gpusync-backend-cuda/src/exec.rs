@@ -134,6 +134,8 @@ pub struct CuKernel {
     ctx: CUcontext,
     module: CUmodule,
     func: CUfunction,
+    /// Threads par bloc : la taille de groupe du kernel (`group=`), sinon `BLOCK`.
+    block: u32,
 }
 
 unsafe impl Send for CuKernel {}
@@ -312,7 +314,13 @@ impl CuDevice {
     }
 
     /// Compile (avec cache) le code CUDA C et renvoie le kernel `entry`.
-    pub fn compile(&self, code: &str, entry: &str) -> Result<Arc<CuKernel>, BackendError> {
+    /// `group` : threads par bloc imposés par le kernel (mémoire partagée, barrières).
+    pub fn compile(
+        &self,
+        code: &str,
+        entry: &str,
+        group: Option<u32>,
+    ) -> Result<Arc<CuKernel>, BackendError> {
         let mut cache = self.kernels.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(k) = cache.get(code) {
             return Ok(k.clone());
@@ -345,6 +353,7 @@ impl CuDevice {
             ctx: self.ctx,
             module,
             func,
+            block: group.unwrap_or(BLOCK),
         });
         cache.insert(code.to_string(), k.clone());
         Ok(k)
@@ -598,7 +607,7 @@ impl CuDevice {
             })
             .collect();
         let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v.as_mut_ptr().cast()).collect();
-        let grid = (n as u64).div_ceil(BLOCK as u64).max(1);
+        let grid = (n as u64).div_ceil(k.block as u64).max(1);
         if grid > i32::MAX as u64 {
             return Err(BackendError(format!(
                 "{n} éléments : trop pour une seule grille CUDA"
@@ -611,7 +620,7 @@ impl CuDevice {
                     grid as u32,
                     1,
                     1,
-                    BLOCK,
+                    k.block,
                     1,
                     1,
                     0,

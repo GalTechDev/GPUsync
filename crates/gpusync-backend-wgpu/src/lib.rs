@@ -76,6 +76,8 @@ struct Candidate {
     f64: bool,
     int64: bool,
     max_buffer_bytes: u64,
+    max_group: u32,
+    shared_bytes: u64,
 }
 
 fn candidate(i: usize, a: &wgpu::Adapter) -> Option<Candidate> {
@@ -114,6 +116,12 @@ fn candidate(i: usize, a: &wgpu::Adapter) -> Option<Candidate> {
             .limits()
             .max_buffer_size
             .min(a.limits().max_storage_buffer_binding_size),
+        max_group: a
+            .limits()
+            .max_compute_invocations_per_workgroup
+            .min(a.limits().max_compute_workgroup_size_x)
+            .min(1024),
+        shared_bytes: a.limits().max_compute_workgroup_storage_size as u64,
     })
 }
 
@@ -170,6 +178,8 @@ fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
                 unified_memory: c.kind == DeviceKind::IntegratedGpu,
                 memory_bytes: None,
                 max_buffer_bytes: Some(c.max_buffer_bytes),
+                max_group: c.max_group,
+                shared_bytes: c.shared_bytes,
             },
         ));
     }
@@ -210,6 +220,8 @@ mod tests {
             f64: api == "vulkan",
             int64: true,
             max_buffer_bytes: 1 << 30,
+            max_group: 256,
+            shared_bytes: 16 << 10,
         }
     }
 

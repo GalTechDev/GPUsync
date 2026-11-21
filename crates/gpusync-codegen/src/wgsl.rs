@@ -165,6 +165,7 @@ impl Gen<'_> {
             ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.expr(i)),
             ExprKind::LocalLoad(l, i) => format!("{}[{}]", local_name(self.k, *l), self.expr(i)),
             ExprKind::GridIndex(a) => format!("gs_g{a}"),
+            ExprKind::Lane => "i32(gs_lid)".into(),
             ExprKind::Cast(a) => format!("{}({})", w_type(e.ty), self.expr(a)),
         }
     }
@@ -415,6 +416,7 @@ impl Gen<'_> {
                 self.indent(body);
                 self.out.line("}");
             }
+            Stmt::Barrier => self.out.line("workgroupBarrier();"),
             Stmt::Break => self.out.line("break;"),
             Stmt::Continue => self.out.line("continue;"),
             Stmt::LocalStore {
@@ -665,15 +667,40 @@ pub fn emit_wgsl_variant(
         .filter(|p| p.kind == ParamKind::Scalar && p.ty != Scalar::F64)
         .map(|p| if p.ty.is_int64() { 2 } else { 1 })
         .sum();
-    g.out
-        .line(format!("@compute @workgroup_size({WGSL_WORKGROUP_SIZE})"));
-    g.out.line("fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {");
-    g.out.depth = 1;
-    g.out.line(format!(
-        "let gs_i = gid.x + gid.y * (nwg.x * {WGSL_WORKGROUP_SIZE}u);"
-    ));
-    g.out
-        .line(format!("if (gs_i >= gs_params[{n_scalars}]) {{ return; }}"));
+    // Mémoire partagée : variables du module (mises à zéro par wgpu pour chaque groupe).
+    for (i, l) in k.locals.iter().enumerate() {
+        if let (true, Some(n)) = (l.shared, l.len) {
+            g.out.line(format!(
+                "var<workgroup> {}: array<{}, {n}>;",
+                local_name(k, i),
+                w_type(l.ty)
+            ));
+        }
+    }
+    match k.group {
+        None => {
+            g.out
+                .line(format!("@compute @workgroup_size({WGSL_WORKGROUP_SIZE})"));
+            g.out.line("fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {");
+            g.out.depth = 1;
+            g.out.line(format!(
+                "let gs_i = gid.x + gid.y * (nwg.x * {WGSL_WORKGROUP_SIZE}u);"
+            ));
+            g.out
+                .line(format!("if (gs_i >= gs_params[{n_scalars}]) {{ return; }}"));
+        }
+        Some(gsz) => {
+            // Garde sur le numéro du groupe (uniforme) : les barrières restent en flot uniforme.
+            g.out.line(format!("@compute @workgroup_size({gsz})"));
+            g.out.line("fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) gs_lid: u32, @builtin(num_workgroups) nwg: vec3<u32>) {");
+            g.out.depth = 1;
+            g.out.line("let gs_wg = wid.x + wid.y * nwg.x;");
+            g.out.line(format!(
+                "if (gs_wg * {gsz}u >= gs_params[{n_scalars}]) {{ return; }}"
+            ));
+            g.out.line(format!("let gs_i = gs_wg * {gsz}u + gs_lid;"));
+        }
+    }
     let (mut word, mut fword) = (0, 0);
     for (i, p) in k.params.iter().enumerate() {
         if p.kind == ParamKind::Scalar {
@@ -718,6 +745,7 @@ pub fn emit_wgsl_variant(
     }
     for (i, l) in k.locals.iter().enumerate() {
         match l.len {
+            Some(_) if l.shared => {}
             Some(n) => g.out.line(format!(
                 "var {}: array<{}, {n}>;",
                 local_name(k, i),

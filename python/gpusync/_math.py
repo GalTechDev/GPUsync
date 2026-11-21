@@ -58,6 +58,23 @@ def local(dtype, n):
     return _np.zeros(n, dtype=dtype.np)
 
 
+def shared(dtype, n):
+    """Dans un kernel avec group= : tableau commun aux threads du groupe (`t = gs.shared(gs.f32, 256)`),
+    mis à zéro, de taille constante. Écrire puis lire une case d'un autre thread demande gs.barrier()."""
+    return _np.zeros(n, dtype=dtype.np)
+
+
+def lane():
+    """Dans un kernel avec group= : position du thread dans son groupe, de 0 à group − 1."""
+    raise RuntimeError("gs.lane() n'a de sens que dans un kernel avec group= (@gs.kernel(group=256))")
+
+
+def barrier():
+    """Dans un kernel avec group= : attend tous les threads du groupe ; leurs écritures dans gs.shared
+    sont ensuite visibles. Tous les threads du groupe doivent atteindre la même barrière."""
+    raise RuntimeError("gs.barrier() n'a de sens que dans un kernel avec group= (@gs.kernel(group=256))")
+
+
 def atomic_add(out, index, value):
     """Dans un kernel avec grid= : out[index] += value, sans conflit entre cases de la grille."""
     _np.add.at(out, index, value)
@@ -81,5 +98,5 @@ nan = _m.nan
 
 __all__ = [
     "sqrt", "exp", "exp2", "log", "log2", "sin", "cos", "tan", "tanh", "atan2",
-    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
+    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "shared", "lane", "barrier", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
 ]

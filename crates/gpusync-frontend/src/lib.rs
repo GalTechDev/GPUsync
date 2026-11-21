@@ -15,7 +15,9 @@
 //! contexte (`x * 2` reste en f32) ; une locale prend le type de ses affectations (`acc = 0` puis
 //! `acc += x` avec x flottant → acc flottant, comme en Python). Jamais de promotion implicite vers f64.
 
+mod uniform;
 use std::collections::HashMap;
+use uniform::check_barriers;
 
 use gpusync_ir::*;
 use serde_json::Value as J;
@@ -359,6 +361,30 @@ pub fn lower(spec: &J) -> R<Kernel> {
         }
     }
     let line_offset = spec["line_offset"].as_u64().unwrap_or(0) as u32;
+    // Taille de groupe (`@gs.kernel(group=n)`) : kernels avec gs.index(), hors mode explicite.
+    let group: Option<u32> = match &spec["group"] {
+        J::Null => None,
+        g => {
+            let n = g.as_u64().filter(|n| (1..=1024).contains(n)).ok_or_else(|| {
+                err(ErrorKind::Type, format!("group={g} : nombre de threads par groupe entre 1 et 1024 (ex. group=256)"), None)
+            })?;
+            if !indexed {
+                return Err(err(
+                    ErrorKind::Syntax,
+                    "group= : un groupe calcule des cases voisines de la sortie, le kernel doit utiliser gs.index()".into(),
+                    None,
+                ));
+            }
+            if explicit {
+                return Err(err(
+                    ErrorKind::Syntax,
+                    "group= avec grid= n'est pas encore supporté".into(),
+                    None,
+                ));
+            }
+            Some(n as u32)
+        }
+    };
     let (rank, chunked, inrow, writable) = match &grid {
         Grid::Indexed {
             axes,
@@ -377,7 +403,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
 
     let mut hints: HashMap<String, Scalar> = HashMap::new();
     for _pass in 0..16 {
-        let (body, locals, restart) = {
+        let (body, locals, restart, barrier_lines) = {
             let mut lw = Lowerer {
                 params: &params,
                 outputs: &outputs,
@@ -395,9 +421,16 @@ pub fn lower(spec: &J) -> R<Kernel> {
                 restart: false,
                 loop_depth: 0,
                 line: None,
+                group,
+                barrier_lines: vec![],
             };
             let body = lw.block(&body_json, true)?;
-            (body, std::mem::take(&mut lw.locals), lw.restart)
+            (
+                body,
+                std::mem::take(&mut lw.locals),
+                lw.restart,
+                std::mem::take(&mut lw.barrier_lines),
+            )
         };
         if restart {
             continue;
@@ -409,14 +442,19 @@ pub fn lower(spec: &J) -> R<Kernel> {
                 None,
             ));
         }
-        return Ok(Kernel {
+        let k = Kernel {
             name,
             params,
             outputs,
             locals,
             body,
             grid,
-        });
+            group,
+        };
+        if group.is_some() {
+            check_barriers(&k, &barrier_lines)?;
+        }
+        return Ok(k);
     }
     Err(err(
         ErrorKind::Type,
@@ -633,6 +671,9 @@ struct Lowerer<'a> {
     restart: bool,
     loop_depth: u32,
     line: Option<u32>,
+    /// Taille de groupe (`group=`) et ligne de chaque `gs.barrier()`, dans l'ordre du code.
+    group: Option<u32>,
+    barrier_lines: Vec<Option<u32>>,
 }
 
 impl Lowerer<'_> {
@@ -788,7 +829,9 @@ impl Lowerer<'_> {
                     if self.is_gs_call(value, "index") {
                         out.extend(self.assign_index(target)?);
                     } else if self.is_gs_call(value, "local") {
-                        self.declare_local_array(target, value)?;
+                        self.declare_local_array(target, value, false)?;
+                    } else if self.is_gs_call(value, "shared") {
+                        self.declare_local_array(target, value, true)?;
                     } else if target["_type"] == "Subscript" {
                         let v = self.expr(value)?;
                         out.push(self.store(target, v)?);
@@ -925,6 +968,21 @@ impl Lowerer<'_> {
                         .any(|f| self.is_gs_call(&s["value"], f)) =>
                 {
                     out.push(self.atomic(&s["value"])?);
+                }
+                "Expr" if self.is_gs_call(&s["value"], "barrier") => {
+                    if self.group.is_none() {
+                        return Err(self.e(
+                            ErrorKind::Syntax,
+                            "gs.barrier() synchronise les threads d'un groupe : déclarez la taille du groupe, @gs.kernel(group=256)",
+                        ));
+                    }
+                    if s["value"]["args"].as_array().is_some_and(|a| !a.is_empty()) {
+                        return Err(
+                            self.e(ErrorKind::Syntax, "gs.barrier() ne prend pas d'argument")
+                        );
+                    }
+                    self.barrier_lines.push(self.line);
+                    out.push(Stmt::Barrier);
                 }
                 "Expr" => {
                     return Err(self.e(
@@ -1135,11 +1193,18 @@ impl Lowerer<'_> {
     }
 
     /// `buf = gs.local(gs.f32, N)` : tableau local de N éléments (N constant).
-    fn declare_local_array(&mut self, target: &J, call: &J) -> R<()> {
+    fn declare_local_array(&mut self, target: &J, call: &J, shared: bool) -> R<()> {
+        let f = if shared { "gs.shared" } else { "gs.local" };
+        if shared && self.group.is_none() {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                "gs.shared(...) : mémoire commune aux threads d'un groupe, déclarez la taille du groupe : @gs.kernel(group=256)",
+            ));
+        }
         if target["_type"] != "Name" {
             return Err(self.e(
                 ErrorKind::Syntax,
-                "gs.local(...) s'affecte à une variable : buf = gs.local(gs.f32, 16)",
+                format!("{f}(...) s'affecte à une variable : buf = {f}(gs.f32, 16)"),
             ));
         }
         let name = target["id"].as_str().unwrap_or("").to_string();
@@ -1147,14 +1212,14 @@ impl Lowerer<'_> {
         if args.len() != 2 {
             return Err(self.e(
                 ErrorKind::Syntax,
-                "gs.local(type, taille) : ex. gs.local(gs.f32, 16)",
+                format!("{f}(type, taille) : ex. {f}(gs.f32, 16)"),
             ));
         }
         let ty = self.annotation_type(&args[0])?;
         if !ty.is_numeric() {
             return Err(self.e(
                 ErrorKind::Type,
-                "gs.local : type numérique attendu (gs.f32, gs.i32…)",
+                format!("{f} : type numérique attendu (gs.f32, gs.i32…)"),
             ));
         }
         let len = match self.expr(&args[1])? {
@@ -1162,7 +1227,7 @@ impl Lowerer<'_> {
             _ => {
                 return Err(self.e(
                     ErrorKind::Type,
-                    "gs.local : la taille doit être une constante entière entre 1 et 65536 (littéral ou constante globale)",
+                    format!("{f} : la taille doit être une constante entière entre 1 et 65536 (littéral ou constante globale)"),
                 ));
             }
         };
@@ -1177,6 +1242,7 @@ impl Lowerer<'_> {
             name: name.clone(),
             ty,
             len: Some(len),
+            shared,
         });
         self.weak.push(false);
         self.local_index.insert(name, i);
@@ -1399,6 +1465,7 @@ impl Lowerer<'_> {
                     len: None,
                     name: name.to_string(),
                     ty,
+                    shared: false,
                 });
                 self.weak
                     .push(declared.is_none() && v.is_lit() && !self.hints.contains_key(name));
@@ -1916,6 +1983,27 @@ impl Lowerer<'_> {
             }
             (Some("gpusync"), "local") => {
                 return Err(self.e(ErrorKind::Syntax, "gs.local(...) s'utilise seul dans une affectation : buf = gs.local(gs.f32, 16)"));
+            }
+            (Some("gpusync"), "shared") => {
+                return Err(self.e(ErrorKind::Syntax, "gs.shared(...) s'utilise seul dans une affectation : t = gs.shared(gs.f32, 256)"));
+            }
+            (Some("gpusync"), "barrier") => {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    "gs.barrier() s'utilise seul, comme une instruction",
+                ));
+            }
+            (Some("gpusync"), "lane") => {
+                if self.group.is_none() {
+                    return Err(self.e(
+                        ErrorKind::Syntax,
+                        "gs.lane() : position du thread dans son groupe, déclarez la taille du groupe : @gs.kernel(group=256)",
+                    ));
+                }
+                if !args.is_empty() {
+                    return Err(self.e(ErrorKind::Syntax, "gs.lane() ne prend pas d'argument"));
+                }
+                return Ok(Val::E(ex(Scalar::I32, ExprKind::Lane)));
             }
             _ => {}
         }

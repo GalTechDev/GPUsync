@@ -72,6 +72,10 @@ pub struct DeviceInfo {
     pub memory_bytes: Option<u64>,
     /// Taille max d'un buffer, en octets (contraint le découpage out-of-core).
     pub max_buffer_bytes: Option<u64>,
+    /// Threads au plus par groupe (`@gs.kernel(group=n)`).
+    pub max_group: u32,
+    /// Mémoire partagée (`gs.shared`) au plus par groupe, en octets.
+    pub shared_bytes: u64,
 }
 
 impl DeviceInfo {
@@ -188,6 +192,8 @@ mod tests {
                         unified_memory: false,
                         memory_bytes: None,
                         max_buffer_bytes: None,
+                        max_group: 1024,
+                        shared_bytes: 48 << 10,
                     })
                     .collect()),
                 Err(e) => Err(BackendError(e.into())),

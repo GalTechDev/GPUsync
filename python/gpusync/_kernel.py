@@ -69,7 +69,7 @@ def _host_array(value, name) -> np.ndarray:
 class Kernel:
     """Kernel compilé à la demande pour chaque périphérique."""
 
-    def __init__(self, func, *, cast: str | None = None, compat: str = "auto", grid=None) -> None:
+    def __init__(self, func, *, cast: str | None = None, compat: str = "auto", grid=None, group=None) -> None:
         if cast not in (None, "auto"):
             raise ValueError("cast : None ou 'auto'")
         if compat not in ("auto", "strict"):
@@ -81,9 +81,11 @@ class Kernel:
         self._cast = cast
         if grid is not None and not (isinstance(grid, str) or (isinstance(grid, (tuple, list)) and grid)):
             raise ValueError('grid : nom d\'une entrée (grid="x") ou tuple de dimensions (grid=("n", "n"))')
+        _check_group(group)
         self._grid = grid
+        self._group = group
         try:
-            spec, self._params, self._outs, self._tuple, self._fills = kernel_json(func, grid)
+            spec, self._params, self._outs, self._tuple, self._fills = kernel_json(func, grid, group)
         except KernelDeclarationError as e:
             raise _core.KernelSyntaxError(f"kernel '{func.__name__}' : {e}") from None
         try:
@@ -388,9 +390,16 @@ class Kernel:
         return given
 
 
-def kernel(func=None, *, cast: str | None = None, compat: str = "auto", grid=None):
+def _check_group(group):
+    if group is not None and (isinstance(group, bool) or not isinstance(group, int) or not 1 <= group <= 1024):
+        raise ValueError("group : nombre de threads par groupe, entier entre 1 et 1024 (ex. group=256)")
+
+
+def kernel(func=None, *, cast: str | None = None, compat: str = "auto", grid=None, group=None):
     """Décorateur : `@gs.kernel`, `@gs.kernel(cast="auto")`, `@gs.kernel(compat="strict")`,
-    `@gs.kernel(grid="data")` (mode explicite : sorties gs.Out écrites par gs.atomic_*)."""
+    `@gs.kernel(grid="data")` (mode explicite : sorties gs.Out écrites par gs.atomic_*),
+    `@gs.kernel(group=256)` (groupes de threads : gs.shared, gs.lane, gs.barrier)."""
+    _check_group(group)
     if func is None:
-        return lambda f: Kernel(f, cast=cast, compat=compat, grid=grid)
-    return Kernel(func, cast=cast, compat=compat, grid=grid)
+        return lambda f: Kernel(f, cast=cast, compat=compat, grid=grid, group=group)
+    return Kernel(func, cast=cast, compat=compat, grid=grid, group=group)

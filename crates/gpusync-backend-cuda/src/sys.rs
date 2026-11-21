@@ -21,6 +21,8 @@ pub type CUfunction = *mut c_void;
 pub type CUdeviceptr = u64;
 pub type NvrtcProgram = *mut c_void;
 
+pub const ATTR_MAX_THREADS_PER_BLOCK: c_int = 1;
+pub const ATTR_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 8;
 pub const ATTR_INTEGRATED: c_int = 18;
 pub const ATTR_CC_MAJOR: c_int = 75;
 pub const ATTR_CC_MINOR: c_int = 76;

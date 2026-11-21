@@ -263,16 +263,19 @@ mod tests {
             ],
             outputs: vec![Scalar::F32],
             grid: Grid::Elementwise,
+            group: None,
             locals: vec![
                 Local {
                     name: "acc".into(),
                     ty: Scalar::F32,
                     len: None,
+                    shared: false,
                 },
                 Local {
                     name: "i".into(),
                     ty: Scalar::I32,
                     len: None,
+                    shared: false,
                 },
             ],
             body: vec![

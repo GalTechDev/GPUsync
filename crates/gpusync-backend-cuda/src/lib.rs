@@ -95,6 +95,8 @@ pub(crate) fn enumerate() -> Result<Vec<(sys::CUdevice, DeviceInfo)>, BackendErr
                 unified_memory: false,
                 memory_bytes: Some(mem as u64),
                 max_buffer_bytes: Some(mem as u64),
+                max_group: attr(sys::ATTR_MAX_THREADS_PER_BLOCK).clamp(1, 1024) as u32,
+                shared_bytes: attr(sys::ATTR_MAX_SHARED_MEMORY_PER_BLOCK).max(0) as u64,
             },
         ));
     }

@@ -90,7 +90,7 @@ def return_types(func, ret) -> tuple[list, bool]:
     )
 
 
-def kernel_spec(func, grid=None) -> tuple[dict, list]:
+def kernel_spec(func, grid=None, group=None) -> tuple[dict, list]:
     """Renvoie (spec JSON pour le frontend, liste des paramètres [(nom, kind, DType, dims)])."""
     try:
         lines, start = inspect.getsourcelines(func)
@@ -172,6 +172,7 @@ def kernel_spec(func, grid=None) -> tuple[dict, list]:
         ],
         "outputs": [{"dtype": o.dtype.name, "dims": list(o.dims)} for o in outs],
         "grid": None if grid is None else (grid if isinstance(grid, str) else list(grid)),
+        "group": group,
         "body": _dump(fdef.body),
         "constants": constants,
         "modules": modules,
@@ -180,13 +181,13 @@ def kernel_spec(func, grid=None) -> tuple[dict, list]:
     return spec, params
 
 
-def kernel_json(func, grid=None) -> tuple[str, list, list, bool, dict]:
+def kernel_json(func, grid=None, group=None) -> tuple[str, list, list, bool, dict]:
     """(spec JSON, paramètres, sorties [ArrayType], la sortie est-elle un tuple ?, valeur de départ
     de chaque gs.Out).
 
     Mode explicite (`grid=`) : les sorties sont les paramètres gs.Out (tuple s'il y en a plusieurs).
     """
-    spec, params = kernel_spec(func, grid)
+    spec, params = kernel_spec(func, grid, group)
     fills = spec.pop("_fills")
     if grid is not None:
         outs = [ArrayType(d, dims) for _, k, d, dims in params if k == "out"]

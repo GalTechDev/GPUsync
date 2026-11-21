@@ -91,6 +91,31 @@ fonctions `gs.*` et `math.*` (`sqrt`, `exp`, `log`, `sin`, `cos`, `tanh`, `atan2
 `min`, `max`…), `gs.mulhi(a, b)` (partie haute du produit complet de deux entiers), conversions `float()`, `int()`, `gs.f32()`, `gs.i32()`, `gs.u32()`. Types : `gs.f32`,
 `gs.f64` (si le périphérique le permet), `gs.i32`, `gs.u32`. `//` et `%` se comportent comme en Python.
 
+**Groupes de threads et mémoire partagée.** `@gs.kernel(group=256)` regroupe les cases voisines de la sortie
+par 256 threads, qui partagent des tableaux `t = gs.shared(gs.f32, 256)` (mémoire rapide du GPU, mise à
+zéro), connaissent leur position `gs.lane()` (0 à 255) et se synchronisent par `gs.barrier()` :
+
+```python
+@gs.kernel(group=256)
+def group_sum(x: gs.f32["n"]) -> gs.f32["n"]:
+    i = gs.index()
+    r = gs.lane()
+    t = gs.shared(gs.f32, 256)
+    t[r] = x[i]
+    gs.barrier()
+    s = 128
+    while s > 0:
+        if r < s:
+            t[r] = t[r] + t[r + s]
+        gs.barrier()
+        s = s // 2
+    return t[0]  # somme du groupe
+```
+
+Une barrière doit être atteinte par tout le groupe : elle est refusée à la compilation sous une condition
+ou une boucle qui dépend du thread, ou après un `return` partiel. Sur `cpu:0`, deux threads qui accèdent à
+la même case de `gs.shared` sans barrière entre une écriture et l'autre accès sont signalés.
+
 **Périphérique et mémoire.** Sans `device=`, GPUsync prend le premier périphérique du classement (GPU dédié :
 Vulkan puis OpenCL ; GPU intégré : Metal puis OpenCL ; CPU). Si le kernel utilise une opération que ce
 périphérique n'a pas (ex. `gs.exp` en f64 sur Vulkan), `@gs.kernel(compat="auto")` (défaut) avertit et

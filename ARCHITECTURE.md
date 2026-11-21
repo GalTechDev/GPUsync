@@ -741,6 +741,35 @@ par le non signé (débordement indéfini en C, erreur de l'évaluation constant
 Avec elle, une multiplication modulaire (Montgomery) tient en arithmétique 32 bits, sans `%` 64 bits,
 émulé et lent sur GPU (un étage de NTT mesuré va ×1.5 à ×7 plus vite).
 
+**Groupes de threads et mémoire partagée (`group=`).** `@gs.kernel(group=n)` (kernels avec `gs.index()`,
+1 ≤ n ≤ 1024) : `n` cases consécutives de la sortie (ordre C, un groupe peut couvrir plusieurs lignes) forment
+un groupe, qui partage les tableaux `gs.shared(type, taille)`, connaît `gs.lane()` et se synchronise par
+`gs.barrier()`. Traductions : `__local` / `barrier(CLK_LOCAL_MEM_FENCE)` / `get_local_id(0)` et
+`reqd_work_group_size` (OpenCL), `__shared__` / `__syncthreads()` / `threadIdx.x` et `__launch_bounds__`
+(CUDA), `var<workgroup>` / `workgroupBarrier()` / `local_invocation_index` et `@workgroup_size(n)` (WGSL).
+- **Groupes complets** : la sortie doit compter un multiple de `n` cases (erreur claire sinon) ; chaque
+  lancement couvre des groupes entiers (découpage par blocs de lignes et `Pacer` arrondis à une
+  granularité `n / pgcd(n, cases par ligne)`). Pas de garde par thread en C ; en WGSL, garde sur le numéro
+  du groupe (uniforme), sans quoi l'analyse d'uniformité refuse les barrières.
+- **Mémoire partagée à zéro**, comme `gs.local` : en C, chaque thread efface sa part puis barrière ; WGSL
+  la met à zéro lui-même.
+- **Barrières atteintes par tout le groupe**, vérifié à la compilation (`frontend/src/uniform.rs`) : une
+  valeur est propre au thread si elle vient de `gs.index()`, `gs.lane()`, d'une lecture de `gs.shared`
+  ou d'un calcul qui en dépend (point fixe sur les locales) ; une barrière est refusée sous une condition
+  ou une boucle qui en dépend (bornes, sortie par `break` / `continue` / `return`), ou après un `return`
+  exécuté par une partie des threads. Le message donne la ligne.
+- **Interpréteur** : un thread système par position du groupe, vraies barrières (interruptibles en cas
+  d'erreur, et qui vérifient que tout le groupe attend au même endroit). Chaque accès à `gs.shared` est
+  noté pour la phase en cours (entre deux barrières) : une écriture et un autre accès de deux threads
+  différents à la même case sont signalés (« accès concurrent à t[12] : le thread 3 l'écrit et le thread
+  7 le lit… »). Sur GPU, la même erreur donnerait un résultat faux en silence.
+- **Limites par périphérique** (`max_group`, `shared_bytes` de `DeviceInfo`, exposés par `gs.devices()`) :
+  RTX 4080 SUPER 1024 threads et 48 Kio (CUDA, Vulkan, OpenCL), Metal M5 Pro 1024, OpenCL Apple 256 ;
+  dépassement → `UnsupportedFeature`.
+- Mesuré, NTT de 65 536 points (lot de 64, u32 Montgomery) : les 10 premiers étages en mémoire partagée,
+  un seul lancement, puis 6 étages globaux, contre 16 étages globaux : RTX 4080 SUPER 2,5 → 1,2-1,5 ms
+  (CUDA, Vulkan), M5 Pro Metal 2,1 → 1,7 ms. Pas encore de `grid=` avec `group=`.
+
 ### 5.4 Spécialisation
 
 Un `@gs.kernel` est un **modèle**. Une version compilée est identifiée par :

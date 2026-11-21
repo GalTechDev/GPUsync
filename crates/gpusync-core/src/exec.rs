@@ -235,6 +235,13 @@ pub unsafe fn launch(
         )));
     }
     let indexed = matches!(k.grid, Grid::Indexed { .. });
+    if let Some(g) = k.group.filter(|g| !n.is_multiple_of(*g as usize)) {
+        return Err(CoreError::Shape(format!(
+            "'{}' : group={g}, mais la sortie a {n} cases, qui ne se découpent pas en groupes complets de {g} \
+             (choisissez des dimensions dont le produit est un multiple de {g}, ex. une dernière dimension multiple de {g})",
+            k.name
+        )));
+    }
     for (input, (_, p)) in inputs.iter().zip(k.array_params()) {
         let bytes = match input {
             Input::Host { bytes, .. } => *bytes,
@@ -1274,6 +1281,16 @@ struct Rows {
     slots: [usize; 3],
     /// Nom de chaque entrée (messages d'erreur).
     names: Vec<String>,
+    /// Lignes par lancement : multiple de `granule` (groupes complets, `group=`).
+    granule: usize,
+}
+
+/// Lignes d'un lancement multiple de ceci : chaque lancement couvre des groupes complets.
+fn granule(k: &Kernel, rest: usize) -> usize {
+    match k.group {
+        Some(g) => g as usize / gcd(g as usize, rest.max(1)),
+        None => 1,
+    }
 }
 
 impl Rows {
@@ -1316,6 +1333,7 @@ impl Rows {
             writable: arrays.iter().map(|(i, _)| writable.contains(i)).collect(),
             slots: [pos(*row0), pos(*inrow), pos(*obase)],
             names: arrays.into_iter().map(|(_, n)| n).collect(),
+            granule: granule(k, rest),
         }
     }
 
@@ -1347,7 +1365,8 @@ impl Rows {
 
     /// Blocs de lignes `(début, lignes)` de `rows` lignes au plus.
     fn blocks(&self, rows: usize) -> Vec<(usize, usize)> {
-        let rows = rows.clamp(1, self.total);
+        let g = self.granule;
+        let rows = (rows.clamp(1, self.total) / g * g).max(g);
         (0..self.total)
             .step_by(rows)
             .map(|s| (s, rows.min(self.total - s)))
@@ -1412,6 +1431,8 @@ struct Pacer {
     last: usize,
     /// (kernel, périphérique) et cases par ligne : le débit est retenu d'un appel à l'autre.
     key: Option<((usize, usize), usize)>,
+    /// Lignes par lancement multiple de ceci (groupes complets).
+    granule: usize,
 }
 
 /// Débits mesurés (cases par seconde, fiable ?) par (kernel, périphérique) : sans eux, chaque appel
@@ -1437,6 +1458,7 @@ impl Pacer {
                 ((cells / rest as f64) * MIN_TIMED_S) as usize
             }),
             key: Some((key, rest)),
+            granule: granule(k, rest),
         }
     }
 
@@ -1460,7 +1482,8 @@ impl Pacer {
                 Some(r) if self.calibrated => ((r * TARGET_LAUNCH_S) as usize).max(1),
                 Some(r) => ((r * TARGET_LAUNCH_S) as usize).clamp(1, self.last.saturating_mul(8)),
             };
-            let len = want.min(max_rows).min(b - s);
+            let g = self.granule.max(1);
+            let len = (want.min(max_rows) / g * g).max(g).min(b - s);
             let timed = !self.calibrated && s + len < b;
             let t0 = std::time::Instant::now();
             step(s, len, timed)?;
@@ -1879,6 +1902,7 @@ unsafe fn rows_wg_direct(
         .fold(1, |acc, s| acc / gcd(acc, s) * s);
     let mut br = (cap / rows.max_row()).min(rows.total);
     if br < rows.total {
+        let step = step / gcd(step, rows.granule) * rows.granule; // pages et groupes complets
         br = br / step * step;
         if br == 0 {
             return Ok(None);

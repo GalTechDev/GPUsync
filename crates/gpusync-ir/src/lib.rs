@@ -149,6 +149,8 @@ pub struct Local {
     pub ty: Scalar,
     /// `Some(n)` : tableau local de `n` éléments (`gs.local(type, n)`), propre à chaque thread.
     pub len: Option<u32>,
+    /// Tableau commun aux threads d'un groupe (`gs.shared(type, n)`, mémoire partagée du GPU).
+    pub shared: bool,
 }
 
 /// Forme de la grille de threads.
@@ -186,9 +188,22 @@ pub struct Kernel {
     pub locals: Vec<Local>,
     pub body: Block,
     pub grid: Grid,
+    /// Threads par groupe (`@gs.kernel(group=n)`, kernels avec index) : un groupe calcule `n` cases
+    /// consécutives de la sortie, partage les tableaux `gs.shared` et se synchronise par
+    /// `gs.barrier()`. `None` : taille choisie par le backend, pas de mémoire partagée.
+    pub group: Option<u32>,
 }
 
 impl Kernel {
+    /// Octets de mémoire partagée par groupe.
+    pub fn shared_bytes(&self) -> usize {
+        self.locals
+            .iter()
+            .filter(|l| l.shared)
+            .map(|l| l.len.unwrap_or(0) as usize * l.ty.size())
+            .sum()
+    }
+
     /// Paramètres fournis par le moteur d'exécution (et non par l'appelant) : `row0`, `inrow`, `obase`.
     pub fn engine_params(&self) -> [Option<usize>; 3] {
         match &self.grid {
@@ -247,6 +262,9 @@ pub enum Stmt {
     },
     /// Écrit la case courante de chaque sortie et termine le thread.
     Return(Vec<Expr>),
+    /// `gs.barrier()` : attend tous les threads du groupe ; leurs écritures en mémoire partagée
+    /// sont ensuite visibles. Atteinte par tous les threads du groupe (vérifié par le frontend).
+    Barrier,
     /// `gs.atomic_add(param, index, value)` (ou min, max) sur un tableau `gs.Out`. Si `in_bounds`
     /// est faux, rien n'est écrit : `code` est signalé dans `gs_err[0]` (maximum atomique) et
     /// l'indice dans `gs_err[1]`.
@@ -305,6 +323,8 @@ pub enum ExprKind {
     LocalLoad(usize, Box<Expr>),
     /// Coordonnée du thread sur l'axe donné de la grille (i32).
     GridIndex(usize),
+    /// Position du thread dans son groupe, de 0 à `group − 1` (`gs.lane()`, i32).
+    Lane,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,7 +514,8 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
             ExprKind::Const(_)
             | ExprKind::Local(_)
             | ExprKind::Param(_)
-            | ExprKind::GridIndex(_) => {}
+            | ExprKind::GridIndex(_)
+            | ExprKind::Lane => {}
             ExprKind::Unary(_, a)
             | ExprKind::Cast(a)
             | ExprKind::Load(_, a)
@@ -554,7 +575,7 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
                 expr(cond, f);
                 visit_exprs(body, f);
             }
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break | Stmt::Continue | Stmt::Barrier => {}
         }
     }
 }

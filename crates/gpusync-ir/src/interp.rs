@@ -3,6 +3,9 @@
 //! Exécute le kernel séquentiellement, élément par élément, sur les octets des tableaux (même
 //! représentation que sur le GPU). Lent, mais toujours disponible et sans ambiguïté.
 
+use std::collections::HashMap;
+use std::sync::{Condvar, Mutex};
+
 use crate::*;
 
 /// Argument d'un kernel : octets d'un tableau (ordre natif) ou valeur scalaire.
@@ -86,32 +89,24 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
             })
             .collect::<Result<_, _>>()?,
     };
+    if let Some(g) = kernel.group {
+        return run_groups(kernel, n, args, outs, g as usize, &axes, row0, obase);
+    }
     let mut locals: Vec<Const> = kernel.locals.iter().map(|l| zero(l.ty)).collect();
-    let mut arrays: Vec<Vec<Const>> = kernel
-        .locals
-        .iter()
-        .map(|l| vec![zero(l.ty); l.len.unwrap_or(0) as usize])
-        .collect();
+    let mut arrays = private_arrays(kernel);
     for i in 0..n {
         for (a, l) in arrays.iter_mut().zip(&kernel.locals) {
             a.fill(zero(l.ty)); // tableaux locaux remis à zéro pour chaque thread
-        }
-        let mut coords = vec![0usize; axes.len()];
-        let mut rest = i;
-        for a in (1..axes.len()).rev() {
-            coords[a] = rest % axes[a].max(1);
-            rest /= axes[a].max(1);
-        }
-        if !axes.is_empty() {
-            coords[0] = rest + row0;
         }
         let mut st = State {
             kernel,
             args,
             i,
-            coords,
+            coords: coords_of(i, &axes, row0),
             locals: &mut locals,
             arrays: &mut arrays,
+            lane: 0,
+            group: None,
         };
         let values = match st.block(&kernel.body)? {
             Flow::Return(v) => v,
@@ -138,6 +133,312 @@ struct State<'a, 'b> {
     coords: Vec<usize>,
     locals: &'b mut Vec<Const>,
     arrays: &'b mut Vec<Vec<Const>>,
+    /// Position dans le groupe et mémoire partagée du groupe (kernels avec `group=`).
+    lane: usize,
+    group: Option<&'b Group>,
+}
+
+/// Tableaux locaux propres à un thread (les tableaux partagés sont dans `Group`).
+fn private_arrays(kernel: &Kernel) -> Vec<Vec<Const>> {
+    kernel
+        .locals
+        .iter()
+        .map(|l| {
+            vec![
+                zero(l.ty);
+                if l.shared {
+                    0
+                } else {
+                    l.len.unwrap_or(0) as usize
+                }
+            ]
+        })
+        .collect()
+}
+
+/// Coordonnées du thread `i` sur la grille (premier axe décalé de `row0`).
+fn coords_of(i: usize, axes: &[usize], row0: usize) -> Vec<usize> {
+    let mut coords = vec![0usize; axes.len()];
+    let mut rest = i;
+    for a in (1..axes.len()).rev() {
+        coords[a] = rest % axes[a].max(1);
+        rest /= axes[a].max(1);
+    }
+    if !axes.is_empty() {
+        coords[0] = rest + row0;
+    }
+    coords
+}
+
+// ───────────────────── groupes : mémoire partagée et barrières ─────────────────────
+
+/// Accès d'une phase (entre deux barrières) à une case de mémoire partagée : l'écrivain et les deux
+/// premiers lecteurs distincts (de quoi nommer un autre thread en cas de conflit).
+#[derive(Default)]
+struct CellLog {
+    writer: Option<usize>,
+    readers: [Option<usize>; 2],
+}
+
+struct GroupMem {
+    /// Un tableau par locale (vide si elle n'est pas partagée).
+    arrays: Vec<Vec<Const>>,
+    /// Accès de la phase en cours, par (locale, indice).
+    log: HashMap<(usize, usize), CellLog>,
+}
+
+/// Barrière des threads d'un groupe, qui peut être interrompue (erreur d'un thread) et qui vérifie
+/// que tous l'atteignent au même endroit.
+struct Group {
+    size: usize,
+    index: Mutex<usize>,
+    mem: Mutex<GroupMem>,
+    state: Mutex<BarrierState>,
+    cv: Condvar,
+    error: Mutex<Option<String>>,
+}
+
+#[derive(Default)]
+struct BarrierState {
+    arrived: usize,
+    generation: u64,
+    site: Option<usize>,
+    stopped: bool,
+}
+
+impl Group {
+    fn fail(&self, e: String) {
+        let mut err = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        if err.is_none() {
+            *err = Some(e);
+        }
+        drop(err);
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).stopped = true;
+        self.cv.notify_all();
+    }
+
+    /// Attend tous les threads du groupe à la barrière `site` (0 : fin du groupe) ; le dernier
+    /// arrivé exécute `last` avant de libérer les autres. `Err` si le groupe a été interrompu.
+    fn wait(&self, site: usize, last: impl FnOnce(&Group)) -> Result<(), ()> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.stopped {
+            return Err(());
+        }
+        match st.site {
+            None => st.site = Some(site),
+            Some(s) if s != site => {
+                drop(st);
+                self.fail(format!(
+                    "groupe {} : gs.barrier() atteinte par une partie des threads seulement (un thread du \
+                     groupe est ailleurs dans le kernel) — tous les threads d'un groupe doivent passer par les \
+                     mêmes barrières",
+                    *self.index.lock().unwrap_or_else(|e| e.into_inner())
+                ));
+                return Err(());
+            }
+            _ => {}
+        }
+        st.arrived += 1;
+        if st.arrived == self.size {
+            st.arrived = 0;
+            st.site = None;
+            st.generation += 1;
+            last(self);
+            self.cv.notify_all();
+            return Ok(());
+        }
+        let generation = st.generation;
+        while st.generation == generation && !st.stopped {
+            st = self.cv.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        if st.stopped { Err(()) } else { Ok(()) }
+    }
+
+    /// Lecture (ou écriture si `value`) de `local[idx]` par `lane`, avec détection des accès
+    /// concurrents de la phase.
+    fn access(
+        &self,
+        k: &Kernel,
+        local: usize,
+        idx: i64,
+        lane: usize,
+        value: Option<Const>,
+    ) -> Result<Const, String> {
+        let mut m = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+        let len = m.arrays[local].len();
+        let name = &k.locals[local].name;
+        if idx < 0 || idx as usize >= len {
+            return Err(format!(
+                "indice {idx} hors limites pour le tableau partagé '{name}' ({len} éléments) — thread {lane} du groupe"
+            ));
+        }
+        let i = idx as usize;
+        let cell = m.log.entry((local, i)).or_default();
+        let conflict = |writer: usize, other: usize, both_write: bool| {
+            if both_write {
+                format!(
+                    "accès concurrent à {name}[{i}] : les threads {} et {} du groupe l'écrivent pendant la \
+                     même phase (résultat imprévisible sur GPU)",
+                    writer.min(other),
+                    writer.max(other)
+                )
+            } else {
+                format!(
+                    "accès concurrent à {name}[{i}] : le thread {writer} du groupe l'écrit et le thread {other} \
+                     le lit pendant la même phase — séparez l'écriture et la lecture par gs.barrier()"
+                )
+            }
+        };
+        match value {
+            Some(v) => {
+                if let Some(w) = cell.writer.filter(|w| *w != lane) {
+                    return Err(conflict(lane, w, true));
+                }
+                if let Some(r) = cell.readers.iter().flatten().find(|r| **r != lane) {
+                    return Err(conflict(lane, *r, false));
+                }
+                cell.writer = Some(lane);
+                let ty = k.locals[local].ty;
+                m.arrays[local][i] = convert(v, ty);
+                Ok(v)
+            }
+            None => {
+                if let Some(w) = cell.writer.filter(|w| *w != lane) {
+                    return Err(conflict(w, lane, false));
+                }
+                match cell.readers {
+                    [None, _] => cell.readers[0] = Some(lane),
+                    [Some(r), None] if r != lane => cell.readers[1] = Some(lane),
+                    _ => {}
+                }
+                Ok(m.arrays[local][i])
+            }
+        }
+    }
+}
+
+/// Pointeurs partagés entre les threads de l'interpréteur (chaque thread n'écrit que ses cases).
+struct Shared<T>(T);
+unsafe impl<T> Sync for Shared<T> {}
+unsafe impl<T> Send for Shared<T> {}
+
+/// Kernel avec `group=` : un thread système par position du groupe ; les groupes s'exécutent l'un
+/// après l'autre, leurs threads ensemble (barrières réelles, mémoire partagée commune).
+#[allow(clippy::too_many_arguments)]
+fn run_groups(
+    kernel: &Kernel,
+    n: usize,
+    args: &[Arg],
+    outs: &mut [&mut [u8]],
+    g: usize,
+    axes: &[usize],
+    row0: usize,
+    obase: usize,
+) -> Result<(), String> {
+    if g == 0 || !n.is_multiple_of(g) {
+        return Err(format!(
+            "{n} cases : pas un multiple de la taille de groupe {g}"
+        ));
+    }
+    let shared_arrays = |k: &Kernel| -> Vec<Vec<Const>> {
+        k.locals
+            .iter()
+            .map(|l| {
+                vec![
+                    zero(l.ty);
+                    if l.shared {
+                        l.len.unwrap_or(0) as usize
+                    } else {
+                        0
+                    }
+                ]
+            })
+            .collect()
+    };
+    let group = Group {
+        size: g,
+        index: Mutex::new(0),
+        mem: Mutex::new(GroupMem {
+            arrays: shared_arrays(kernel),
+            log: HashMap::new(),
+        }),
+        state: Mutex::new(BarrierState::default()),
+        cv: Condvar::new(),
+        error: Mutex::new(None),
+    };
+    let out_ptrs: Vec<(usize, usize)> = outs
+        .iter_mut()
+        .map(|o| (o.as_mut_ptr() as usize, o.len()))
+        .collect();
+    let shared_args = Shared(args);
+    let next_group = |grp: &Group| {
+        let mut m = grp.mem.lock().unwrap_or_else(|e| e.into_inner());
+        m.arrays = shared_arrays(kernel);
+        m.log.clear();
+        *grp.index.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    };
+    std::thread::scope(|scope| {
+        for lane in 0..g {
+            let (group, out_ptrs, sa) = (&group, &out_ptrs, &shared_args);
+            let next_group = &next_group;
+            scope.spawn(move || {
+                let args: &[Arg] = sa.0;
+                let mut locals: Vec<Const> = kernel.locals.iter().map(|l| zero(l.ty)).collect();
+                let mut arrays = private_arrays(kernel);
+                for gi in 0..n / g {
+                    let i = gi * g + lane;
+                    for (a, l) in arrays.iter_mut().zip(&kernel.locals) {
+                        a.fill(zero(l.ty));
+                    }
+                    let mut st = State {
+                        kernel,
+                        args,
+                        i,
+                        coords: coords_of(i, axes, row0),
+                        locals: &mut locals,
+                        arrays: &mut arrays,
+                        lane,
+                        group: Some(group),
+                    };
+                    let values = match st.block(&kernel.body) {
+                        Ok(Flow::Return(v)) => v,
+                        Ok(_) if kernel.outputs.is_empty() => vec![],
+                        Ok(_) => {
+                            group.fail(format!(
+                                "le kernel '{}' s'est terminé sans return",
+                                kernel.name
+                            ));
+                            return;
+                        }
+                        Err(e) => {
+                            if !e.is_empty() {
+                                group.fail(e);
+                            }
+                            return;
+                        }
+                    };
+                    for ((v, (p, len)), t) in values.into_iter().zip(out_ptrs).zip(&kernel.outputs)
+                    {
+                        let j = (i + obase) * t.size();
+                        if j + t.size() <= *len {
+                            // Cases distinctes pour chaque thread.
+                            let o = unsafe {
+                                std::slice::from_raw_parts_mut((*p as *mut u8).add(j), t.size())
+                            };
+                            store(v, o);
+                        }
+                    }
+                    if group.wait(0, next_group).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    match group.error.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 fn index_of(c: Const) -> i64 {
@@ -228,6 +529,17 @@ impl State<'_, '_> {
                 }
                 Ok(Flow::Normal)
             }
+            Stmt::Barrier => {
+                let Some(g) = self.group else {
+                    return Err("gs.barrier() hors d'un kernel avec group=".into());
+                };
+                let site = s as *const Stmt as usize;
+                g.wait(site, |g| {
+                    g.mem.lock().unwrap_or_else(|e| e.into_inner()).log.clear()
+                })
+                .map_err(|_| String::new())?; // interrompu : l'erreur est déjà enregistrée
+                Ok(Flow::Normal)
+            }
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::Continue),
             Stmt::LocalStore {
@@ -236,6 +548,11 @@ impl State<'_, '_> {
                 value,
             } => {
                 let (idx, v) = (index_of(self.eval(index)?), self.eval(value)?);
+                if self.kernel.locals[*local].shared {
+                    let g = self.group.ok_or("gs.shared hors d'un kernel avec group=")?;
+                    g.access(self.kernel, *local, idx, self.lane, Some(v))?;
+                    return Ok(Flow::Normal);
+                }
                 let len = self.arrays[*local].len();
                 if idx < 0 || idx as usize >= len {
                     return Err(format!(
@@ -335,6 +652,12 @@ impl State<'_, '_> {
                 let o = idx as usize * ty.size();
                 load(ty, &bytes[o..o + ty.size()])
             }
+            ExprKind::LocalLoad(l, index) if self.kernel.locals[*l].shared => {
+                let idx = index_of(self.eval(index)?);
+                let g = self.group.ok_or("gs.shared hors d'un kernel avec group=")?;
+                g.access(self.kernel, *l, idx, self.lane, None)?
+            }
+            ExprKind::Lane => Const::I32(self.lane as i32),
             ExprKind::LocalLoad(l, index) => {
                 let idx = index_of(self.eval(index)?);
                 let len = self.arrays[*l].len();
@@ -708,16 +1031,19 @@ mod tests {
             ],
             outputs: vec![Scalar::F32],
             grid: Grid::Elementwise,
+            group: None,
             locals: vec![
                 Local {
                     name: "acc".into(),
                     ty: Scalar::F32,
                     len: None,
+                    shared: false,
                 },
                 Local {
                     name: "i".into(),
                     ty: Scalar::I32,
                     len: None,
+                    shared: false,
                 },
             ],
             body: vec![
@@ -803,16 +1129,19 @@ mod tests {
                 params: vec![],
                 outputs: vec![Scalar::I32],
                 grid: Grid::Elementwise,
+                group: None,
                 locals: vec![
                     Local {
                         name: "n".into(),
                         ty: Scalar::I32,
                         len: None,
+                        shared: false,
                     },
                     Local {
                         name: "i".into(),
                         ty: Scalar::I32,
                         len: None,
+                        shared: false,
                     },
                 ],
                 body: vec![

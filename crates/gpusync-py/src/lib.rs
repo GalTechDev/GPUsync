@@ -59,6 +59,10 @@ struct PyDevice {
     memory_bytes: Option<u64>,
     /// Taille max d'un buffer en octets.
     max_buffer_bytes: Option<u64>,
+    /// Threads au plus par groupe (`@gs.kernel(group=n)`).
+    max_group: u32,
+    /// Mémoire partagée (`gs.shared`) au plus par groupe, en octets.
+    shared_bytes: u64,
 }
 
 impl From<&DeviceInfo> for PyDevice {
@@ -76,6 +80,8 @@ impl From<&DeviceInfo> for PyDevice {
             unified_memory: d.unified_memory,
             memory_bytes: d.memory_bytes,
             max_buffer_bytes: d.max_buffer_bytes,
+            max_group: d.max_group,
+            shared_bytes: d.shared_bytes,
         }
     }
 }

@@ -196,6 +196,7 @@ impl Gen<'_> {
             ExprKind::Load(p, i) => format!("{}[{}]", param_name(self.k, *p), self.index(i)),
             ExprKind::LocalLoad(l, i) => format!("{}[{}]", local_name(self.k, *l), self.expr(i)),
             ExprKind::GridIndex(a) => format!("gs_g{a}"),
+            ExprKind::Lane => "gs_lane".into(),
             ExprKind::Cast(a) if e.ty == Scalar::Bool => format!("({} != 0)", self.expr(a)),
             ExprKind::Cast(a) => format!("(({}){})", c_type(e.ty), self.expr(a)),
         }
@@ -269,6 +270,11 @@ impl Gen<'_> {
                 self.indent(body);
                 self.out.line("}");
             }
+            Stmt::Barrier => self.out.line(if self.cuda {
+                "__syncthreads();"
+            } else {
+                "barrier(CLK_LOCAL_MEM_FENCE);"
+            }),
             Stmt::Break => self.out.line("break;"),
             Stmt::Continue => self.out.line("continue;"),
             Stmt::LocalStore {
@@ -602,10 +608,14 @@ fn emit_c(
         args.push(format!("{gq}{}* {restrict} gs_out{o}", c_type(*t)));
     }
     args.push("const uint gs_n".into());
-    let head = if cuda {
-        "extern \"C\" __global__ void"
-    } else {
-        "__kernel void"
+    // Groupe (`group=`) : taille imposée au lancement, connue du compilateur.
+    let head = match (cuda, k.group) {
+        (true, Some(g)) => format!("extern \"C\" __global__ void __launch_bounds__({g})"),
+        (true, None) => "extern \"C\" __global__ void".into(),
+        (false, Some(g)) => {
+            format!("__kernel __attribute__((reqd_work_group_size({g}, 1, 1))) void")
+        }
+        (false, None) => "__kernel void".into(),
     };
     g.out
         .line(format!("{head} {entry}(\n    {}) {{", args.join(",\n    ")));
@@ -615,7 +625,17 @@ fn emit_c(
     } else {
         "const uint gs_i = get_global_id(0);"
     });
-    g.out.line("if (gs_i >= gs_n) return;");
+    if k.group.is_none() {
+        g.out.line("if (gs_i >= gs_n) return;");
+    } else {
+        // Groupes complets (n multiple de la taille de groupe, vérifié au lancement) : pas de garde,
+        // tous les threads atteignent les barrières.
+        g.out.line(if cuda {
+            "const int gs_lane = (int)threadIdx.x;"
+        } else {
+            "const int gs_lane = (int)get_local_id(0);"
+        });
+    }
     if let Grid::Indexed { axes, row0, .. } = &k.grid {
         // Coordonnées du thread dans la grille (forme de la sortie, ordre C) ; le lancement
         // couvre un bloc de lignes commençant à la ligne row0.
@@ -631,8 +651,20 @@ fn emit_c(
             param_name(k, *row0)
         ));
     }
+    let mut shared = false;
     for (i, l) in k.locals.iter().enumerate() {
         match l.len {
+            // Mémoire partagée : sans initialiseur en C ; mise à zéro par le groupe (comme gs.local).
+            Some(n) if l.shared => {
+                let q = if cuda { "__shared__" } else { "__local" };
+                let name = local_name(k, i);
+                g.out.line(format!("{q} {} {name}[{n}];", c_type(l.ty)));
+                g.out.line(format!(
+                    "for (int gs_z = gs_lane; gs_z < {n}; gs_z += {}) {name}[gs_z] = 0;",
+                    k.group.unwrap_or(1)
+                ));
+                shared = true;
+            }
             Some(n) => g.out.line(format!(
                 "{} {}[{n}] = {{0}};",
                 c_type(l.ty),
@@ -642,6 +674,9 @@ fn emit_c(
                 .out
                 .line(format!("{} {};", c_type(l.ty), local_name(k, i))),
         }
+    }
+    if shared {
+        g.stmt(&Stmt::Barrier);
     }
     g.block(&k.body);
     g.out.depth = 0;

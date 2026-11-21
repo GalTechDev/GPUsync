@@ -64,6 +64,11 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
                 unified_memory: unified,
                 memory_bytes: d.global_mem_size().ok(),
                 max_buffer_bytes: d.max_mem_alloc_size().ok(),
+                max_group: d
+                    .max_work_group_size()
+                    .map(|v| v.min(1024) as u32)
+                    .unwrap_or(64),
+                shared_bytes: d.local_mem_size().unwrap_or(16 << 10),
             };
             out.push((id, info));
         }

@@ -44,6 +44,8 @@ pub struct ClDevice {
 pub struct ClKernel {
     kernel: Mutex<Kernel>,
     _program: Program,
+    /// Taille de groupe imposée (`group=`) ; sinon choisie par le driver.
+    local: Option<usize>,
 }
 
 /// Buffer OpenCL, éventuellement adossé à la mémoire de l'hôte (`host_ptr` non nul).
@@ -243,7 +245,13 @@ impl ClDevice {
     }
 
     /// Compile (avec cache) le code OpenCL C et renvoie le kernel `entry`.
-    pub fn compile(&self, code: &str, entry: &str) -> Result<Arc<ClKernel>, BackendError> {
+    /// `group` : taille de groupe imposée par le kernel (mémoire partagée, barrières).
+    pub fn compile(
+        &self,
+        code: &str,
+        entry: &str,
+        group: Option<u32>,
+    ) -> Result<Arc<ClKernel>, BackendError> {
         let mut cache = self.kernels.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(k) = cache.get(code) {
             return Ok(k.clone());
@@ -260,6 +268,7 @@ impl ClDevice {
         let k = Arc::new(ClKernel {
             kernel: Mutex::new(kernel),
             _program: program,
+            local: group.map(|g| g as usize),
         });
         cache.insert(code.to_string(), k.clone());
         Ok(k)
@@ -475,8 +484,11 @@ impl ClDevice {
                     ClArg::U64(v) => exec.set_arg(v),
                 };
             }
-            exec.set_global_work_size(n)
-                .set_event_wait_list(&waits)
+            exec.set_global_work_size(n);
+            if let Some(l) = k.local {
+                exec.set_local_work_size(l);
+            }
+            exec.set_event_wait_list(&waits)
                 .enqueue_nd_range(&self.compute)
         }
         .map_err(|e| err("lancement du kernel", e))?;

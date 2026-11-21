@@ -31,6 +31,8 @@ pub struct WgKernel {
     n_inputs: usize,
     n_outputs: usize,
     has_fparams: bool,
+    /// Threads par groupe (`@workgroup_size` du module).
+    workgroup: u32,
 }
 
 pub struct WgBuffer {
@@ -204,6 +206,7 @@ impl WgDevice {
         n_outputs: usize,
         has_fparams: bool,
         writable: &[bool],
+        group: Option<u32>,
     ) -> Result<Arc<WgKernel>, BackendError> {
         let mut cache = self.kernels.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(k) = cache.get(code) {
@@ -271,6 +274,7 @@ impl WgDevice {
             n_inputs,
             n_outputs,
             has_fparams,
+            workgroup: group.unwrap_or(WORKGROUP_SIZE),
         });
         cache.insert(code.to_string(), k.clone());
         Ok(k)
@@ -408,7 +412,7 @@ impl WgDevice {
             entries: &entries,
         });
 
-        let groups = (n as u64).div_ceil(WORKGROUP_SIZE as u64);
+        let groups = (n as u64).div_ceil(k.workgroup as u64);
         let gx = groups.min(self.max_groups_per_dim as u64) as u32;
         let gy = groups.div_ceil(gx.max(1) as u64);
         if gy > self.max_groups_per_dim as u64 {

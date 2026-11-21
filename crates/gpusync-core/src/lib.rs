@@ -93,6 +93,9 @@ pub fn cpu_info() -> DeviceInfo {
         unified_memory: true,
         memory_bytes: None,
         max_buffer_bytes: None,
+        // Un thread système par position du groupe ; mémoire partagée en RAM.
+        max_group: 1024,
+        shared_bytes: 1 << 30,
     }
 }
 
@@ -247,6 +250,27 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
             info.id()
         ));
     }
+    if let Some(g) = k.group.filter(|g| *g > info.max_group) {
+        return Some(format!(
+            "le kernel '{}' demande des groupes de {g} threads (group={g}), '{}' ({}) en accepte au plus {} : \
+             réduisez group= ou choisissez un autre périphérique",
+            k.name,
+            info.name,
+            info.id(),
+            info.max_group
+        ));
+    }
+    let shared = k.shared_bytes() as u64;
+    if shared > info.shared_bytes {
+        return Some(format!(
+            "le kernel '{}' utilise {shared} octets de gs.shared par groupe, '{}' ({}) en offre {} : \
+             réduisez les tableaux partagés",
+            k.name,
+            info.name,
+            info.id(),
+            info.shared_bytes
+        ));
+    }
     if let Some(op) = req.f64_math_op.filter(|_| !info.f64_math) {
         return Some(format!(
             "le kernel '{}' utilise {op} en f64, non disponible sur '{}' ({}) : seuls OpenCL, CUDA et cpu:0 \
@@ -289,12 +313,12 @@ fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> 
         Device::Cu(d) => {
             let src = gpusync_codegen::emit_c_variant(k, true, wide, spec).map_err(gen_err)?;
             dump(k, wide, spec, "cu", &src.code);
-            Imp::Cu(d.compile(&src.code, &src.entry).map_err(dev_err)?)
+            Imp::Cu(d.compile(&src.code, &src.entry, k.group).map_err(dev_err)?)
         }
         Device::Cl(d) => {
             let src = gpusync_codegen::emit_c_variant(k, false, wide, spec).map_err(gen_err)?;
             dump(k, wide, spec, "cl", &src.code);
-            Imp::Cl(d.compile(&src.code, &src.entry).map_err(dev_err)?)
+            Imp::Cl(d.compile(&src.code, &src.entry, k.group).map_err(dev_err)?)
         }
         // Un buffer wgpu ne dépasse pas quelques Gio : un tableau de plus de 2³¹ éléments ne peut pas
         // y être lié entier ; et WGSL n'a pas d'entiers 64 bits.
@@ -318,6 +342,7 @@ fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> 
                     &k.array_params()
                         .map(|(i, _)| k.writable().contains(&i))
                         .collect::<Vec<_>>(),
+                    k.group,
                 )
                 .map_err(dev_err)?,
             )
