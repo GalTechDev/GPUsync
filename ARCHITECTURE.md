@@ -766,6 +766,16 @@ un groupe, qui partage les tableaux `gs.shared(type, taille)`, connaît `gs.lane
 - **Limites par périphérique** (`max_group`, `shared_bytes` de `DeviceInfo`, exposés par `gs.devices()`) :
   RTX 4080 SUPER 1024 threads et 48 Kio (CUDA, Vulkan, OpenCL), Metal M5 Pro 1024, OpenCL Apple 256 ;
   dépassement → `UnsupportedFeature`.
+- **Produit de matrices d'octets `gs.matmul_u8(c, a, b, m, n, k)`** (`Stmt::MatMul`) : collectif (barrière
+  avant et après, même règle d'uniformité que `gs.barrier()`), sur des tableaux `gs.shared` u32 : `a` rangé
+  par lignes, `b` par colonnes, 4 octets par mot, `c[i·n + j] += Σ a[i, t]·b[j, t]` modulo 2³². CUDA, si
+  m, n, k sont multiples de 16, 8, 32 et le groupe de 32 : tuiles `mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32`
+  (une tuile par warp à la fois), choisies à la compilation par `#if __CUDA_ARCH__ >= 800`, sinon boucle
+  portable ; OpenCL, WGSL : boucle portable (un thread par case de c) ; interpréteur : le dernier thread
+  arrivé à la barrière calcule tout. Un autre backend pourra brancher ses unités matricielles (coopérative
+  matrix Vulkan, matrices de groupe Metal) sans changer les kernels. Mesuré (`tools/probe/matmul_tops.py`,
+  produits 64 × 64 × 128 enchaînés) : RTX 4080 SUPER 23,6 TOPS en CUDA contre 1,4 (Vulkan) et 1,7 (OpenCL),
+  M5 Pro Metal 0,56.
 - Mesuré, NTT de 65 536 points (lot de 64, u32 Montgomery) : les 10 premiers étages en mémoire partagée,
   un seul lancement, puis 6 étages globaux, contre 16 étages globaux : RTX 4080 SUPER 2,5 → 1,2-1,5 ms
   (CUDA, Vulkan), M5 Pro Metal 2,1 → 1,7 ms. Pas encore de `grid=` avec `group=`.

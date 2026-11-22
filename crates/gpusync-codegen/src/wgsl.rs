@@ -416,6 +416,35 @@ impl Gen<'_> {
                 self.indent(body);
                 self.out.line("}");
             }
+            Stmt::MatMul { c, a, b, m, n, k } => {
+                let (cn, an, bn) = (
+                    local_name(self.k, *c),
+                    local_name(self.k, *a),
+                    local_name(self.k, *b),
+                );
+                let g = self.k.group.unwrap_or(1);
+                let kw = k / 4;
+                for l in [
+                    "workgroupBarrier();".to_string(),
+                    "{".into(),
+                    format!("    for (var gs_mt = i32(gs_lid); gs_mt < {}i; gs_mt = gs_mt + {g}i) {{", m * n),
+                    format!("        let gs_mr = gs_mt / {n}i;"),
+                    format!("        let gs_mc = gs_mt - gs_mr * {n}i;"),
+                    format!("        var gs_acc = {cn}[gs_mt];"),
+                    format!("        for (var gs_mw = 0i; gs_mw < {kw}i; gs_mw = gs_mw + 1i) {{"),
+                    format!("            let gs_x = {an}[gs_mr * {kw}i + gs_mw];"),
+                    format!("            let gs_y = {bn}[gs_mc * {kw}i + gs_mw];"),
+                    "            gs_acc = gs_acc + (gs_x & 255u) * (gs_y & 255u) + ((gs_x >> 8u) & 255u) * ((gs_y >> 8u) & 255u)".into(),
+                    "                + ((gs_x >> 16u) & 255u) * ((gs_y >> 16u) & 255u) + (gs_x >> 24u) * (gs_y >> 24u);".into(),
+                    "        }".into(),
+                    format!("        {cn}[gs_mt] = gs_acc;"),
+                    "    }".into(),
+                    "}".into(),
+                    "workgroupBarrier();".into(),
+                ] {
+                    self.out.line(l);
+                }
+            }
             Stmt::Barrier => self.out.line("workgroupBarrier();"),
             Stmt::Break => self.out.line("break;"),
             Stmt::Continue => self.out.line("continue;"),

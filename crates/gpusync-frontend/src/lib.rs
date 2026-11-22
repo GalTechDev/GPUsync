@@ -969,6 +969,11 @@ impl Lowerer<'_> {
                 {
                     out.push(self.atomic(&s["value"])?);
                 }
+                "Expr" if self.is_gs_call(&s["value"], "matmul_u8") => {
+                    let st = self.matmul(&s["value"])?;
+                    self.barrier_lines.push(self.line);
+                    out.push(st);
+                }
                 "Expr" if self.is_gs_call(&s["value"], "barrier") => {
                     if self.group.is_none() {
                         return Err(self.e(
@@ -1247,6 +1252,71 @@ impl Lowerer<'_> {
         self.weak.push(false);
         self.local_index.insert(name, i);
         Ok(())
+    }
+
+    /// `gs.matmul_u8(c, a, b, m, n, k)` : tableaux gs.shared u32, dimensions constantes.
+    fn matmul(&mut self, call: &J) -> R<Stmt> {
+        const USAGE: &str = "gs.matmul_u8(c, a, b, m, n, k) : c, a, b tableaux gs.shared(gs.u32, …), \
+                             m, n, k entiers constants (k multiple de 4) ; c[i·n + j] += Σ a[i, t]·b[j, t] \
+                             sur des octets (a par lignes, b par colonnes, 4 octets par mot)";
+        if self.group.is_none() {
+            return Err(self.e(
+                ErrorKind::Syntax,
+                "gs.matmul_u8 : opération collective d'un groupe de threads, déclarez la taille du groupe : @gs.kernel(group=256)",
+            ));
+        }
+        let args = call["args"].as_array().cloned().unwrap_or_default();
+        if args.len() != 6 {
+            return Err(self.e(ErrorKind::Syntax, USAGE));
+        }
+        let mut arrays = Vec::new();
+        for a in &args[..3] {
+            let name = a["id"].as_str().unwrap_or("");
+            let l = (a["_type"] == "Name")
+                .then(|| self.local_index.get(name).copied())
+                .flatten()
+                .filter(|l| self.locals[*l].shared && self.locals[*l].ty == Scalar::U32)
+                .ok_or_else(|| self.e(ErrorKind::Type, format!("« {name} » : {USAGE}")))?;
+            arrays.push(l);
+        }
+        let mut dims = Vec::new();
+        for a in &args[3..] {
+            match self.expr(a)? {
+                Val::Lit(Lit::Int(v)) if (1..=1 << 16).contains(&v) => dims.push(v as u32),
+                _ => return Err(self.e(ErrorKind::Type, USAGE)),
+            }
+        }
+        let (m, n, k) = (dims[0], dims[1], dims[2]);
+        if k % 4 != 0 {
+            return Err(self.e(
+                ErrorKind::Type,
+                format!("gs.matmul_u8 : k = {k} doit être un multiple de 4 (4 octets par mot)"),
+            ));
+        }
+        for (l, need, what) in [
+            (arrays[0], m * n, "c (m·n mots)"),
+            (arrays[1], m * k / 4, "a (m·k/4 mots)"),
+            (arrays[2], n * k / 4, "b (n·k/4 mots)"),
+        ] {
+            let len = self.locals[l].len.unwrap_or(0);
+            if len < need {
+                return Err(self.e(
+                    ErrorKind::Type,
+                    format!(
+                        "gs.matmul_u8 : « {} » a {len} mots, il en faut {need} pour {what}",
+                        self.locals[l].name
+                    ),
+                ));
+            }
+        }
+        Ok(Stmt::MatMul {
+            c: arrays[0],
+            a: arrays[1],
+            b: arrays[2],
+            m,
+            n,
+            k,
+        })
     }
 
     /// Indice entier i32 (les u32, i64, u64 et les littéraux sont convertis).
@@ -1986,6 +2056,12 @@ impl Lowerer<'_> {
             }
             (Some("gpusync"), "shared") => {
                 return Err(self.e(ErrorKind::Syntax, "gs.shared(...) s'utilise seul dans une affectation : t = gs.shared(gs.f32, 256)"));
+            }
+            (Some("gpusync"), "matmul_u8") => {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    "gs.matmul_u8(...) s'utilise seul, comme une instruction",
+                ));
             }
             (Some("gpusync"), "barrier") => {
                 return Err(self.e(

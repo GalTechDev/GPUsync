@@ -540,6 +540,43 @@ impl State<'_, '_> {
                 .map_err(|_| String::new())?; // interrompu : l'erreur est déjà enregistrée
                 Ok(Flow::Normal)
             }
+            Stmt::MatMul { c, a, b, m, n, k } => {
+                let Some(g) = self.group else {
+                    return Err("gs.matmul_u8 hors d'un kernel avec group=".into());
+                };
+                let site = s as *const Stmt as usize;
+                let (c, a, b) = (*c, *a, *b);
+                let (m, n, k) = (*m as usize, *n as usize, *k as usize);
+                // Collectif : le dernier thread arrivé calcule tout le produit, puis tous repartent.
+                g.wait(site, |g| {
+                    let mut mem = g.mem.lock().unwrap_or_else(|e| e.into_inner());
+                    let word = |v: Const| match v {
+                        Const::U32(x) => x,
+                        Const::I32(x) => x as u32,
+                        _ => 0,
+                    };
+                    let kw = k / 4;
+                    for i in 0..m {
+                        for j in 0..n {
+                            let mut acc = word(mem.arrays[c][i * n + j]);
+                            for t in 0..kw {
+                                let (x, y) = (
+                                    word(mem.arrays[a][i * kw + t]),
+                                    word(mem.arrays[b][j * kw + t]),
+                                );
+                                for byte in 0..4 {
+                                    let (p, q) = ((x >> (8 * byte)) & 255, (y >> (8 * byte)) & 255);
+                                    acc = acc.wrapping_add(p * q);
+                                }
+                            }
+                            mem.arrays[c][i * n + j] = Const::U32(acc);
+                        }
+                    }
+                    mem.log.clear();
+                })
+                .map_err(|_| String::new())?;
+                Ok(Flow::Normal)
+            }
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::Continue),
             Stmt::LocalStore {

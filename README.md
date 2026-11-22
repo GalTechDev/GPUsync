@@ -112,6 +112,11 @@ def group_sum(x: gs.f32["n"]) -> gs.f32["n"]:
     return t[0]  # somme du groupe
 ```
 
+`gs.matmul_u8(C, A, B, m, n, k)` fait, à tout le groupe, un produit de matrices d'octets sur des tableaux
+`gs.shared` u32 (`C[i·n + j] += Σ A[i, t]·B[j, t]`, 4 octets par mot) : par les **Tensor Cores** en CUDA
+(Ampere et suivants, ≈ 15 fois la boucle portable sur une RTX 4080 SUPER), par une boucle portable ailleurs,
+avec les mêmes résultats.
+
 Une barrière doit être atteinte par tout le groupe : elle est refusée à la compilation sous une condition
 ou une boucle qui dépend du thread, ou après un `return` partiel. Sur `cpu:0`, deux threads qui accèdent à
 la même case de `gs.shared` sans barrière entre une écriture et l'autre accès sont signalés.

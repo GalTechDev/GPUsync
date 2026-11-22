@@ -151,7 +151,7 @@ impl Check<'_, '_> {
     fn walk(&mut self, b: &Block, cv: bool) -> R<()> {
         for s in b {
             match s {
-                Stmt::Barrier => {
+                Stmt::Barrier | Stmt::MatMul { .. } => {
                     let line = self.lines.get(self.next).copied().flatten();
                     self.next += 1;
                     if self.diverged {

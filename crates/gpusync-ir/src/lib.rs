@@ -265,6 +265,18 @@ pub enum Stmt {
     /// `gs.barrier()` : attend tous les threads du groupe ; leurs écritures en mémoire partagée
     /// sont ensuite visibles. Atteinte par tous les threads du groupe (vérifié par le frontend).
     Barrier,
+    /// `gs.matmul_u8(c, a, b, m, n, k)` : produit de matrices d'entiers 8 bits non signés, collectif
+    /// (tout le groupe, barrière avant et après), sur des tableaux `gs.shared` u32 :
+    /// `c[i·n + j] += Σ_t a[i, t]·b[j, t]` (sommes 32 bits, modulo 2³²), `a` rangé par lignes et `b` par
+    /// colonnes, 4 octets par mot (k multiple de 4). Tensor Cores en CUDA (Ampere et suivants).
+    MatMul {
+        c: usize,
+        a: usize,
+        b: usize,
+        m: u32,
+        n: u32,
+        k: u32,
+    },
     /// `gs.atomic_add(param, index, value)` (ou min, max) sur un tableau `gs.Out`. Si `in_bounds`
     /// est faux, rien n'est écrit : `code` est signalé dans `gs_err[0]` (maximum atomique) et
     /// l'indice dans `gs_err[1]`.
@@ -575,7 +587,7 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
                 expr(cond, f);
                 visit_exprs(body, f);
             }
-            Stmt::Break | Stmt::Continue | Stmt::Barrier => {}
+            Stmt::Break | Stmt::Continue | Stmt::Barrier | Stmt::MatMul { .. } => {}
         }
     }
 }

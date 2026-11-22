@@ -202,6 +202,95 @@ impl Gen<'_> {
         }
     }
 
+    /// `gs.matmul_u8` : boucle portable (un thread par case de c, produits d'octets) ; en CUDA, sur
+    /// Ampere et suivants (`__CUDA_ARCH__ >= 800`), tuiles 16 × 8 × 32 par les Tensor Cores
+    /// (`mma.sync … u8.u8.s32`, une tuile par warp à la fois).
+    #[allow(clippy::too_many_arguments)]
+    fn matmul(&mut self, c: usize, a: usize, b: usize, m: u32, n: u32, k: u32) {
+        let (cn, an, bn) = (
+            local_name(self.k, c),
+            local_name(self.k, a),
+            local_name(self.k, b),
+        );
+        let g = self.k.group.unwrap_or(1);
+        let kw = k / 4;
+        let barrier = if self.cuda {
+            "__syncthreads();"
+        } else {
+            "barrier(CLK_LOCAL_MEM_FENCE);"
+        };
+        let portable = [
+            format!("for (int gs_mt = gs_lane; gs_mt < {}; gs_mt += {g}) {{", m * n),
+            format!("    const int gs_mr = gs_mt / {n};"),
+            format!("    const int gs_mc = gs_mt - gs_mr * {n};"),
+            format!("    uint gs_acc = {cn}[gs_mt];"),
+            format!("    for (int gs_mw = 0; gs_mw < {kw}; gs_mw++) {{"),
+            format!("        const uint gs_x = {an}[gs_mr * {kw} + gs_mw];"),
+            format!("        const uint gs_y = {bn}[gs_mc * {kw} + gs_mw];"),
+            "        gs_acc += (gs_x & 255u) * (gs_y & 255u) + ((gs_x >> 8) & 255u) * ((gs_y >> 8) & 255u)".into(),
+            "            + ((gs_x >> 16) & 255u) * ((gs_y >> 16) & 255u) + (gs_x >> 24) * (gs_y >> 24);".into(),
+            "    }".into(),
+            format!("    {cn}[gs_mt] = gs_acc;"),
+            "}".into(),
+        ];
+        self.out.line(barrier);
+        self.out.line("{");
+        let tensor = self.cuda
+            && m.is_multiple_of(16)
+            && n.is_multiple_of(8)
+            && k.is_multiple_of(32)
+            && g.is_multiple_of(32);
+        if tensor {
+            let (nt, tiles, warps) = (n / 8, (m / 16) * (n / 8), g / 32);
+            let at = |row: &str, off: &str| format!("{an}[({row}) * {kw} + gs_kk + {off}gs_mq]");
+            let ct = |row: &str, col: &str| format!("{cn}[({row}) * {n} + gs_tn + 2 * gs_mq{col}]");
+            let lines = [
+                "#if __CUDA_ARCH__ >= 800".to_string(),
+                "const int gs_ml = gs_lane & 31;".into(),
+                "const int gs_mg = gs_ml >> 2;".into(),
+                "const int gs_mq = gs_ml & 3;".into(),
+                format!("for (int gs_tile = gs_lane >> 5; gs_tile < {tiles}; gs_tile += {warps}) {{"),
+                format!("    const int gs_tm = (gs_tile / {nt}) * 16;"),
+                format!("    const int gs_tn = (gs_tile % {nt}) * 8;"),
+                format!("    uint gs_d0 = {};", ct("gs_tm + gs_mg", "")),
+                format!("    uint gs_d1 = {};", ct("gs_tm + gs_mg", " + 1")),
+                format!("    uint gs_d2 = {};", ct("gs_tm + gs_mg + 8", "")),
+                format!("    uint gs_d3 = {};", ct("gs_tm + gs_mg + 8", " + 1")),
+                format!("    for (int gs_kk = 0; gs_kk < {kw}; gs_kk += 8) {{"),
+                format!("        const uint gs_a0 = {};", at("gs_tm + gs_mg", "")),
+                format!("        const uint gs_a1 = {};", at("gs_tm + gs_mg + 8", "")),
+                format!("        const uint gs_a2 = {};", at("gs_tm + gs_mg", "4 + ")),
+                format!("        const uint gs_a3 = {};", at("gs_tm + gs_mg + 8", "4 + ")),
+                format!("        const uint gs_b0 = {bn}[(gs_tn + gs_mg) * {kw} + gs_kk + gs_mq];"),
+                format!("        const uint gs_b1 = {bn}[(gs_tn + gs_mg) * {kw} + gs_kk + 4 + gs_mq];"),
+                "        asm volatile(\"mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 {%0,%1,%2,%3}, \"".into(),
+                "                     \"{%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"".into(),
+                "                     : \"+r\"(gs_d0), \"+r\"(gs_d1), \"+r\"(gs_d2), \"+r\"(gs_d3)".into(),
+                "                     : \"r\"(gs_a0), \"r\"(gs_a1), \"r\"(gs_a2), \"r\"(gs_a3), \"r\"(gs_b0), \"r\"(gs_b1));".into(),
+                "    }".into(),
+                format!("    {} = gs_d0;", ct("gs_tm + gs_mg", "")),
+                format!("    {} = gs_d1;", ct("gs_tm + gs_mg", " + 1")),
+                format!("    {} = gs_d2;", ct("gs_tm + gs_mg + 8", "")),
+                format!("    {} = gs_d3;", ct("gs_tm + gs_mg + 8", " + 1")),
+                "}".into(),
+                "#else".into(),
+            ];
+            for l in lines {
+                self.out.line(l);
+            }
+            for l in &portable {
+                self.out.line(l.clone());
+            }
+            self.out.line("#endif");
+        } else {
+            for l in &portable {
+                self.out.line(l.clone());
+            }
+        }
+        self.out.line("}");
+        self.out.line(barrier);
+    }
+
     fn block(&mut self, b: &Block) {
         for s in b {
             self.stmt(s);
@@ -270,6 +359,7 @@ impl Gen<'_> {
                 self.indent(body);
                 self.out.line("}");
             }
+            Stmt::MatMul { c, a, b, m, n, k } => self.matmul(*c, *a, *b, *m, *n, *k),
             Stmt::Barrier => self.out.line(if self.cuda {
                 "__syncthreads();"
             } else {

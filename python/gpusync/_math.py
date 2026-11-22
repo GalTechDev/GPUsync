@@ -75,6 +75,18 @@ def barrier():
     raise RuntimeError("gs.barrier() n'a de sens que dans un kernel avec group= (@gs.kernel(group=256))")
 
 
+def matmul_u8(c, a, b, m, n, k):
+    """Dans un kernel avec group= : produit de matrices d'octets, collectif (tout le groupe, barrière
+    avant et après). a : m lignes de k octets, b : n colonnes de k octets (4 octets par mot u32, octet de
+    poids faible en premier) ; c[i·n + j] += Σ_t a[i, t]·b[j, t], sommes modulo 2³². Tensor Cores en CUDA
+    (Ampere et suivants), boucle portable ailleurs."""
+    ab = _np.asarray(a, dtype=_np.uint32)[: m * k // 4].view(_np.uint8).reshape(m, k).astype(_np.uint64)
+    bb = _np.asarray(b, dtype=_np.uint32)[: n * k // 4].view(_np.uint8).reshape(n, k).astype(_np.uint64)
+    prod = (ab @ bb.T) & 0xFFFFFFFF
+    cc = _np.asarray(c)
+    cc[: m * n] = ((cc[: m * n].astype(_np.uint64) + prod.reshape(-1)) & 0xFFFFFFFF).astype(cc.dtype)
+
+
 def atomic_add(out, index, value):
     """Dans un kernel avec grid= : out[index] += value, sans conflit entre cases de la grille."""
     _np.add.at(out, index, value)
@@ -98,5 +110,5 @@ nan = _m.nan
 
 __all__ = [
     "sqrt", "exp", "exp2", "log", "log2", "sin", "cos", "tan", "tanh", "atan2",
-    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "shared", "lane", "barrier", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
+    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "shared", "lane", "barrier", "matmul_u8", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
 ]
