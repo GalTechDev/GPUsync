@@ -112,6 +112,10 @@ def group_sum(x: gs.f32["n"]) -> gs.f32["n"]:
     return t[0]  # somme du groupe
 ```
 
+`@gs.kernel(group=1024, cells=8)` donne **plusieurs cases de sortie par thread** : un groupe possède une
+tuile de 8 192 cases consécutives, et le thread de rang r écrit ses cases r, r + 1024, … par
+`gs.store(k, valeur)` (de quoi traiter en mémoire partagée plus de points qu'il n'y a de threads).
+
 `gs.matmul_u8(C, A, B, m, n, k)` fait, à tout le groupe, un produit de matrices d'octets sur des tableaux
 `gs.shared` u32 (`C[i·n + j] += Σ A[i, t]·B[j, t]`, 4 octets par mot) : par les **Tensor Cores** en CUDA
 (Ampere et suivants, ≈ 15 fois la boucle portable sur une RTX 4080 SUPER), par une boucle portable ailleurs,

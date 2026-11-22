@@ -264,6 +264,7 @@ mod tests {
             outputs: vec![Scalar::F32],
             grid: Grid::Elementwise,
             group: None,
+            cells: 1,
             locals: vec![
                 Local {
                     name: "acc".into(),

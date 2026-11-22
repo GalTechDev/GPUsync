@@ -107,6 +107,7 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
             arrays: &mut arrays,
             lane: 0,
             group: None,
+            cell_out: None,
         };
         let values = match st.block(&kernel.body)? {
             Flow::Return(v) => v,
@@ -136,6 +137,18 @@ struct State<'a, 'b> {
     /// Position dans le groupe et mémoire partagée du groupe (kernels avec `group=`).
     lane: usize,
     group: Option<&'b Group>,
+    /// `cells=` : sortie (adresse, octets) et première case du thread, pour `gs.store`.
+    cell_out: Option<CellOut>,
+}
+
+/// Sortie écrite par `gs.store` : chaque thread n'écrit que ses propres cases.
+#[derive(Clone, Copy)]
+struct CellOut {
+    ptr: usize,
+    len: usize,
+    first: usize,
+    stride: usize,
+    cells: usize,
 }
 
 /// Tableaux locaux propres à un thread (les tableaux partagés sont dans `Group`).
@@ -335,11 +348,13 @@ fn run_groups(
     row0: usize,
     obase: usize,
 ) -> Result<(), String> {
-    if g == 0 || !n.is_multiple_of(g) {
+    let c = kernel.cells.max(1) as usize;
+    if g == 0 || !n.is_multiple_of(g * c) {
         return Err(format!(
-            "{n} cases : pas un multiple de la taille de groupe {g}"
+            "{n} cases : pas un multiple de la tuile d'un groupe ({g} threads × {c} cases)"
         ));
     }
+    let n = n / c; // threads
     let shared_arrays = |k: &Kernel| -> Vec<Vec<Const>> {
         k.locals
             .iter()
@@ -386,7 +401,8 @@ fn run_groups(
                 let mut locals: Vec<Const> = kernel.locals.iter().map(|l| zero(l.ty)).collect();
                 let mut arrays = private_arrays(kernel);
                 for gi in 0..n / g {
-                    let i = gi * g + lane;
+                    // Première case du thread (cells= : tuile de g·c cases par groupe).
+                    let i = gi * g * c + lane;
                     for (a, l) in arrays.iter_mut().zip(&kernel.locals) {
                         a.fill(zero(l.ty));
                     }
@@ -399,10 +415,17 @@ fn run_groups(
                         arrays: &mut arrays,
                         lane,
                         group: Some(group),
+                        cell_out: (c > 1).then(|| CellOut {
+                            ptr: out_ptrs[0].0,
+                            len: out_ptrs[0].1,
+                            first: i + obase,
+                            stride: g,
+                            cells: c,
+                        }),
                     };
                     let values = match st.block(&kernel.body) {
                         Ok(Flow::Return(v)) => v,
-                        Ok(_) if kernel.outputs.is_empty() => vec![],
+                        Ok(_) if kernel.outputs.is_empty() || c > 1 => vec![],
                         Ok(_) => {
                             group.fail(format!(
                                 "le kernel '{}' s'est terminé sans return",
@@ -575,6 +598,30 @@ impl State<'_, '_> {
                     mem.log.clear();
                 })
                 .map_err(|_| String::new())?;
+                Ok(Flow::Normal)
+            }
+            Stmt::Store { k, value } => {
+                let Some(co) = self.cell_out else {
+                    return Err("gs.store hors d'un kernel avec cells=".into());
+                };
+                let kk = index_of(self.eval(k)?);
+                if kk < 0 || kk as usize >= co.cells {
+                    return Err(format!(
+                        "gs.store : case {kk} hors de 0…{} (cells={})",
+                        co.cells - 1,
+                        co.cells
+                    ));
+                }
+                let t = self.kernel.outputs[0];
+                let v = convert(self.eval(value)?, t);
+                let j = (co.first + kk as usize * co.stride) * t.size();
+                if j + t.size() <= co.len {
+                    // Cases propres à ce thread.
+                    let o = unsafe {
+                        std::slice::from_raw_parts_mut((co.ptr as *mut u8).add(j), t.size())
+                    };
+                    store(v, o);
+                }
                 Ok(Flow::Normal)
             }
             Stmt::Break => Ok(Flow::Break),
@@ -1069,6 +1116,7 @@ mod tests {
             outputs: vec![Scalar::F32],
             grid: Grid::Elementwise,
             group: None,
+            cells: 1,
             locals: vec![
                 Local {
                     name: "acc".into(),
@@ -1167,6 +1215,7 @@ mod tests {
                 outputs: vec![Scalar::I32],
                 grid: Grid::Elementwise,
                 group: None,
+                cells: 1,
                 locals: vec![
                     Local {
                         name: "n".into(),

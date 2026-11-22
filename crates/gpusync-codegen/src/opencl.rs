@@ -360,6 +360,16 @@ impl Gen<'_> {
                 self.out.line("}");
             }
             Stmt::MatMul { c, a, b, m, n, k } => self.matmul(*c, *a, *b, *m, *n, *k),
+            Stmt::Store { k, value } => {
+                let g = self.k.group.unwrap_or(1);
+                let l = format!(
+                    "gs_out0[{} + (uint)({}) * {g}u] = {};",
+                    self.out_index(),
+                    self.expr(k),
+                    self.expr(value)
+                );
+                self.out.line(l);
+            }
             Stmt::Barrier => self.out.line(if self.cuda {
                 "__syncthreads();"
             } else {
@@ -710,11 +720,22 @@ fn emit_c(
     g.out
         .line(format!("{head} {entry}(\n    {}) {{", args.join(",\n    ")));
     g.out.depth = 1;
-    g.out.line(if cuda {
-        "const uint gs_i = blockIdx.x * blockDim.x + threadIdx.x;"
+    let thread = if cuda {
+        "blockIdx.x * blockDim.x + threadIdx.x"
     } else {
-        "const uint gs_i = get_global_id(0);"
-    });
+        "get_global_id(0)"
+    };
+    match (k.group, k.cells) {
+        (Some(gsz), c) if c > 1 => {
+            // cells= : première case du thread dans la tuile de son groupe (gsz·c cases).
+            g.out.line(format!("const uint gs_t = {thread};"));
+            g.out.line(format!(
+                "const uint gs_i = (gs_t / {gsz}u) * {}u + (gs_t % {gsz}u);",
+                gsz * c
+            ));
+        }
+        _ => g.out.line(format!("const uint gs_i = {thread};")),
+    }
     if k.group.is_none() {
         g.out.line("if (gs_i >= gs_n) return;");
     } else {

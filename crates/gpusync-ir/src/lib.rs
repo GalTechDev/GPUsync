@@ -192,6 +192,10 @@ pub struct Kernel {
     /// consécutives de la sortie, partage les tableaux `gs.shared` et se synchronise par
     /// `gs.barrier()`. `None` : taille choisie par le backend, pas de mémoire partagée.
     pub group: Option<u32>,
+    /// Cases de sortie par thread (`@gs.kernel(group=g, cells=c)`, 1 par défaut) : un groupe possède
+    /// une tuile de g·c cases consécutives ; le thread de rang r du groupe écrit les cases
+    /// `début + r + k·g` (k < c) par `gs.store(k, valeur)`. Une seule sortie.
+    pub cells: u32,
 }
 
 impl Kernel {
@@ -262,6 +266,11 @@ pub enum Stmt {
     },
     /// Écrit la case courante de chaque sortie et termine le thread.
     Return(Vec<Expr>),
+    /// `gs.store(k, valeur)` (kernels avec `cells=`) : écrit la k-ième case du thread dans la sortie.
+    Store {
+        k: Expr,
+        value: Expr,
+    },
     /// `gs.barrier()` : attend tous les threads du groupe ; leurs écritures en mémoire partagée
     /// sont ensuite visibles. Atteinte par tous les threads du groupe (vérifié par le frontend).
     Barrier,
@@ -550,6 +559,10 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
             Stmt::Return(values) => values.iter().for_each(|v| expr(v, f)),
             Stmt::LocalStore { index, value, .. } => {
                 expr(index, f);
+                expr(value, f);
+            }
+            Stmt::Store { k, value } => {
+                expr(k, f);
                 expr(value, f);
             }
             Stmt::Atomic {

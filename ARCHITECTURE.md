@@ -766,6 +766,15 @@ un groupe, qui partage les tableaux `gs.shared(type, taille)`, connaît `gs.lane
 - **Limites par périphérique** (`max_group`, `shared_bytes` de `DeviceInfo`, exposés par `gs.devices()`) :
   RTX 4080 SUPER 1024 threads et 48 Kio (CUDA, Vulkan, OpenCL), Metal M5 Pro 1024, OpenCL Apple 256 ;
   dépassement → `UnsupportedFeature`.
+- **Plusieurs cases par thread (`cells=`)** : `@gs.kernel(group=g, cells=c)` (une seule sortie) lance
+  c fois moins de threads ; un groupe possède une tuile de g·c cases consécutives, le thread de rang r
+  y écrit les cases `début + r + k·g` par `gs.store(k, valeur)` (accès coalescés), `return` sans valeur ;
+  `gs.index()` donne les coordonnées de sa première case. Codegen : `gs_i = (t / g)·g·c + t mod g` ;
+  moteur : lancements de cases/c threads, tuiles complètes (granularité du découpage sur g·c) ;
+  interpréteur : écriture directe des cases du thread. Usage : transformées NTT de 8 192 points en
+  mémoire partagée (13 étages, 1 024 threads × 8 points) au lieu de 1 024, 2 passes par transformée
+  au lieu de 3 : mise au carré modulaire de 100 000 chiffres sur RTX 4080 SUPER 0,092 → 0,054 à
+  0,074 ms par nombre (Metal : 2 points par thread, −18 % ; au-delà, le noyau déroulé s'effondre).
 - **Produit de matrices d'octets `gs.matmul_u8(c, a, b, m, n, k)`** (`Stmt::MatMul`) : collectif (barrière
   avant et après, même règle d'uniformité que `gs.barrier()`), sur des tableaux `gs.shared` u32 : `a` rangé
   par lignes, `b` par colonnes, 4 octets par mot, `c[i·n + j] += Σ a[i, t]·b[j, t]` modulo 2³². CUDA, si

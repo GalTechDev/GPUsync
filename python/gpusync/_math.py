@@ -75,6 +75,11 @@ def barrier():
     raise RuntimeError("gs.barrier() n'a de sens que dans un kernel avec group= (@gs.kernel(group=256))")
 
 
+def store(k, value):
+    """Dans un kernel avec cells= : écrit la k-ième case de sortie du thread (cases début + r + k·group)."""
+    raise RuntimeError("gs.store() n'a de sens que dans un kernel avec cells= (@gs.kernel(group=1024, cells=8))")
+
+
 def matmul_u8(c, a, b, m, n, k):
     """Dans un kernel avec group= : produit de matrices d'octets, collectif (tout le groupe, barrière
     avant et après). a : m lignes de k octets, b : n colonnes de k octets (4 octets par mot u32, octet de
@@ -110,5 +115,5 @@ nan = _m.nan
 
 __all__ = [
     "sqrt", "exp", "exp2", "log", "log2", "sin", "cos", "tan", "tanh", "atan2",
-    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "shared", "lane", "barrier", "matmul_u8", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
+    "floor", "ceil", "pow", "abs", "min", "max", "mulhi", "index", "local", "shared", "lane", "barrier", "matmul_u8", "store", "atomic_add", "atomic_min", "atomic_max", "pi", "e", "tau", "inf", "nan",
 ]

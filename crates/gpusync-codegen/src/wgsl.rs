@@ -445,6 +445,16 @@ impl Gen<'_> {
                     self.out.line(l);
                 }
             }
+            Stmt::Store { k, value } => {
+                let g = self.k.group.unwrap_or(1);
+                let l = format!(
+                    "gs_out0[{} + u32({}) * {g}u] = {};",
+                    self.out_index(),
+                    self.expr(k),
+                    self.expr(value)
+                );
+                self.out.line(l);
+            }
             Stmt::Barrier => self.out.line("workgroupBarrier();"),
             Stmt::Break => self.out.line("break;"),
             Stmt::Continue => self.out.line("continue;"),
@@ -727,7 +737,11 @@ pub fn emit_wgsl_variant(
             g.out.line(format!(
                 "if (gs_wg * {gsz}u >= gs_params[{n_scalars}]) {{ return; }}"
             ));
-            g.out.line(format!("let gs_i = gs_wg * {gsz}u + gs_lid;"));
+            // cells= : première case du thread dans la tuile de son groupe (gsz·cells cases).
+            g.out.line(format!(
+                "let gs_i = gs_wg * {}u + gs_lid;",
+                gsz * k.cells.max(1)
+            ));
         }
     }
     let (mut word, mut fword) = (0, 0);

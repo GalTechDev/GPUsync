@@ -159,7 +159,7 @@ def rev(x: gs.u32["n"]) -> gs.u32["n"]:
 
 
 def test_shape_not_a_multiple_of_the_group():
-    with pytest.raises(gs.ShapeMismatch, match="groupes complets de 256"):
+    with pytest.raises(gs.ShapeMismatch, match="tuiles complètes de 256"):
         reverse(np.zeros((3, 100), np.float32), device="cpu")
 
 

@@ -235,12 +235,20 @@ pub unsafe fn launch(
         )));
     }
     let indexed = matches!(k.grid, Grid::Indexed { .. });
-    if let Some(g) = k.group.filter(|g| !n.is_multiple_of(*g as usize)) {
-        return Err(CoreError::Shape(format!(
-            "'{}' : group={g}, mais la sortie a {n} cases, qui ne se découpent pas en groupes complets de {g} \
-             (choisissez des dimensions dont le produit est un multiple de {g}, ex. une dernière dimension multiple de {g})",
-            k.name
-        )));
+    if let Some(g) = k.group {
+        let tile = g as usize * k.cells.max(1) as usize;
+        if !n.is_multiple_of(tile) {
+            return Err(CoreError::Shape(format!(
+                "'{}' : group={g}{}, mais la sortie a {n} cases, qui ne se découpent pas en tuiles complètes de {tile} \
+                 (choisissez des dimensions dont le produit est un multiple de {tile}, ex. une dernière dimension multiple de {tile})",
+                k.name,
+                if k.cells > 1 {
+                    format!(", cells={}", k.cells)
+                } else {
+                    String::new()
+                }
+            )));
+        }
     }
     for (input, (_, p)) in inputs.iter().zip(k.array_params()) {
         let bytes = match input {
@@ -1288,7 +1296,10 @@ struct Rows {
 /// Lignes d'un lancement multiple de ceci : chaque lancement couvre des groupes complets.
 fn granule(k: &Kernel, rest: usize) -> usize {
     match k.group {
-        Some(g) => g as usize / gcd(g as usize, rest.max(1)),
+        Some(g) => {
+            let tile = g as usize * k.cells.max(1) as usize;
+            tile / gcd(tile, rest.max(1))
+        }
         None => 1,
     }
 }
@@ -1578,7 +1589,7 @@ unsafe fn rows_cl_direct(
         let orefs: Vec<&ClBuffer> = obs.iter().collect();
         pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
-            let cells = l * rows.rest;
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
             let e = Gpu::launch(
                 d,
                 ck,
@@ -1696,7 +1707,7 @@ unsafe fn rows_q<G: Gpu>(
         let mut last: Option<G::Ev> = None;
         pacer.run(0, rows.total, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, 0, s * rows.rest);
-            let cells = l * rows.rest;
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
             let w: &[&G::Ev] = if last.is_none() { &waits } else { &[] };
             let e = d
                 .launch(ck, &gargs(k, &refs, &sc, &orefs, cells as u32), cells, w)
@@ -1819,7 +1830,7 @@ unsafe fn rows_q<G: Gpu>(
         let mut last: Option<G::Ev> = None;
         pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
-            let cells = l * rows.rest;
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
             let w: &[&G::Ev] = if last.is_none() { &waits } else { &[] };
             let e = d
                 .launch(ck, &gargs(k, &refs, &sc, &orefs, cells as u32), cells, w)
@@ -1963,7 +1974,7 @@ unsafe fn rows_wg_direct(
             pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
                 let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
                 let (mut w, f) = wg_params(k, &sc)?;
-                let cells = l * rows.rest;
+                let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
                 w.push(cells as u32);
                 d.launch(wk, &refs, &orefs, &w, &f, cells)
                     .map_err(dev_err)?;
@@ -2059,7 +2070,7 @@ unsafe fn rows_wg(
             };
             let sc = rows.with(scalars, s, r0, obase);
             let (mut w, f) = wg_params(k, &sc)?;
-            let cells = l * rows.rest;
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
             w.push(cells as u32);
             d.launch(wk, refs, orefs, &w, &f, cells).map_err(dev_err)?;
             if sync {

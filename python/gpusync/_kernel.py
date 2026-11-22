@@ -69,7 +69,8 @@ def _host_array(value, name) -> np.ndarray:
 class Kernel:
     """Kernel compilé à la demande pour chaque périphérique."""
 
-    def __init__(self, func, *, cast: str | None = None, compat: str = "auto", grid=None, group=None) -> None:
+    def __init__(self, func, *, cast: str | None = None, compat: str = "auto", grid=None, group=None,
+                 cells=None) -> None:
         if cast not in (None, "auto"):
             raise ValueError("cast : None ou 'auto'")
         if compat not in ("auto", "strict"):
@@ -85,7 +86,7 @@ class Kernel:
         self._grid = grid
         self._group = group
         try:
-            spec, self._params, self._outs, self._tuple, self._fills = kernel_json(func, grid, group)
+            spec, self._params, self._outs, self._tuple, self._fills = kernel_json(func, grid, group, cells)
         except KernelDeclarationError as e:
             raise _core.KernelSyntaxError(f"kernel '{func.__name__}' : {e}") from None
         try:
@@ -395,11 +396,12 @@ def _check_group(group):
         raise ValueError("group : nombre de threads par groupe, entier entre 1 et 1024 (ex. group=256)")
 
 
-def kernel(func=None, *, cast: str | None = None, compat: str = "auto", grid=None, group=None):
+def kernel(func=None, *, cast: str | None = None, compat: str = "auto", grid=None, group=None, cells=None):
     """Décorateur : `@gs.kernel`, `@gs.kernel(cast="auto")`, `@gs.kernel(compat="strict")`,
     `@gs.kernel(grid="data")` (mode explicite : sorties gs.Out écrites par gs.atomic_*),
-    `@gs.kernel(group=256)` (groupes de threads : gs.shared, gs.lane, gs.barrier)."""
+    `@gs.kernel(group=256)` (groupes de threads : gs.shared, gs.lane, gs.barrier),
+    `@gs.kernel(group=1024, cells=8)` (8 cases de sortie par thread, écrites par gs.store)."""
     _check_group(group)
     if func is None:
-        return lambda f: Kernel(f, cast=cast, compat=compat, grid=grid, group=group)
-    return Kernel(func, cast=cast, compat=compat, grid=grid, group=group)
+        return lambda f: Kernel(f, cast=cast, compat=compat, grid=grid, group=group, cells=cells)
+    return Kernel(func, cast=cast, compat=compat, grid=grid, group=group, cells=cells)

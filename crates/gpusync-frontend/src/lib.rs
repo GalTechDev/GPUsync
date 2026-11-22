@@ -385,6 +385,34 @@ pub fn lower(spec: &J) -> R<Kernel> {
             Some(n as u32)
         }
     };
+    // Cases par thread (`cells=`) : kernels avec group=, une seule sortie.
+    let cells: u32 = match &spec["cells"] {
+        J::Null => 1,
+        c => {
+            let n = c.as_u64().filter(|n| (1..=64).contains(n)).ok_or_else(|| {
+                err(
+                    ErrorKind::Type,
+                    format!("cells={c} : cases par thread entre 1 et 64 (ex. cells=8)"),
+                    None,
+                )
+            })?;
+            if n > 1 && group.is_none() {
+                return Err(err(
+                    ErrorKind::Syntax,
+                    "cells= : les cases d'un thread appartiennent à la tuile de son groupe, déclarez group= (ex. @gs.kernel(group=1024, cells=8))".into(),
+                    None,
+                ));
+            }
+            if n > 1 && outputs.len() != 1 {
+                return Err(err(
+                    ErrorKind::Type,
+                    "cells= : une seule sortie".into(),
+                    None,
+                ));
+            }
+            n as u32
+        }
+    };
     let (rank, chunked, inrow, writable) = match &grid {
         Grid::Indexed {
             axes,
@@ -423,6 +451,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
                 line: None,
                 group,
                 barrier_lines: vec![],
+                cells,
             };
             let body = lw.block(&body_json, true)?;
             (
@@ -435,7 +464,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
         if restart {
             continue;
         }
-        if !outputs.is_empty() && !always_returns(&body) {
+        if !outputs.is_empty() && cells == 1 && !always_returns(&body) {
             return Err(err(
                 ErrorKind::Syntax,
                 "le kernel doit se terminer par `return` dans toutes les branches".into(),
@@ -450,6 +479,7 @@ pub fn lower(spec: &J) -> R<Kernel> {
             body,
             grid,
             group,
+            cells,
         };
         if group.is_some() {
             check_barriers(&k, &barrier_lines)?;
@@ -674,6 +704,7 @@ struct Lowerer<'a> {
     /// Taille de groupe (`group=`) et ligne de chaque `gs.barrier()`, dans l'ordre du code.
     group: Option<u32>,
     barrier_lines: Vec<Option<u32>>,
+    cells: u32,
 }
 
 impl Lowerer<'_> {
@@ -918,6 +949,15 @@ impl Lowerer<'_> {
                         Stmt::Continue
                     });
                 }
+                "Return" if self.cells > 1 => {
+                    if !s["value"].is_null() {
+                        return Err(self.e(
+                            ErrorKind::Syntax,
+                            "avec cells=, chaque case s'écrit par gs.store(k, valeur) : return sans valeur",
+                        ));
+                    }
+                    out.push(Stmt::Return(vec![]));
+                }
                 "Return" if self.outputs.is_empty() => {
                     if !s["value"].is_null() {
                         return Err(self.e(
@@ -973,6 +1013,24 @@ impl Lowerer<'_> {
                     let st = self.matmul(&s["value"])?;
                     self.barrier_lines.push(self.line);
                     out.push(st);
+                }
+                "Expr" if self.is_gs_call(&s["value"], "store") => {
+                    if self.cells <= 1 {
+                        return Err(self.e(
+                            ErrorKind::Syntax,
+                            "gs.store(k, valeur) : plusieurs cases par thread, déclarez-les : @gs.kernel(group=1024, cells=8)",
+                        ));
+                    }
+                    let args = s["value"]["args"].as_array().cloned().unwrap_or_default();
+                    if args.len() != 2 {
+                        return Err(
+                            self.e(ErrorKind::Syntax, "gs.store(k, valeur) : deux arguments")
+                        );
+                    }
+                    let k = self.index_expr(&args[0])?;
+                    let v = self.expr(&args[1])?;
+                    let value = self.to_ty(v, self.outputs[0], "gs.store")?;
+                    out.push(Stmt::Store { k, value });
                 }
                 "Expr" if self.is_gs_call(&s["value"], "barrier") => {
                     if self.group.is_none() {
@@ -2056,6 +2114,12 @@ impl Lowerer<'_> {
             }
             (Some("gpusync"), "shared") => {
                 return Err(self.e(ErrorKind::Syntax, "gs.shared(...) s'utilise seul dans une affectation : t = gs.shared(gs.f32, 256)"));
+            }
+            (Some("gpusync"), "store") => {
+                return Err(self.e(
+                    ErrorKind::Syntax,
+                    "gs.store(k, valeur) s'utilise seul, comme une instruction",
+                ));
             }
             (Some("gpusync"), "matmul_u8") => {
                 return Err(self.e(
