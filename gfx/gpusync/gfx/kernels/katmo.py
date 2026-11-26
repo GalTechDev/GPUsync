@@ -1,0 +1,962 @@
+"""Atmosphère humide à l'échelle des nuages (LES anélastique).
+
+Grille C : `u`, `v`, `w` sont sur les faces basses de chaque cellule `(k, j, i)` ; x et y sont périodiques,
+le sol et le sommet sont rigides (`w[0] = 0`, et `w` est nul au-dessus de la dernière cellule).
+
+Scalaires : `s` = énergie statique d'eau liquide / cp (K, à une constante près), `qt` = vapeur + eau nuageuse,
+`qr` = pluie. `s` et `qt` se conservent pendant la condensation ; la température et l'eau nuageuse en sont
+déduites par ajustement à saturation."""
+
+import gpusync as gs
+
+CP = 1004.64
+RD = 287.04
+RV = 461.5
+LV = 2.501e6
+GRAVITY = 9.81
+
+# Colonnes de la table de référence `(nz, 8)`
+REF_Z, REF_P, REF_T, REF_QV, REF_QC, REF_RHO, REF_RHO_F, REF_EXNER = range(8)
+
+
+# ───────────────────────── Thermodynamique ─────────────────────────
+
+
+@gs.kernel
+def atm_thermo(
+    s: gs.f32["nz", "ny", "nx"],
+    qt: gs.f32["nz", "ny", "nx"],
+    qr: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    s_ref: gs.f32,
+    ice: gs.f32,
+) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
+    """Ajustement à saturation : `(température, eau nuageuse, flottabilité)`.
+
+    `s = T + g z / cp - L (qc + qr) / cp` : on cherche T tel que `qc = max(qt - qs(T), 0)` (Newton).
+    Pression de vapeur saturante de Bolton (1980) ; pression de l'état de référence. `ice` = 1 : saturation mixte
+    eau-glace entre 0 et -23 °C, glace pure plus bas."""
+    k, j, i = gs.index()
+    qr_c = gs.max(qr[k, j, i], 0.0)
+    q_tot = gs.max(qt[k, j, i], 0.0)
+    p = ref[k, 1]
+    t_dry = s[k, j, i] + s_ref - 9.81 / 1004.64 * ref[k, 0] + 2489.4489 * qr_c
+    t = t_dry
+    qc = 0.0
+    es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
+    des = es * 4302.645 / ((t - 29.65) * (t - 29.65))
+    if ice > 0.0 and t < 273.15:
+        mix = gs.max((t - 250.16) / 23.0, 0.0)
+        mix = gs.min(mix * mix, 1.0)
+        ei = 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
+        des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55))
+        es = es * mix + (1.0 - mix) * ei
+    qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+    if q_tot > qs:
+        for _ in range(5):
+            es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
+            des = es * 4302.645 / ((t - 29.65) * (t - 29.65))
+            if ice > 0.0 and t < 273.15:
+                mix = gs.max((t - 250.16) / 23.0, 0.0)
+                mix = gs.min(mix * mix, 1.0)
+                ei = 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
+                des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55))
+                es = es * mix + (1.0 - mix) * ei
+            qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+            dqs = qs / es * des * p / gs.max(p - 0.37803 * es, 1.0)
+            f = t - t_dry - 2489.4489 * (q_tot - qs)
+            t = t - f / (1.0 + 2489.4489 * dqs)
+        es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
+        des = es * 4302.645 / ((t - 29.65) * (t - 29.65))
+        if ice > 0.0 and t < 273.15:
+            mix = gs.max((t - 250.16) / 23.0, 0.0)
+            mix = gs.min(mix * mix, 1.0)
+            ei = 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
+            des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55))
+            es = es * mix + (1.0 - mix) * ei
+        qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+        qc = gs.max(q_tot - qs, 0.0)
+        t = t_dry + 2489.4489 * qc
+    qv = q_tot - qc
+    b = 9.81 * ((t - ref[k, 2]) / ref[k, 2] + 0.60778 * (qv - ref[k, 3]) - (qc - ref[k, 4]) - qr_c)
+    return t, qc, b
+
+
+# ───────────────────────── Advection ─────────────────────────
+
+
+@gs.kernel
+def atm_scalar_stage(
+    base: gs.f32["nz", "ny", "nx"],
+    phi: gs.f32["nz", "ny", "nx"],
+    u: gs.f32["nz", "ny", "nx"],
+    v: gs.f32["nz", "ny", "nx"],
+    w: gs.f32["nz", "ny", "nx"],
+    slow: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    inv_dx: gs.f32,
+    inv_dy: gs.f32,
+    inv_dz: gs.f32,
+    dt: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """`base + dt (advection de phi + slow)` : forme flux, reconstruction amont d'ordre 9 limitée
+    (MP de Suresh & Huynh 1997 : dépassements de 2 % au plus au nombre de Courant employé), calculée en écarts à la valeur amont pour garder la précision."""
+    k, j, i = gs.index()
+    nz = phi.shape[0]
+    ny = phi.shape[1]
+    nx = phi.shape[2]
+    q = gs.local(gs.f32, 9)
+    total = 0.0
+    for ax in range(3):
+        for side in range(2):
+            # Face basse de la cellule (côté 0) ou de la suivante (côté 1) le long de l'axe
+            fi = i
+            fj = j
+            fk = k
+            vel = 0.0
+            inv_d = inv_dx
+            if ax == 0:
+                fi = (i + side) % nx
+                vel = u[k, j, fi] * ref[k, 5]
+            elif ax == 1:
+                inv_d = inv_dy
+                fj = (j + side) % ny
+                vel = v[k, fj, i] * ref[k, 5]
+            else:
+                inv_d = inv_dz
+                fk = k + side
+                if fk > 0 and fk < nz:
+                    vel = w[fk, j, i] * ref[fk, 6]
+            if vel != 0.0:
+                for m in range(9):
+                    off = m - 5
+                    if vel < 0.0:
+                        off = 4 - m
+                    val = 0.0
+                    if ax == 0:
+                        val = phi[k, j, (fi + off) % nx]
+                    elif ax == 1:
+                        val = phi[k, (fj + off) % ny, i]
+                    else:
+                        val = phi[gs.min(gs.max(fk + off, 0), nz - 1), j, i]
+                    q[m] = val
+                up = q[4]
+                m1 = q[3] - up
+                m2 = q[2] - up
+                p1 = q[5] - up
+                p2 = q[6] - up
+                f = (
+                    4.0 * (q[0] - up) - 41.0 * (q[1] - up) + 199.0 * m2 - 641.0 * m1 + 1375.0 * p1 - 305.0 * p2 + 55.0 * (q[7] - up) - 5.0 * (q[8] - up)
+                ) * 3.968254e-4
+                # Borne monotone : q0 + minmod(p1, 4 (q0 - m1))
+                s4 = -4.0 * m1
+                f_mp = 0.0
+                if p1 * s4 > 0.0:
+                    f_mp = p1 if gs.abs(p1) < gs.abs(s4) else s4
+                if f * (f - f_mp) > 0.0:
+                    d_m = m2 - 2.0 * m1
+                    d_0 = m1 + p1
+                    d_p = p2 - 2.0 * p1
+                    # minmod de quatre courbures, de part et d'autre
+                    cur_p = 0.0
+                    a1 = 4.0 * d_0 - d_p
+                    a2 = 4.0 * d_p - d_0
+                    if a1 > 0.0 and a2 > 0.0 and d_0 > 0.0 and d_p > 0.0:
+                        cur_p = gs.min(a1, a2, d_0, d_p)
+                    elif a1 < 0.0 and a2 < 0.0 and d_0 < 0.0 and d_p < 0.0:
+                        cur_p = gs.max(a1, a2, d_0, d_p)
+                    cur_m = 0.0
+                    a1 = 4.0 * d_0 - d_m
+                    a2 = 4.0 * d_m - d_0
+                    if a1 > 0.0 and a2 > 0.0 and d_0 > 0.0 and d_m > 0.0:
+                        cur_m = gs.min(a1, a2, d_0, d_m)
+                    elif a1 < 0.0 and a2 < 0.0 and d_0 < 0.0 and d_m < 0.0:
+                        cur_m = gs.max(a1, a2, d_0, d_m)
+                    f_md = 0.5 * p1 - 0.5 * cur_p
+                    f_lc = -0.5 * m1 + 1.3333333 * cur_m
+                    f_lo = gs.max(gs.min(0.0, p1, f_md), gs.min(0.0, s4, f_lc))
+                    f_hi = gs.min(gs.max(0.0, p1, f_md), gs.max(0.0, s4, f_lc))
+                    f = gs.min(gs.max(f, f_lo), f_hi)
+                flux = vel * (up + f) * inv_d
+                if side == 0:
+                    total += flux
+                else:
+                    total -= flux
+    return base[k, j, i] + dt * (total / ref[k, 5] + slow[k, j, i])
+
+
+@gs.kernel
+def atm_momentum_stage(
+    base: gs.f32["nz", "ny", "nx"],
+    u: gs.f32["nz", "ny", "nx"],
+    v: gs.f32["nz", "ny", "nx"],
+    w: gs.f32["nz", "ny", "nx"],
+    buoyancy: gs.f32["nz", "ny", "nx"],
+    slow: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    forcing: gs.f32["nz", "c8"],
+    comp: gs.i32,
+    inv_dx: gs.f32,
+    inv_dy: gs.f32,
+    inv_dz: gs.f32,
+    coriolis: gs.f32,
+    frame_u: gs.f32,
+    frame_v: gs.f32,
+    dt: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """`base + dt (advection + flottabilité, Coriolis, subsidence + slow)` d'une composante du vent.
+
+    Advection sous forme flux, reconstruction amont d'ordre 9. Les flux de masse sont les moyennes de ceux de la
+    continuité discrète : un vent uniforme reste uniforme."""
+    k, j, i = gs.index()
+    nz = u.shape[0]
+    ny = u.shape[1]
+    nx = u.shape[2]
+    if comp == 2 and k == 0:
+        return 0.0
+    coef = gs.local(gs.f32, 9)
+    coef[0] = 1.5873016e-3
+    coef[1] = -1.6269841e-2
+    coef[2] = 7.8968254e-2
+    coef[3] = -2.5436508e-1
+    coef[4] = 7.4563492e-1
+    coef[5] = 5.4563492e-1
+    coef[6] = -1.2103175e-1
+    coef[7] = 2.1825397e-2
+    coef[8] = -1.9841270e-3
+    total = 0.0
+    for ax in range(3):
+        for side in range(2):
+            qi = i
+            qj = j
+            qk = k
+            inv_d = inv_dx
+            if ax == 0:
+                qi = (i + side) % nx
+            elif ax == 1:
+                inv_d = inv_dy
+                qj = (j + side) % ny
+            else:
+                inv_d = inv_dz
+                qk = k + side
+            # Flux de masse : moyenne de deux faces décalées d'une cellule le long de `comp`
+            mass = 0.0
+            for h in range(2):
+                hi = qi
+                hj = qj
+                hk = qk
+                if h == 1:
+                    if comp == 0:
+                        hi = (qi - 1 + nx) % nx
+                    elif comp == 1:
+                        hj = (qj - 1 + ny) % ny
+                    else:
+                        hk = qk - 1
+                if ax == 0:
+                    if hk >= 0 and hk < nz:
+                        mass += 0.5 * u[hk, hj, hi] * ref[hk, 5]
+                elif ax == 1:
+                    if hk >= 0 and hk < nz:
+                        mass += 0.5 * v[hk, hj, hi] * ref[hk, 5]
+                elif hk > 0 and hk < nz:
+                    mass += 0.5 * w[hk, hj, hi] * ref[hk, 6]
+            if mass != 0.0:
+                face = 0.0
+                for m in range(9):
+                    off = m - 5
+                    if mass < 0.0:
+                        off = 4 - m
+                    ci = qi
+                    cj = qj
+                    ck = qk
+                    if ax == 0:
+                        ci = (qi + off) % nx
+                    elif ax == 1:
+                        cj = (qj + off) % ny
+                    else:
+                        ck = qk + off
+                    val = 0.0
+                    if comp == 2:
+                        if ck > 0 and ck < nz:
+                            val = w[ck, cj, ci]
+                    else:
+                        ck = gs.min(gs.max(ck, 0), nz - 1)
+                        val = u[ck, cj, ci] if comp == 0 else v[ck, cj, ci]
+                    face += coef[m] * val
+                if side == 0:
+                    total += mass * face * inv_d
+                else:
+                    total -= mass * face * inv_d
+    # Forces
+    tend = 0.0
+    if comp == 2:
+        total = total / ref[k, 6]
+        damp = 0.5 * (forcing[k, 7] + forcing[k - 1, 7])
+        tend = 0.5 * (buoyancy[k, j, i] + buoyancy[k - 1, j, i]) - damp * w[k, j, i]
+    else:
+        total = total / ref[k, 5]
+        c = u[k, j, i]
+        if comp == 0:
+            im = (i - 1 + nx) % nx
+            jp = (j + 1) % ny
+            other = 0.25 * (v[k, j, i] + v[k, jp, i] + v[k, j, im] + v[k, jp, im]) + frame_v
+            tend = coriolis * (other - forcing[k, 4]) + forcing[k, 5]
+        else:
+            c = v[k, j, i]
+            jm = (j - 1 + ny) % ny
+            ip = (i + 1) % nx
+            other = 0.25 * (u[k, j, i] + u[k, j, ip] + u[k, jm, i] + u[k, jm, ip]) + frame_u
+            tend = -coriolis * (other - forcing[k, 3]) + forcing[k, 6]
+        w_ls = forcing[k, 0]
+        if w_ls < 0.0 and k < nz - 1:
+            above = u[k + 1, j, i] if comp == 0 else v[k + 1, j, i]
+            tend -= w_ls * (above - c) * inv_dz
+    return base[k, j, i] + dt * (total + tend + slow[k, j, i])
+
+
+# ───────────────────────── Turbulence sous-maille (Smagorinsky-Lilly) ─────────────────────────
+
+
+@gs.kernel
+def atm_eddy_viscosity(
+    u: gs.f32["nz", "ny", "nx"],
+    v: gs.f32["nz", "ny", "nx"],
+    w: gs.f32["nz", "ny", "nx"],
+    t: gs.f32["nz", "ny", "nx"],
+    qc: gs.f32["nz", "ny", "nx"],
+    qt: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    dx: gs.f32,
+    dy: gs.f32,
+    dz: gs.f32,
+    cs: gs.f32,
+    prandtl: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Viscosité turbulente au centre des cellules, avec la stabilité sèche ou humide (Durran & Klemp 1982)."""
+    k, j, i = gs.index()
+    nz = u.shape[0]
+    ny = u.shape[1]
+    nx = u.shape[2]
+    ip = (i + 1) % nx
+    im = (i - 1 + nx) % nx
+    jp = (j + 1) % ny
+    jm = (j - 1 + ny) % ny
+    kp = gs.min(k + 1, nz - 1)
+    km = gs.max(k - 1, 0)
+    w_top = w[k + 1, j, i] if k < nz - 1 else 0.0
+    s11 = (u[k, j, ip] - u[k, j, i]) / dx
+    s22 = (v[k, jp, i] - v[k, j, i]) / dy
+    s33 = (w_top - w[k, j, i]) / dz
+    # Cisaillements centrés
+    uc_jp = 0.5 * (u[k, jp, i] + u[k, jp, ip])
+    uc_jm = 0.5 * (u[k, jm, i] + u[k, jm, ip])
+    vc_ip = 0.5 * (v[k, j, ip] + v[k, jp, ip])
+    vc_im = 0.5 * (v[k, j, im] + v[k, jp, im])
+    s12 = 0.5 * ((uc_jp - uc_jm) / (2.0 * dy) + (vc_ip - vc_im) / (2.0 * dx))
+    span = float(kp - km) * dz
+    uz = (u[kp, j, i] + u[kp, j, ip] - u[km, j, i] - u[km, j, ip]) * 0.5 / span
+    vz = (v[kp, j, i] + v[kp, jp, i] - v[km, j, i] - v[km, jp, i]) * 0.5 / span
+    wt_ip = w[k + 1, j, ip] if k < nz - 1 else 0.0
+    wt_im = w[k + 1, j, im] if k < nz - 1 else 0.0
+    wt_jp = w[k + 1, jp, i] if k < nz - 1 else 0.0
+    wt_jm = w[k + 1, jm, i] if k < nz - 1 else 0.0
+    wx = (w[k, j, ip] + wt_ip - w[k, j, im] - wt_im) * 0.25 / dx
+    wy = (w[k, jp, i] + wt_jp - w[k, jm, i] - wt_jm) * 0.25 / dy
+    s13 = 0.5 * (uz + wx)
+    s23 = 0.5 * (vz + wy)
+    strain2 = 2.0 * (s11 * s11 + s22 * s22 + s33 * s33) + 4.0 * (s12 * s12 + s13 * s13 + s23 * s23)
+
+    t_c = t[k, j, i]
+    dtdz = (t[kp, j, i] - t[km, j, i]) / span
+    dqt = (qt[kp, j, i] - qt[km, j, i]) / span
+    n2 = 0.0
+    if qc[k, j, i] > 1e-6:
+        # Air saturé : gradient de température contre l'adiabatique humide
+        p = ref[k, 1]
+        es = 611.2 * gs.exp(17.67 * (t_c - 273.15) / (t_c - 29.65))
+        qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+        lqrt = 2.501e6 * qs / (287.04 * t_c)
+        gamma_m = 9.81 / 1004.64 * (1.0 + lqrt) / (1.0 + 0.62197 * 2.501e6 * 2.501e6 * qs / (1004.64 * 287.04 * t_c * t_c))
+        n2 = 9.81 * ((dtdz + gamma_m) / t_c * (1.0 + lqrt) - dqt)
+    else:
+        qvz = dqt
+        n2 = 9.81 * ((dtdz + 9.81 / 1004.64) / t_c + 0.60778 * qvz)
+    delta = gs.pow(dx * dy * dz, 0.33333333)
+    # Longueur de mélange limitée près du sol
+    height = ref[k, 0]
+    inv_l2 = 1.0 / (cs * cs * delta * delta) + 1.0 / (0.16 * height * height)
+    fb = gs.max(strain2 - n2 / prandtl, 0.0)
+    return gs.sqrt(fb) / inv_l2
+
+
+@gs.kernel
+def atm_diffuse_scalar(
+    phi: gs.f32["nz", "ny", "nx"],
+    km: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    inv_dx: gs.f32,
+    inv_dy: gs.f32,
+    inv_dz: gs.f32,
+    inv_prandtl: gs.f32,
+    surface_flux: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Diffusion turbulente d'un scalaire ; `surface_flux` (unité · m/s) entre par le sol."""
+    k, j, i = gs.index()
+    nz = phi.shape[0]
+    ny = phi.shape[1]
+    nx = phi.shape[2]
+    c = phi[k, j, i]
+    kc = km[k, j, i]
+    ip = (i + 1) % nx
+    im = (i - 1 + nx) % nx
+    jp = (j + 1) % ny
+    jm = (j - 1 + ny) % ny
+    total = 0.0
+    total += ((kc + km[k, j, ip]) * (phi[k, j, ip] - c) - (kc + km[k, j, im]) * (c - phi[k, j, im])) * 0.5 * inv_dx * inv_dx
+    total += ((kc + km[k, jp, i]) * (phi[k, jp, i] - c) - (kc + km[k, jm, i]) * (c - phi[k, jm, i])) * 0.5 * inv_dy * inv_dy
+    total = total * ref[k, 5]
+    if k < nz - 1:
+        total += ref[k + 1, 6] * 0.5 * (kc + km[k + 1, j, i]) * (phi[k + 1, j, i] - c) * inv_dz * inv_dz
+    if k > 0:
+        total -= ref[k, 6] * 0.5 * (kc + km[k - 1, j, i]) * (c - phi[k - 1, j, i]) * inv_dz * inv_dz
+    total = total * inv_prandtl
+    if k == 0:
+        total += ref[0, 6] * surface_flux * inv_dz
+    return total / ref[k, 5]
+
+
+@gs.kernel
+def atm_diffuse_momentum(
+    u: gs.f32["nz", "ny", "nx"],
+    v: gs.f32["nz", "ny", "nx"],
+    w: gs.f32["nz", "ny", "nx"],
+    km: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    comp: gs.i32,
+    inv_dx: gs.f32,
+    inv_dy: gs.f32,
+    inv_dz: gs.f32,
+    ustar: gs.f32,
+    frame_u: gs.f32,
+    frame_v: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Diffusion turbulente d'une composante (laplacien à viscosité variable) et frottement du sol `u*²`."""
+    k, j, i = gs.index()
+    nz = u.shape[0]
+    ny = u.shape[1]
+    nx = u.shape[2]
+    if comp == 2 and k == 0:
+        return 0.0
+    total = 0.0
+    c = u[k, j, i]
+    if comp == 1:
+        c = v[k, j, i]
+    elif comp == 2:
+        c = w[k, j, i]
+    for ax in range(3):
+        for side in range(2):
+            ni = i
+            nj = j
+            nk = k
+            d = 2 * side - 1
+            inv_d = inv_dx
+            if ax == 0:
+                ni = (i + d + nx) % nx
+            elif ax == 1:
+                inv_d = inv_dy
+                nj = (j + d + ny) % ny
+            else:
+                inv_d = inv_dz
+                nk = k + d
+            val = c
+            visc = 0.0
+            if nk >= 0 and nk < nz:
+                if comp == 0:
+                    val = u[nk, nj, ni]
+                elif comp == 1:
+                    val = v[nk, nj, ni]
+                else:
+                    val = w[nk, nj, ni] if nk > 0 else 0.0
+                visc = 0.5 * (km[k, j, i] + km[nk, nj, ni])
+            elif comp == 2 and nk == nz:
+                val = 0.0
+                visc = km[nz - 1, j, i]
+            weight = ref[k, 5]
+            if ax == 2 and comp != 2:
+                weight = ref[gs.min(k + side, nz - 1), 6]
+            elif comp == 2:
+                weight = ref[k, 6]
+            total += weight * visc * (val - c) * inv_d * inv_d
+    rho = ref[k, 5]
+    if comp == 2:
+        rho = ref[k, 6]
+    total = total / rho
+    if k == 0 and comp != 2 and ustar > 0.0:
+        ug = u[0, j, i] + frame_u
+        vg = v[0, j, i] + frame_v
+        speed = gs.sqrt(ug * ug + vg * vg + 0.01)
+        wind = ug
+        if comp == 1:
+            wind = vg
+        total -= ustar * ustar * wind / speed * inv_dz
+    return total
+
+
+# ───────────────────────── Forçages ─────────────────────────
+
+
+@gs.kernel
+def atm_forcing_scalar(
+    phi: gs.f32["nz", "ny", "nx"],
+    forcing: gs.f32["nz", "c8"],
+    column: gs.i32,
+    inv_dz: gs.f32,
+    sponge_ref: gs.f32["nz"],
+) -> gs.f32["nz", "ny", "nx"]:
+    """Subsidence de grande échelle (colonne 0), tendance imposée (`column`) et rappel près du sommet (colonne 7)."""
+    k, j, i = gs.index()
+    nz = phi.shape[0]
+    w_ls = forcing[k, 0]
+    grad = 0.0
+    if w_ls < 0.0 and k < nz - 1:
+        grad = (phi[k + 1, j, i] - phi[k, j, i]) * inv_dz
+    elif w_ls > 0.0 and k > 0:
+        grad = (phi[k, j, i] - phi[k - 1, j, i]) * inv_dz
+    return -w_ls * grad + forcing[k, column] - forcing[k, 7] * (phi[k, j, i] - sponge_ref[k])
+
+
+@gs.kernel
+def atm_axpy(
+    base: gs.f32["nz", "ny", "nx"],
+    t1: gs.f32["nz", "ny", "nx"],
+    t2: gs.f32["nz", "ny", "nx"],
+    dt: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """`base + dt (t1 + t2)`."""
+    k, j, i = gs.index()
+    return base[k, j, i] + dt * (t1[k, j, i] + t2[k, j, i])
+
+
+@gs.kernel
+def atm_add(a: gs.f32["nz", "ny", "nx"], b: gs.f32["nz", "ny", "nx"]) -> gs.f32["nz", "ny", "nx"]:
+    k, j, i = gs.index()
+    return a[k, j, i] + b[k, j, i]
+
+
+# ───────────────────────── Pression (solveur direct) ─────────────────────────
+
+
+@gs.kernel
+def atm_divergence(
+    u: gs.f32["nz", "ny", "nx"],
+    v: gs.f32["nz", "ny", "nx"],
+    w: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    inv_dx: gs.f32,
+    inv_dy: gs.f32,
+    inv_dz: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Divergence du flux de masse `ρ0 u`."""
+    k, j, i = gs.index()
+    nz = u.shape[0]
+    ip = (i + 1) % u.shape[2]
+    jp = (j + 1) % u.shape[1]
+    top = 0.0
+    if k < nz - 1:
+        top = ref[k + 1, 6] * w[k + 1, j, i]
+    bot = 0.0
+    if k > 0:
+        bot = ref[k, 6] * w[k, j, i]
+    return ref[k, 5] * ((u[k, j, ip] - u[k, j, i]) * inv_dx + (v[k, jp, i] - v[k, j, i]) * inv_dy) + (top - bot) * inv_dz
+
+
+@gs.kernel
+def atm_hartley_x1(
+    a: gs.f32["nz", "ny", "nx"], trig: gs.f32["nx", "c2"], n1: gs.i32, n2: gs.i32
+) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
+    """Hartley en x pour N = n1·n2, première passe (Cooley-Tukey) : parties réelle et imaginaire."""
+    k, j, i = gs.index()
+    n = n1 * n2
+    k1 = i // n2
+    col = i - k1 * n2
+    re = 0.0
+    im = 0.0
+    idx = k1 * col % n
+    step = k1 * n2 % n
+    for m in range(n1):
+        v = a[k, j, m * n2 + col]
+        re += v * trig[idx, 0]
+        im -= v * trig[idx, 1]
+        idx += step
+        if idx >= n:
+            idx -= n
+    return re, im
+
+
+@gs.kernel
+def atm_hartley_x2(
+    re: gs.f32["nz", "ny", "nx"], im: gs.f32["nz", "ny", "nx"], trig: gs.f32["nx", "c2"], n1: gs.i32, n2: gs.i32
+) -> gs.f32["nz", "ny", "nx"]:
+    """Seconde passe : Re - Im de la transformée de Fourier."""
+    k, j, i = gs.index()
+    n = n1 * n2
+    k2 = i // n1
+    row = (i - k2 * n1) * n2
+    step = k2 * n1 % n
+    idx = 0
+    total = 0.0
+    for m in range(n2):
+        c = trig[idx, 0]
+        q = trig[idx, 1]
+        total += re[k, j, row + m] * (c + q) + im[k, j, row + m] * (q - c)
+        idx += step
+        if idx >= n:
+            idx -= n
+    return total / gs.sqrt(float(n))
+
+
+@gs.kernel
+def atm_hartley_y1(
+    a: gs.f32["nz", "ny", "nx"], trig: gs.f32["ny", "c2"], n1: gs.i32, n2: gs.i32
+) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
+    k, j, i = gs.index()
+    n = n1 * n2
+    k1 = j // n2
+    col = j - k1 * n2
+    re = 0.0
+    im = 0.0
+    idx = k1 * col % n
+    step = k1 * n2 % n
+    for m in range(n1):
+        v = a[k, m * n2 + col, i]
+        re += v * trig[idx, 0]
+        im -= v * trig[idx, 1]
+        idx += step
+        if idx >= n:
+            idx -= n
+    return re, im
+
+
+@gs.kernel
+def atm_hartley_y2_columns(
+    re: gs.f32["nz", "ny", "nx"],
+    im: gs.f32["nz", "ny", "nx"],
+    trig: gs.f32["ny", "c2"],
+    tpl: gs.f32["ny", "nb", "nz", "g"],
+    n1: gs.i32,
+    n2: gs.i32,
+) -> gs.f32["ny", "nb", "nz", "g"]:
+    """Seconde passe en y, résultat rangé par colonnes : `(j, bloc, k, rang)` avec `i = bloc · g + rang`."""
+    j, b, k, r = gs.index()
+    i = b * tpl.shape[3] + r
+    n = n1 * n2
+    k2 = j // n1
+    row = (j - k2 * n1) * n2
+    step = k2 * n1 % n
+    idx = 0
+    total = 0.0
+    for m in range(n2):
+        c = trig[idx, 0]
+        q = trig[idx, 1]
+        total += re[k, row + m, i] * (c + q) + im[k, row + m, i] * (q - c)
+        idx += step
+        if idx >= n:
+            idx -= n
+    return total / gs.sqrt(float(n))
+
+
+@gs.kernel
+def atm_columns_hartley_y1(
+    a: gs.f32["ny", "nb", "nz", "g"], tpl: gs.f32["nz", "ny", "nx"], trig: gs.f32["ny", "c2"], n1: gs.i32, n2: gs.i32
+) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
+    """Première passe en y depuis le rangement par colonnes."""
+    k, j, i = gs.index()
+    b = i // a.shape[3]
+    r = i - b * a.shape[3]
+    n = n1 * n2
+    k1 = j // n2
+    col = j - k1 * n2
+    re = 0.0
+    im = 0.0
+    idx = k1 * col % n
+    step = k1 * n2 % n
+    for m in range(n1):
+        v = a[m * n2 + col, b, k, r]
+        re += v * trig[idx, 0]
+        im -= v * trig[idx, 1]
+        idx += step
+        if idx >= n:
+            idx -= n
+    return re, im
+
+
+@gs.kernel
+def atm_hartley_y2(
+    re: gs.f32["nz", "ny", "nx"], im: gs.f32["nz", "ny", "nx"], trig: gs.f32["ny", "c2"], n1: gs.i32, n2: gs.i32
+) -> gs.f32["nz", "ny", "nx"]:
+    k, j, i = gs.index()
+    n = n1 * n2
+    k2 = j // n1
+    row = (j - k2 * n1) * n2
+    step = k2 * n1 % n
+    idx = 0
+    total = 0.0
+    for m in range(n2):
+        c = trig[idx, 0]
+        q = trig[idx, 1]
+        total += re[k, row + m, i] * (c + q) + im[k, row + m, i] * (q - c)
+        idx += step
+        if idx >= n:
+            idx -= n
+    return total / gs.sqrt(float(n))
+
+
+def _pressure_columns(
+    rhs: gs.f32["ny", "nb", "nz", "g"],
+    ref: gs.f32["nz", "c8"],
+    eig_x: gs.f32["nx"],
+    eig_y: gs.f32["ny"],
+    inv_dz: gs.f32,
+) -> gs.f32["ny", "nb", "nz", "g"]:
+    """Système tridiagonal vertical de chaque mode horizontal (Thomas), parois de Neumann : un thread par colonne."""
+    j, b, k0, r = gs.index()
+    nz = rhs.shape[2]
+    i = b * rhs.shape[3] + r
+    cp = gs.local(gs.f32, 256)
+    dp = gs.local(gs.f32, 256)
+    lam = eig_x[i] + eig_y[j]
+    iz2 = inv_dz * inv_dz
+    mean = 0
+    excess = 0.0
+    if i == 0 and j == 0:
+        # Bords ouverts : le bilan de masse latéral n'est nul qu'à l'arrondi près, on répartit l'écart sur la colonne
+        mean = 1
+        mass = 0.0
+        for m in range(nz):
+            excess += rhs[j, b, m, r]
+            mass += ref[m, 5]
+        excess = excess / mass
+    for m in range(nz):
+        lo = ref[m, 6] * iz2 if m > 0 else 0.0
+        hi = ref[m + 1, 6] * iz2 if m < nz - 1 else 0.0
+        diag = -(lo + hi) - ref[m, 5] * lam
+        d = rhs[j, b, m, r] - ref[m, 5] * excess
+        if mean != 0 and m == 0:
+            # Mode moyen : la pression n'est définie qu'à une constante près
+            diag = -1.0
+            hi = 0.0
+            d = 0.0
+        if mean != 0 and m == 1:
+            lo = 0.0
+            diag = -hi - ref[1, 6] * iz2
+        if m == 0:
+            cp[0] = hi / diag
+            dp[0] = d / diag
+        else:
+            den = diag - lo * cp[m - 1]
+            cp[m] = hi / den
+            dp[m] = (d - lo * dp[m - 1]) / den
+    x = dp[nz - 1]
+    gs.store(nz - 1, x)
+    for m in range(nz - 1):
+        x = dp[nz - 2 - m] - cp[nz - 2 - m] * x
+        gs.store(nz - 2 - m, x)
+
+
+_COLUMN_KERNELS: dict[tuple[int, int], object] = {}
+
+
+def pressure_columns(group: int, nz: int):
+    """Noyau des colonnes pour `group` threads et `nz` niveaux (compilé une fois par taille)."""
+    key = (group, nz)
+    if key not in _COLUMN_KERNELS:
+        _COLUMN_KERNELS[key] = gs.kernel(_pressure_columns, group=group, cells=nz)
+    return _COLUMN_KERNELS[key]
+
+
+@gs.kernel
+def atm_project(
+    vel: gs.f32["nz", "ny", "nx"],
+    phi: gs.f32["nz", "ny", "nx"],
+    comp: gs.i32,
+    inv_d: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Retire le gradient de pression : le flux de masse devient sans divergence."""
+    k, j, i = gs.index()
+    if comp == 0:
+        return vel[k, j, i] - (phi[k, j, i] - phi[k, j, (i - 1 + vel.shape[2]) % vel.shape[2]]) * inv_d
+    if comp == 1:
+        return vel[k, j, i] - (phi[k, j, i] - phi[k, (j - 1 + vel.shape[1]) % vel.shape[1], i]) * inv_d
+    if k == 0:
+        return 0.0
+    return vel[k, j, i] - (phi[k, j, i] - phi[k - 1, j, i]) * inv_d
+
+
+# ───────────────────────── Pluie chaude (Kessler) ─────────────────────────
+
+
+@gs.kernel
+def atm_kessler(
+    qt: gs.f32["nz", "ny", "nx"],
+    qr: gs.f32["nz", "ny", "nx"],
+    qc: gs.f32["nz", "ny", "nx"],
+    t: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    dt: gs.f32,
+    ice: gs.f32,
+) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
+    """Conversion, accrétion et évaporation de la pluie : `(qt, qr, transfert)`.
+
+    `transfert` > 0 : eau passée du nuage à la pluie. `s` ne change pas : il compte déjà toute l'eau liquide."""
+    k, j, i = gs.index()
+    rho = ref[k, 5]
+    rain = gs.max(qr[k, j, i], 0.0)
+    cloud = qc[k, j, i]
+    vap = qt[k, j, i] - cloud
+    auto = 1e-3 * gs.max(cloud - 1e-3, 0.0)
+    accr = 2.2 * cloud * gs.pow(rain, 0.875)
+    gain = gs.min((auto + accr) * dt, cloud)
+    loss = 0.0
+    t_c = t[k, j, i]
+    p = ref[k, 1]
+    es = 611.2 * gs.exp(17.67 * (t_c - 273.15) / (t_c - 29.65))
+    if ice > 0.0 and t_c < 273.15:
+        mix = gs.max((t_c - 250.16) / 23.0, 0.0)
+        mix = gs.min(mix * mix, 1.0)
+        es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t_c - 273.15) / (t_c - 0.55))
+    qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+    if cloud <= 0.0 and rain > 0.0 and vap < qs:
+        # Évaporation avec ventilation (Kessler, coefficients de Klemp & Wilhelmson 1978)
+        rr = rho * 1e-3 * rain
+        vent = 1.6 + 124.9 * gs.pow(rr, 0.2046)
+        evap = (1.0 - vap / qs) * vent * gs.pow(rr, 0.525) / (rho * 1e-3 * (5.4e5 + 2.55e6 / (p * 0.01 * qs)))
+        loss = gs.min(gs.min(evap * dt, rain), qs - vap)
+    delta = gain - loss
+    return qt[k, j, i] - delta, rain + delta, delta
+
+
+@gs.kernel
+def atm_sediment(
+    qr: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    dt: gs.f32,
+    inv_dz: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Chute de la pluie (flux amont) ; ce qui sort par le bas atteint le sol."""
+    k, j, i = gs.index()
+    nz = qr.shape[0]
+    out = 0.0
+    inflow = 0.0
+    for h in range(2):
+        m = k + h
+        if m < nz:
+            q = gs.max(qr[m, j, i], 0.0)
+            speed = 36.34 * gs.pow(ref[m, 5] * 1e-3 * q, 0.1346) * gs.sqrt(ref[0, 5] / ref[m, 5])
+            flux = ref[m, 5] * q * gs.min(speed, 0.9 / (dt * inv_dz))
+            if h == 0:
+                out = flux
+            else:
+                inflow = flux
+    return qr[k, j, i] + (inflow - out) * dt * inv_dz / ref[k, 5]
+
+
+@gs.kernel
+def atm_ice_fall(
+    qc: gs.f32["nz", "ny", "nx"],
+    t: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    dt: gs.f32,
+    inv_dz: gs.f32,
+) -> gs.f32["nz", "ny", "nx"]:
+    """Variation d'eau nuageuse due à la chute des cristaux (Heymsfield & Donner 1990 : 3,29 (rho q)^0,16 m/s, en
+    proportion de la glace entre 258 et 238 K). Rien n'atteint le sol."""
+    k, j, i = gs.index()
+    out = 0.0
+    inflow = 0.0
+    for h in range(2):
+        m = k + h
+        if m < qc.shape[0] and m > 0:
+            q = qc[m, j, i]
+            part = gs.min(gs.max((258.0 - t[m, j, i]) / 20.0, 0.0), 1.0)
+            if q > 0.0 and part > 0.0:
+                fall = gs.min(3.29 * gs.pow(ref[m, 5] * q, 0.16) * part, 0.9 / (dt * inv_dz))
+                if h == 0:
+                    out = ref[m, 5] * q * fall
+                else:
+                    inflow = ref[m, 5] * q * fall
+    return (inflow - out) * dt * inv_dz / ref[k, 5]
+
+
+@gs.kernel
+def atm_surface_rain(
+    acc: gs.f32["ny", "nx"],
+    qr: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    dt: gs.f32,
+    inv_dz: gs.f32,
+) -> gs.f32["ny", "nx"]:
+    """Cumul de pluie au sol (kg/m², soit mm) : flux sortant de la première couche, comme dans `atm_sediment`."""
+    j, i = gs.index()
+    q = gs.max(qr[0, j, i], 0.0)
+    speed = 36.34 * gs.pow(ref[0, 5] * 1e-3 * q, 0.1346)
+    return acc[j, i] + ref[0, 5] * q * gs.min(speed, 0.9 / (dt * inv_dz)) * dt
+
+
+# ───────────────────────── Raccord avec la météo de grande échelle ─────────────────────────
+
+
+@gs.kernel
+def atm_level_means(
+    s: gs.f32["nz", "ny", "nx"],
+    qt: gs.f32["nz", "ny", "nx"],
+    u: gs.f32["nz", "ny", "nx"],
+    v: gs.f32["nz", "ny", "nx"],
+    qc: gs.f32["nz", "ny", "nx"],
+    qr: gs.f32["nz", "ny", "nx"],
+    tpl: gs.f32["nz", "c6"],
+) -> gs.f32["nz", "c6"]:
+    """Moyenne horizontale de chaque niveau (somme par lignes, pour la précision)."""
+    k, c = gs.index()
+    total = 0.0
+    for j in range(s.shape[1]):
+        row = 0.0
+        for i in range(s.shape[2]):
+            if c == 0:
+                row += s[k, j, i]
+            elif c == 1:
+                row += qt[k, j, i]
+            elif c == 2:
+                row += u[k, j, i]
+            elif c == 3:
+                row += v[k, j, i]
+            elif c == 4:
+                row += qc[k, j, i]
+            else:
+                row += qr[k, j, i]
+        total += row / float(s.shape[2])
+    return total / float(s.shape[1])
+
+
+@gs.kernel
+def atm_offset(phi: gs.f32["nz", "ny", "nx"], change: gs.f32["nz", "c2"]) -> gs.f32["nz", "ny", "nx"]:
+    """`phi · facteur + ajout`, un facteur et un ajout par niveau."""
+    k, j, i = gs.index()
+    return phi[k, j, i] * change[k, 1] + change[k, 0]
+
+
+@gs.kernel
+def atm_level_max(
+    u: gs.f32["nz", "ny", "nx"], v: gs.f32["nz", "ny", "nx"], w: gs.f32["nz", "ny", "nx"], tpl: gs.f32["nz", "c3"]
+) -> gs.f32["nz", "c3"]:
+    """Plus grande valeur absolue de chaque composante du vent, par niveau."""
+    k, c = gs.index()
+    top = 0.0
+    for j in range(u.shape[1]):
+        for i in range(u.shape[2]):
+            val = u[k, j, i]
+            if c == 1:
+                val = v[k, j, i]
+            elif c == 2:
+                val = w[k, j, i]
+            top = gs.max(top, gs.abs(val))
+    return top

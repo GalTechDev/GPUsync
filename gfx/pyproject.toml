@@ -1,0 +1,29 @@
+[build-system]
+requires = ["flit_core>=3.10,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "gpusync-gfx"
+version = "0.1.0"
+description = "Moteur graphique et de simulation temps réel (2D, 3D, fluides, atmosphère, météo) écrit avec GPUsync."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "GalTechDev" }, { name = "ThePhoenix78" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = ["gpusync>=0.1,<0.2", "numpy>=1.22"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# Portion du paquet `gpusync` : installe `gpusync/gfx/` à côté de la bibliothèque, sans toucher à son __init__
+[tool.flit.module]
+name = "gpusync.gfx"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

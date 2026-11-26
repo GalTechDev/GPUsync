@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tâches de développement, identiques sur macOS, Linux et Windows.
 
-    python tools/dev.py setup     # crée .venv, installe maturin et pytest, puis `pip install -e .`
-    python tools/dev.py build     # recompile l'extension Rust dans .venv (pip install -e .)
-    python tools/dev.py test      # build + cargo test + pytest
+    python tools/dev.py setup     # crée .venv, installe maturin et pytest, puis `pip install -e .` et `-e gfx`
+    python tools/dev.py build     # recompile l'extension Rust dans .venv, réinstalle le moteur gfx
+    python tools/dev.py test      # build + cargo test + pytest (bibliothèque et moteur)
     python tools/dev.py info      # python -m gpusync (diagnostic des périphériques)
     python tools/dev.py run SCRIPT [ARGS…]   # lance un script avec le Python de .venv
 
@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VENV = ROOT / ".venv"
 PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-DEV_DEPS = ["maturin>=1.16,<2", "pytest>=8", "numpy>=1.22", "nbclient>=0.10", "ipykernel>=6"]  # Jupyter : test M4
+DEV_DEPS = ["maturin>=1.16,<2", "flit_core>=3.10,<4", "pytest>=8", "numpy>=1.22", "nbclient>=0.10", "ipykernel>=6"]  # Jupyter : test M4
 
 
 def step(title: str) -> None:
@@ -63,6 +63,8 @@ def build() -> None:
         return setup()
     step("compilation de l'extension Rust (pip install -e .)")
     run([str(PY), "-m", "pip", "install", "-q", "--no-build-isolation", "-e", "."])
+    step("moteur graphique gpusync-gfx (pip install -e gfx)")
+    run([str(PY), "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", "gfx"])
 
 
 def test() -> None:
