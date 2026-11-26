@@ -5,24 +5,35 @@
 - sur mémoire unifiée (OpenCL), le tableau NumPy renvoyé *est* la mémoire du résultat (zéro-copie) ;
 - `await y` : attend la fin du calcul sans bloquer la boucle asyncio (attente sur un thread, GIL libéré) ;
 - `np.from_dlpack(y)`, `torch.from_dlpack(y)` : export DLPack (mémoire hôte, sans copie) ;
-- `y.save("r.npy")` : écrit le résultat dans un fichier .npy, par blocs depuis le GPU.
+- `y.save("r.npy")` : écrit le résultat dans un fichier .npy, par blocs depuis le GPU ;
+- `y + 1`, `y == 2`, `-y`, `np.add(y, 1)` : opérateurs et ufuncs de NumPy, calculés sur l'hôte après lecture,
+  rendent un tableau NumPy (pour rester sur le GPU, écrire un kernel).
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 
 import numpy as np
 
 
-class Array:
-    __slots__ = ("_handle", "_host", "_ready", "_lock", "_check", "device")
+class Array(np.lib.mixins.NDArrayOperatorsMixin):
+    __slots__ = ("_handle", "_host", "_shape", "_dtype", "_size", "_ready", "_lock", "_check", "device")
     __array_priority__ = 1000
 
-    def __init__(self, handle, host: np.ndarray, device: str) -> None:
+    def __init__(self, handle, host: np.ndarray | None, device: str, *, shape=None, dtype=None) -> None:
         self._handle = handle  # _core.DeviceArray, ou None si déjà en mémoire hôte
-        self._host = host  # destination finale du résultat (forme et type définitifs)
+        self._host = host  # destination finale (None tant qu'aucune lecture hôte n'est demandée)
+        if host is not None:
+            self._shape = host.shape
+            self._dtype = host.dtype
+            self._size = host.size
+        else:
+            self._shape = tuple(shape)
+            self._dtype = np.dtype(dtype)
+            self._size = math.prod(self._shape)
         self._ready = handle is None
         self._lock = threading.Lock()  # lecture possible depuis un thread (await) et le thread principal
         self._check = None  # mode explicite : vérifie qu'aucune écriture n'a été refusée
@@ -31,23 +42,23 @@ class Array:
     # ── forme et type : connus sans attendre le calcul ──
     @property
     def shape(self) -> tuple:
-        return self._host.shape
+        return self._shape
 
     @property
     def dtype(self) -> np.dtype:
-        return self._host.dtype
+        return self._dtype
 
     @property
     def ndim(self) -> int:
-        return self._host.ndim
+        return len(self._shape)
 
     @property
     def size(self) -> int:
-        return self._host.size
+        return self._size
 
     @property
     def nbytes(self) -> int:
-        return self._host.nbytes
+        return self._size * self._dtype.itemsize
 
     @property
     def mode(self) -> str:
@@ -66,6 +77,8 @@ class Array:
         if not self._ready:
             with self._lock:
                 if not self._ready:
+                    if self._host is None:
+                        self._host = np.empty(self._shape, dtype=self._dtype)
                     self._handle.read_into(self._host.ctypes.data)
                     self._ready = True
         if self._check is not None:
@@ -86,6 +99,19 @@ class Array:
             await asyncio.get_running_loop().run_in_executor(None, self.numpy)
         return self
 
+    # ── opérateurs : ceux de NumPy, sur le résultat lu (§4.6) ──
+    __hash__ = object.__hash__  # `==` compare les valeurs, mais un gs.Array reste utilisable comme clé (identité)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        """`y + 1`, `y == 2`, `np.maximum(y, 0)`… : attend le calcul, lit le résultat et laisse NumPy faire."""
+        def host(v):
+            return v.numpy() if isinstance(v, Array) else v
+
+        inputs = tuple(host(v) for v in inputs)
+        if "out" in kwargs:
+            kwargs["out"] = tuple(host(v) for v in kwargs["out"])
+        return getattr(ufunc, method)(*inputs, **kwargs)
+
     # ── interopérabilité ──
     def __dlpack__(self, *, stream=None, max_version=None, dl_device=None, copy=None):
         """Export DLPack du résultat en mémoire hôte (attend la fin du calcul, sans copie)."""
@@ -97,7 +123,7 @@ class Array:
             return host.__dlpack__(stream=stream)
 
     def __dlpack_device__(self):
-        return self._host.__dlpack_device__()
+        return self._host.__dlpack_device__() if self._host is not None else (1, 0)
 
     def save(self, path) -> None:
         """Écrit le résultat dans un fichier .npy (np.load le relit). Un résultat resté sur le GPU est
@@ -123,7 +149,9 @@ class Array:
         return a.copy() if copy else a
 
     def __len__(self) -> int:
-        return len(self._host)
+        if not self._shape:
+            raise TypeError("len() of unsized object")
+        return self._shape[0]
 
     def __getitem__(self, key):
         return self.numpy()[key]

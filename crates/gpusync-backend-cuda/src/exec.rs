@@ -10,7 +10,7 @@
 //! Le contexte principal du périphérique est rendu courant au début de chaque opération : les appels
 //! peuvent venir de n'importe quel thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CString, c_void};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -122,6 +122,8 @@ pub struct CuDevice {
     pool: Arc<BufPool>,
     kernels: Mutex<HashMap<String, Arc<CuKernel>>>,
     pinned_pool: Mutex<HashMap<usize, Vec<Pinned>>>,
+    /// Tampons épinglés qu'un envoi en file lit encore, du plus ancien au plus récent.
+    pinned_busy: Mutex<VecDeque<(Pinned, CuEvent)>>,
 }
 
 // Les objets du driver CUDA sont utilisables depuis tous les threads (contexte rendu courant).
@@ -281,6 +283,7 @@ impl CuDevice {
             pool,
             kernels: Mutex::new(HashMap::new()),
             pinned_pool: Mutex::new(HashMap::new()),
+            pinned_busy: Mutex::default(),
         });
         open.insert(index, dev.clone());
         Ok(dev)
@@ -463,6 +466,8 @@ impl CuDevice {
 
     /// Tampon épinglé d'au moins `bytes` octets (pris dans le pool si possible).
     pub fn pinned(&self, bytes: usize) -> Result<Pinned, BackendError> {
+        self.bind()?;
+        self.reclaim();
         if let Some(p) = self
             .pinned_pool
             .lock()
@@ -484,6 +489,42 @@ impl CuDevice {
             ptr: p.cast(),
             bytes,
         })
+    }
+
+    /// Remet en réserve les tampons dont l'envoi est terminé (le stream de transfert est ordonné).
+    fn reclaim(&self) {
+        loop {
+            let p = {
+                let mut busy = self.pinned_busy.lock().unwrap_or_else(|e| e.into_inner());
+                match busy.front() {
+                    Some((_, e)) if unsafe { (self.d.cuEventQuery)(e.ev) } == 0 => {
+                        busy.pop_front().map(|(p, _)| p)
+                    }
+                    _ => None,
+                }
+            };
+            match p {
+                Some(p) => self.recycle(p),
+                None => return,
+            }
+        }
+    }
+
+    /// Rend un tampon épinglé que l'envoi `_e` (dernière opération du stream de transfert, ou antérieure)
+    /// lit encore. Au-delà de 64 envois en cours, attend le plus ancien (mémoire bornée).
+    pub fn recycle_after(&self, p: Pinned, _e: &CuEvent) -> Result<(), BackendError> {
+        self.bind()?;
+        let ev = self.record(self.transfer)?;
+        let old = {
+            let mut busy = self.pinned_busy.lock().unwrap_or_else(|e| e.into_inner());
+            busy.push_back((p, ev));
+            (busy.len() > 64).then(|| busy.pop_front()).flatten()
+        };
+        if let Some((p, e)) = old {
+            e.wait()?;
+            self.recycle(p);
+        }
+        Ok(())
     }
 
     /// Rend un tampon épinglé au pool.

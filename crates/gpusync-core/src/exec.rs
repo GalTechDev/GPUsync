@@ -10,7 +10,8 @@
 //! complète des données n'est faite en RAM.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use gpusync_backend_cuda::{CuBuffer, CuEvent};
 use gpusync_backend_opencl::{ClBuffer, ClDevice, ClEvent, ClKernel, wait};
@@ -87,6 +88,8 @@ pub enum Storage {
     WgDirect { bufs: Vec<WgBuffer>, ptr: *mut u8 },
     /// Déjà en mémoire hôte (mode Flux, interpréteur).
     Host { ptr: *mut u8 },
+    /// Mémoire hôte allouée paresseusement côté Rust (repli Flux / CPU si l'appelant n'a pas pré-alloué).
+    HostOwned(Vec<u8>),
 }
 
 unsafe impl Send for Storage {}
@@ -100,8 +103,12 @@ pub struct DeviceArray {
     pub len: usize,
     pub mode: Mode,
     /// Des buffers utilisent encore la mémoire de l'hôte : attendre la fin des calculs avant
-    /// que l'appelant ne la libère.
-    host_backed_io: bool,
+    /// que l'appelant ne la libère (remis à false dès que `read_into` a synchronisé).
+    host_backed_io: AtomicBool,
+    /// Un kernel suivant lit directement la mémoire hôte de ce résultat Direct (zéro-copie) : attendre la
+    /// fin des calculs avant de la libérer. Porté par la source, pas par les résultats du kernel suivant :
+    /// ceux-ci la gardent en vie et peuvent être libérés sans attendre.
+    read_in_place: AtomicBool,
 }
 
 impl DeviceArray {
@@ -115,6 +122,7 @@ impl DeviceArray {
             Storage::ClDirect { ptr, .. }
             | Storage::WgDirect { ptr, .. }
             | Storage::Host { ptr } => Some(*ptr),
+            Storage::HostOwned(v) => Some(v.as_ptr() as *mut u8),
             _ => None,
         }
     }
@@ -156,19 +164,25 @@ impl DeviceArray {
                     unsafe { std::ptr::copy_nonoverlapping(*ptr, dst, n) };
                 }
             }
+            (Storage::HostOwned(v), _) => {
+                if !std::ptr::eq(dst, v.as_ptr()) {
+                    unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), dst, n) };
+                }
+            }
             _ => {
                 return Err(CoreError::Device(
                     "résultat incohérent avec son périphérique".into(),
                 ));
             }
         }
+        self.host_backed_io.store(false, Ordering::Release);
         Ok(())
     }
 }
 
 impl Drop for DeviceArray {
     fn drop(&mut self) {
-        if self.host_backed_io {
+        if *self.host_backed_io.get_mut() || *self.read_in_place.get_mut() {
             let _ = self.device.finish();
         }
     }
@@ -291,15 +305,14 @@ pub unsafe fn launch(
         idx_staged.push(None);
     }
     let mut ins: Vec<In> = Vec::with_capacity(inputs.len());
-    let mut direct_input = false;
-    for ((i, st), (pi, _)) in inputs.iter().zip(&idx_staged).zip(k.array_params()) {
+    for (i, st) in inputs.iter().zip(&idx_staged) {
         ins.push(match (i, st) {
             (_, Some(s)) => In::Host(staged[*s].as_ptr(), staged[*s].len()),
             (Input::Host { ptr, bytes }, None) => In::Host(*ptr, *bytes),
-            // Résultat Direct de ce périphérique, d'un seul bloc : son buffer resert tel quel, la file
-            // ordonnant les calculs (sans attendre ici sa fin ni ré-envelopper sa mémoire).
-            (Input::Device(a), None) if !k.writable().contains(&pi) && reusable_direct(a, dev) => {
-                direct_input = true;
+            // Résultat Direct de ce périphérique, d'un seul bloc : son buffer resert tel quel (en
+            // lecture seule ou copié côté GPU vers un buffer frais pour gs.Out), sans attendre l'hôte.
+            (Input::Device(a), None) if reusable_direct(a, dev) => {
+                a.read_in_place.store(true, Ordering::Release);
                 In::Dev(a)
             }
             (Input::Device(a), None) => match a.host_ptr() {
@@ -322,6 +335,29 @@ pub unsafe fn launch(
             .zip(&arrays)
             .any(|(i, t)| (i.bytes() / t.size()) as u64 > wide_index_limit());
     let imp = c.variant(dev, wide, specialization(k, scalars))?;
+    let fits_dev = fits(dev, &ins, n, &out_elems, &limits);
+    // Si l'appelant a omis l'allocation hôte (pointeurs nuls pour le chemin Résident GPU) et qu'on
+    // bascule finalement sur Flux, Direct ou CPU, allouer les tampons hôte de repli ici.
+    let mut fallback_bufs: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut resolved_outs: Vec<*mut u8> = outs.to_vec();
+    let needs_host_fallback = outs.iter().any(|p| p.is_null())
+        && (n == 0
+            || !fits_dev
+            || matches!(dev, Device::Cpu)
+            || (matches!(dev, Device::Cl(d) if d.info.unified_memory) && all_host(&ins)));
+    if needs_host_fallback {
+        fallback_bufs.reserve(outs.len());
+        for (o, &elem) in outs.iter().zip(&out_elems) {
+            if o.is_null() {
+                let mut v = vec![0u8; n * elem];
+                resolved_outs[fallback_bufs.len()] = v.as_mut_ptr();
+                fallback_bufs.push(Some(v));
+            } else {
+                fallback_bufs.push(None);
+            }
+        }
+    }
+    let outs: &[*mut u8] = &resolved_outs;
     let result: Planned = if n == 0 {
         Ok((
             outs.iter().map(|p| Storage::Host { ptr: *p }).collect(),
@@ -345,7 +381,7 @@ pub unsafe fn launch(
                     scalars,
                     outs,
                     &limits,
-                    fits(dev, &ins, n, &out_elems, &limits),
+                    fits_dev,
                     budget(dev, &limits),
                 )
             },
@@ -359,7 +395,7 @@ pub unsafe fn launch(
                     scalars,
                     outs,
                     &limits,
-                    fits(dev, &ins, n, &out_elems, &limits),
+                    fits_dev,
                     budget(dev, &limits),
                 )
             },
@@ -375,7 +411,7 @@ pub unsafe fn launch(
                         scalars,
                         outs,
                         &limits,
-                        fits(dev, &ins, n, &out_elems, &limits),
+                        fits_dev,
                         budget(dev, &limits),
                     ),
                 }
@@ -391,14 +427,14 @@ pub unsafe fn launch(
                 cl_direct(d, ck, k, &ins, &arrays, scalars, n, outs, &limits)
             },
             (Device::Cl(d), Imp::Cl(ck)) => {
-                if fits(dev, &ins, n, &out_elems, &limits) {
+                if fits_dev {
                     unsafe { q_resident(&**d, ck, k, &ins, scalars, n, &limits) }
                 } else {
                     unsafe { q_flux(&**d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
                 }
             }
             (Device::Cu(d), Imp::Cu(ck)) => {
-                if fits(dev, &ins, n, &out_elems, &limits) {
+                if fits_dev {
                     unsafe { q_resident(&**d, ck, k, &ins, scalars, n, &limits) }
                 } else {
                     unsafe { q_flux(&**d, ck, k, &ins, &arrays, scalars, n, outs, &limits) }
@@ -412,7 +448,7 @@ pub unsafe fn launch(
                     )?
                 } {
                     Ok(direct)
-                } else if fits(dev, &ins, n, &out_elems, &limits) {
+                } else if fits_dev {
                     unsafe { wg_resident(d, wk, &ins, &words, &fwords, n, &out_elems, &limits) }
                 } else {
                     let flux_in: Vec<FluxIn> = ins
@@ -456,9 +492,19 @@ pub unsafe fn launch(
             )),
         }
     };
-    let (storages, mode, mut host_backed_io) = result?;
-    // Le calcul lit la mémoire hôte d'un résultat Direct : attendre sa fin avant de la libérer.
-    host_backed_io |= direct_input;
+    let (mut storages, mode, mut host_backed_io) = result?;
+    // Si des tampons hôte de repli ont été alloués côté Rust, transférer leur propriété dans Storage::HostOwned.
+    if !fallback_bufs.is_empty() {
+        if host_backed_io {
+            dev.finish()?;
+            host_backed_io = false;
+        }
+        for (st, fb) in storages.iter_mut().zip(fallback_bufs) {
+            if let Some(v) = fb {
+                *st = Storage::HostOwned(v);
+            }
+        }
+    }
     // Entrées rapatriées d'un autre périphérique : copies locales libérées au retour.
     if !staged.is_empty() && host_backed_io {
         dev.finish()?;
@@ -480,7 +526,8 @@ pub unsafe fn launch(
             dtype: ty,
             len,
             mode,
-            host_backed_io,
+            host_backed_io: AtomicBool::new(host_backed_io),
+            read_in_place: AtomicBool::new(false),
         })
         .collect())
 }
@@ -598,21 +645,24 @@ fn elem_max(arrays: &[Scalar], out_elems: &[usize]) -> usize {
 }
 
 /// Mémoire du périphérique pour le budget : connue en OpenCL ; pour wgpu, celle du même GPU vu
-/// par OpenCL s'il existe, sinon 4 Gio (prudent).
+/// par OpenCL s'il existe, sinon 4 Gio (prudent). Mise en cache : évite une énumération FFI OpenCL
+/// à chaque lancement de kernel wgpu.
 fn device_memory(dev: &Device) -> u64 {
     let info = dev.info();
     if let Some(m) = info.memory_bytes {
         return m;
     }
-    gpusync_backend_opencl::OpenClBackend
-        .devices()
-        .ok()
-        .and_then(|ds| {
-            ds.into_iter()
-                .find(|d| d.name == info.name)
-                .and_then(|d| d.memory_bytes)
-        })
-        .unwrap_or(4 << 30)
+    static CL_MEM_BY_NAME: OnceLock<HashMap<String, u64>> = OnceLock::new();
+    let map = CL_MEM_BY_NAME.get_or_init(|| {
+        gpusync_backend_opencl::OpenClBackend
+            .devices()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d.memory_bytes.map(|m| (d.name, m)))
+            .collect()
+    });
+    map.get(&info.name).copied().unwrap_or(4 << 30)
 }
 
 fn budget(dev: &Device, limits: &TransferLimits) -> u64 {
@@ -847,6 +897,17 @@ unsafe fn cl_direct(
     ))
 }
 
+/// En dessous de ce total (entrées et sorties), Metal passe par des copies plutôt que par le mode Direct :
+/// une copie si petite ne coûte rien, alors que libérer une mémoire lue sur place oblige à attendre le GPU.
+/// Sans ce seuil, un petit tableau NumPy placé par hasard en début de page bloquait l'hôte à chaque image.
+const SMALL_DIRECT: usize = 64 << 10;
+
+/// Trop petit pour le mode Direct (jamais le cas quand les tests imposent la taille des blocs).
+fn too_small_for_direct(ins: &[In], out_bytes: usize, limits: &TransferLimits) -> bool {
+    let total = ins.iter().map(In::bytes).sum::<usize>() + out_bytes;
+    limits.direct_chunk_bytes.is_none() && total < SMALL_DIRECT
+}
+
 /// Mode Direct sur Metal : chaque bloc est un buffer `NoCopy` sur la mémoire de l'hôte (aucune copie).
 /// `None` si impossible (pas Metal, adresse non alignée sur 16 Kio, entrée restée sur un
 /// périphérique, kernel avec index trop gros pour un seul buffer).
@@ -864,7 +925,14 @@ unsafe fn wg_direct(
     limits: &TransferLimits,
 ) -> R<Option<(Vec<Storage>, Mode, bool)>> {
     const PAGE: usize = 16384;
-    if d.info.backend != "metal" || outs.iter().any(|p| !(*p as usize).is_multiple_of(PAGE)) {
+    if d.info.backend != "metal"
+        || outs
+            .iter()
+            .any(|p| p.is_null() || !(*p as usize).is_multiple_of(PAGE))
+    {
+        return Ok(None);
+    }
+    if too_small_for_direct(ins, out_elems.iter().map(|e| e * n).sum(), limits) {
         return Ok(None);
     }
     for i in ins {
@@ -970,6 +1038,9 @@ unsafe fn wg_resident(
     ))
 }
 
+/// Envois d'au plus cette taille : sans attente de l'hôte.
+const SMALL_UPLOAD: usize = 1 << 20;
+
 /// Anneau de 3 tampons épinglés pour envoyer `bytes` octets de `src` vers `dst` (file de transfert).
 /// Renvoie l'événement de la dernière écriture.
 unsafe fn q_upload<G: Gpu>(
@@ -983,6 +1054,18 @@ unsafe fn q_upload<G: Gpu>(
         return Ok(None);
     }
     let chunk = chunk.min(bytes).max(4);
+    // Petit envoi : la file de transfert le fait sans que l'hôte attende ; le tampon revient en réserve
+    // avec son événement (taille arrondie, pour resservir).
+    if bytes <= SMALL_UPLOAD && chunk >= bytes {
+        let p = d
+            .pinned(bytes.next_power_of_two().max(4096))
+            .map_err(dev_err)?;
+        unsafe { std::ptr::copy_nonoverlapping(src, G::pin_ptr(&p), bytes) };
+        let e = unsafe { d.write_at(dst, 0, G::pin_ptr(&p), bytes, &[]) }.map_err(dev_err)?;
+        d.flush().map_err(dev_err)?;
+        d.recycle_after(p, &e).map_err(dev_err)?;
+        return Ok(Some(e));
+    }
     let mut ring: Vec<(G::Pin, Option<G::Ev>)> = Vec::new();
     for _ in 0..3.min(bytes.div_ceil(chunk)) {
         ring.push((d.pinned(chunk).map_err(dev_err)?, None));
@@ -1674,6 +1757,26 @@ unsafe fn rows_q<G: Gpu>(
                 }
                 Some(b)
             }
+            In::Dev(a) if rows.writable[i] => {
+                let bytes = a.bytes();
+                resident_bytes += bytes as u64;
+                if bytes > max_buf || (!fits && resident_bytes > budget) {
+                    return Err(rows.resident_too_big(
+                        k,
+                        i,
+                        bytes,
+                        budget.min(max_buf as u64),
+                        &d.info().name,
+                    ));
+                }
+                let (src, done) = G::resident(&a.storage).ok_or_else(other_kind)?;
+                let b = d.alloc(bytes).map_err(dev_err)?;
+                if bytes > 0 {
+                    let e = d.copy_at(src, 0, &b, 0, bytes, &[done]).map_err(dev_err)?;
+                    waits_owned.push(e);
+                }
+                Some(b)
+            }
             _ => None,
         });
     }
@@ -1766,7 +1869,8 @@ unsafe fn rows_q<G: Gpu>(
             pending: None,
         });
     }
-    let drain = |s: &mut Slot<G>| -> R<()> {
+    let mut last_ev: Option<G::Ev> = None;
+    let mut drain = |s: &mut Slot<G>| -> R<()> {
         if let Some((r0, len, done)) = s.pending.take() {
             // Le calcul du bloc doit être fini avant de réutiliser l'emplacement, même sans
             // sortie à rapatrier (mode explicite : seuls les gs.Out, entiers, sont écrits).
@@ -1784,6 +1888,7 @@ unsafe fn rows_q<G: Gpu>(
                     )?
                 };
             }
+            last_ev = Some(done);
         }
         Ok(())
     };
@@ -1854,23 +1959,25 @@ unsafe fn rows_q<G: Gpu>(
     for s in &mut slots {
         drain(s)?;
     }
-    // gs.Out : gardés entiers pendant tous les blocs, rapatriés à la fin.
+    // gs.Out : gardés entiers pendant tous les blocs, rapatriés (si hôte) ou gardés résidents (si GPU).
     d.finish().map_err(dev_err)?;
-    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
-        let buf = owned[i].as_ref().unwrap();
-        unsafe {
-            q_download(
-                d,
-                buf,
-                None,
-                host_ptr(&ins[i]),
-                ins[i].bytes(),
-                limits.chunk_bytes,
-            )?
-        };
-    }
     let mut storages: Vec<Storage> = outs.iter().map(|p| Storage::Host { ptr: *p }).collect();
-    storages.extend(writable_host(k, ins));
+    let done_arc = last_ev.map(Arc::new);
+    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+        match &ins[i] {
+            In::Host(p, bytes) => {
+                let buf = owned[i].as_ref().unwrap();
+                unsafe { q_download(d, buf, None, *p as *mut u8, *bytes, limits.chunk_bytes)? };
+                storages.push(Storage::Host { ptr: *p as *mut u8 });
+            }
+            In::Dev(_) => {
+                storages.push(G::storage(
+                    owned[i].take().unwrap(),
+                    done_arc.as_ref().unwrap().clone(),
+                ));
+            }
+        }
+    }
     Ok((storages, Mode::Flux, false))
 }
 
@@ -1892,7 +1999,14 @@ unsafe fn rows_wg_direct(
     limits: &TransferLimits,
 ) -> R<Option<(Vec<Storage>, Mode, bool)>> {
     const PAGE: usize = 16384;
-    if d.info.backend != "metal" || outs.iter().any(|p| !(*p as usize).is_multiple_of(PAGE)) {
+    if d.info.backend != "metal"
+        || outs
+            .iter()
+            .any(|p| p.is_null() || !(*p as usize).is_multiple_of(PAGE))
+    {
+        return Ok(None);
+    }
+    if too_small_for_direct(ins, rows.out_row.iter().map(|b| b * rows.total).sum(), limits) {
         return Ok(None);
     }
     let max_buf = max_buffer(d.info.max_buffer_bytes);
@@ -2046,6 +2160,23 @@ unsafe fn rows_wg(
                 };
                 Some(b)
             }
+            In::Dev(a) if rows.writable[i] => {
+                let bytes = a.bytes();
+                resident_bytes += bytes as u64;
+                if bytes > max_buf || (!fits && resident_bytes > budget) {
+                    return Err(rows.resident_too_big(
+                        k,
+                        i,
+                        bytes,
+                        budget.min(max_buf as u64),
+                        &d.info.name,
+                    ));
+                }
+                let src = wg_buf(&a.storage).ok_or_else(other_kind)?;
+                let b = d.alloc(bytes).map_err(dev_err)?;
+                d.copy(src, 0, &b, 0, bytes).map_err(dev_err)?;
+                Some(b)
+            }
             _ => None,
         });
     }
@@ -2160,20 +2291,21 @@ unsafe fn rows_wg(
             };
         }
     }
-    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
-        let buf = owned[i].as_ref().unwrap();
-        unsafe {
-            d.download(
-                buf,
-                0,
-                host_ptr(&ins[i]),
-                ins[i].bytes(),
-                limits.chunk_bytes,
-            )
-            .map_err(dev_err)?
-        };
-    }
     let mut storages: Vec<Storage> = outs.iter().map(|p| Storage::Host { ptr: *p }).collect();
-    storages.extend(writable_host(k, ins));
+    for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
+        match &ins[i] {
+            In::Host(p, bytes) => {
+                let buf = owned[i].as_ref().unwrap();
+                unsafe {
+                    d.download(buf, 0, *p as *mut u8, *bytes, limits.chunk_bytes)
+                        .map_err(dev_err)?
+                };
+                storages.push(Storage::Host { ptr: *p as *mut u8 });
+            }
+            In::Dev(_) => {
+                storages.push(Storage::Wg(owned[i].take().unwrap()));
+            }
+        }
+    }
     Ok((storages, Mode::Flux, false))
 }

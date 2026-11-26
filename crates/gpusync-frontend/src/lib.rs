@@ -389,10 +389,10 @@ pub fn lower(spec: &J) -> R<Kernel> {
     let cells: u32 = match &spec["cells"] {
         J::Null => 1,
         c => {
-            let n = c.as_u64().filter(|n| (1..=64).contains(n)).ok_or_else(|| {
+            let n = c.as_u64().filter(|n| (1..=1024).contains(n)).ok_or_else(|| {
                 err(
                     ErrorKind::Type,
-                    format!("cells={c} : cases par thread entre 1 et 64 (ex. cells=8)"),
+                    format!("cells={c} : cases par thread entre 1 et 1024 (ex. cells=8)"),
                     None,
                 )
             })?;

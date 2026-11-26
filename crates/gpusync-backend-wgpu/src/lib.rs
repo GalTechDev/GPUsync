@@ -9,8 +9,10 @@
 //! planter le pilote) : `f64_math` vaut toujours `false` ici.
 
 mod exec;
+mod window;
 
 pub use exec::{FluxIn, WgBuffer, WgDevice, WgKernel};
+pub use window::{WgWindow, WindowEvent};
 
 use std::sync::OnceLock;
 
@@ -20,6 +22,7 @@ pub struct WgpuBackend;
 
 /// Instance et adaptateurs, créés une fois : l'index de `DeviceInfo` désigne un adaptateur stable.
 pub(crate) struct State {
+    pub instance: wgpu::Instance,
     pub adapters: Vec<wgpu::Adapter>,
     /// (index dans `adapters`, description), dans l'ordre exposé.
     pub devices: Vec<(usize, DeviceInfo)>,
@@ -45,6 +48,7 @@ pub(crate) fn state() -> Result<&'static State, BackendError> {
                 .filter_map(|(i, a)| candidate(i, a))
                 .collect();
             Ok(State {
+                instance,
                 devices: select(candidates),
                 adapters,
             })

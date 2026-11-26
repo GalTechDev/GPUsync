@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import functools
+import math
 import warnings
 
 import numpy as np
@@ -26,7 +27,7 @@ import numpy as np
 from . import _core
 from ._array import Array, Results
 from ._ast import KernelDeclarationError, kernel_json
-from ._device import CompatibilityWarning, _by_id, capable, fallback, ranked, resolve
+from ._device import CompatibilityWarning, _by_id, _known, capable, fallback, ranked, resolve
 
 _ALIGN = 16384  # alignement des sorties : une page sur Apple Silicon (16 Kio), 4 sur ailleurs
 
@@ -97,6 +98,8 @@ class Kernel:
             raise type(e)(f"kernel '{func.__name__}' ({file}), {e}") from None
         self._req = self._ir.requirements
         self._indexed = self._ir.grid == "indexed"
+        self._capable_on: tuple = (None, set())  # (périphériques connus, identifiants capables)
+        self._bound: dict = {}  # formes des entrées → dimensions déjà vérifiées
         self._dims = self._ir.dims  # dimensions cachées, dans l'ordre des scalaires ajoutés
 
     def __repr__(self) -> str:
@@ -116,7 +119,13 @@ class Kernel:
     def _choose(self, device) -> tuple[str, str | None]:
         """(périphérique d'exécution, message d'avertissement éventuel) selon `compat` (§4.8)."""
         planned = resolve(device)
+        known = _known()
+        if self._capable_on[0] is not known:
+            self._capable_on = (known, set())
+        if planned in self._capable_on[1]:
+            return planned, None
         if capable(_by_id(planned), self._req):
+            self._capable_on[1].add(planned)
             return planned, None
         plan = _by_id(planned)
         if self._req.get("int64") and not getattr(plan, "int64", True):
@@ -180,6 +189,7 @@ class Kernel:
 
         arrays, keepalive, shapes = [], [], []
         scalars = []
+        has_dev_input = False
         it = iter(args)
         for name, kind, dtype, _ in self._params:
             if kind == "out":
@@ -203,6 +213,8 @@ class Kernel:
                     keepalive.append(host)
                 else:
                     arrays.append(value._handle)
+                    if value.mode in ("resident", "direct") and value.device == dev_id:
+                        has_dev_input = True
                     if value.mode != "resident":
                         keepalive.append(value)  # sa mémoire hôte peut être lue (zéro-copie)
             else:
@@ -234,6 +246,14 @@ class Kernel:
                     raise _core.ShapeMismatch(
                         f"{self.__name__}() : les tableaux doivent avoir la même forme ('{first}' {shape}, '{name}' {s})"
                     )
+
+        total_elems = math.prod(shape)
+        # Chemin résident chaîné sur GPU : éviter d'allouer des mégaoctets de RAM hôte inutilisés
+        # pour les sorties intermédiaires (elles seront allouées paresseusement si .numpy() est appelé).
+        if out is None and dev_id != "cpu:0" and has_dev_input and total_elems > 0:
+            handles = self._ir.launch(dev_id, arrays, scalars, total_elems, [0] * len(self._outs), keepalive)
+            results = Results(Array(h, None, dev_id, shape=shape, dtype=o.dtype.np) for h, o in zip(handles, self._outs))
+            return results if self._tuple else results[0]
 
         outs = self._outputs(out, shape)
         if outs[0].size == 0:
@@ -287,27 +307,46 @@ class Kernel:
             given = list(out) if isinstance(out, (tuple, list)) else [out]
             if len(given) != len(outs_decl):
                 raise TypeError(f"out : {len(outs_decl)} tableau(x) attendu(s) (un par gs.Out), reçu {len(given)}")
+            results = []
             for o, (n, d, _), shp in zip(given, outs_decl, shapes_out):
-                if not isinstance(o, np.ndarray) or o.dtype != d.np or o.shape != shp:
-                    raise _core.ShapeMismatch(
-                        f"out : pour '{n}', tableau NumPy de forme {shp} et de type {d.np} attendu"
-                    )
-                if not (o.flags.c_contiguous and o.flags.writeable):
-                    raise _core.TypeMismatch("out : le tableau doit être contigu et modifiable")
-            results = given
+                if isinstance(o, Array):
+                    if o.dtype != d.np or o.shape != shp:
+                        raise _core.ShapeMismatch(
+                            f"out : pour '{n}', tableau de forme {shp} et de type {d.np} attendu"
+                        )
+                    if not o._ready and o.mode in ("resident", "direct") and o.device == dev_id:
+                        results.append(o)
+                        if o.mode != "resident":
+                            keepalive.append(o)
+                    else:
+                        # Copie hôte pour ne pas muter silencieusement un gs.Array déjà matérialisé
+                        results.append(np.ascontiguousarray(o.numpy()).copy())
+                else:
+                    if not isinstance(o, np.ndarray) or o.dtype != d.np or o.shape != shp:
+                        raise _core.ShapeMismatch(
+                            f"out : pour '{n}', tableau NumPy de forme {shp} et de type {d.np} attendu"
+                        )
+                    if not (o.flags.c_contiguous and o.flags.writeable):
+                        raise _core.TypeMismatch("out : le tableau doit être contigu et modifiable")
+                    results.append(o)
         err = np.zeros(2, dtype=np.uint32)  # gs_err : écriture refusée (sortie, indice)
         slots = iter(results)
         for k, a in enumerate(arrays):
             if a is None:
                 r = next(slots)
-                arrays[k] = (r.ctypes.data, r.nbytes)
+                if isinstance(r, Array):
+                    arrays[k] = r._handle
+                else:
+                    arrays[k] = (r.ctypes.data, r.nbytes)
         arrays.append((err.ctypes.data, err.nbytes))
         scalars.extend(size(d) for d in self._dims)
-        n = int(np.prod(grid, dtype=np.int64))
+        n = math.prod(grid)
         if n == 0:
-            arrs = Results(Array(None, r, dev_id) for r in results)
+            arrs = Results(r if isinstance(r, Array) else Array(None, r, dev_id) for r in results)
             return arrs if self._tuple else arrs[0]
-        keepalive.extend(results)
+        for r in results:
+            if not isinstance(r, Array):
+                keepalive.append(r)
         keepalive.append(err)
         handles = self._ir.launch(dev_id, arrays, scalars, n, [], keepalive)
         err_arr = Array(handles[-1], err, dev_id)
@@ -326,8 +365,8 @@ class Kernel:
                 )
 
         arrs = []
-        for h, r in zip(handles[:-1], results):
-            a = Array(h, r, dev_id)
+        for h, r, (_, d, _), shp in zip(handles[:-1], results, outs_decl, shapes_out):
+            a = Array(h, None, dev_id, shape=shp, dtype=d.np) if isinstance(r, Array) else Array(h, r, dev_id)
             a._check = check
             arrs.append(a)
         arrs = Results(arrs)
@@ -338,6 +377,10 @@ class Kernel:
 
         Renvoie `size(nom)` : la taille d'une dimension (nom, ou taille entière écrite en chiffres).
         """
+        key_shapes = tuple(shapes)
+        bound = self._bound.get(key_shapes)
+        if bound is not None:
+            return bound
         sizes: dict[str, tuple[int, str]] = {}
         params = [p for p in self._params if p[1] == "array"]
         for (name, shape), (_, _, _, dims) in zip(shapes, params):
@@ -370,6 +413,9 @@ class Kernel:
                 return int(d)
             raise KeyError(f"'{d}'")
 
+        if len(self._bound) >= 64:
+            self._bound.clear()
+        self._bound[key_shapes] = size
         return size
 
     def _outputs(self, out, shape) -> list:

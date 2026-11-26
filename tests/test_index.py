@@ -234,6 +234,20 @@ def test_reductions_on_host():
     np.testing.assert_allclose(d.std(), ref.std())
 
 
+def test_operators_compare_values_like_numpy():
+    x = RNG.random((8, 3), dtype=np.float32)
+    d, ref = pairwise(x), pairwise(x).numpy()
+    # Avant : `d == 0` rendait False (comparaison d'objets) et `d + 1` levait TypeError
+    eq = d == 0
+    assert isinstance(eq, np.ndarray) and eq.dtype == bool and eq.sum() == 8
+    assert np.array_equal(d + 1, ref + 1) and np.array_equal(1 - d, 1 - ref) and np.array_equal(-d, -ref)
+    assert np.array_equal(d * d, ref * ref) and np.array_equal(d >= 0.5, ref >= 0.5)
+    assert np.array_equal(np.maximum(d, 0.5), np.maximum(ref, 0.5)) and np.array_equal(ref + d, 2 * ref)
+    # Lu sans être consommé : passer d à un autre kernel reste possible, et il garde son identité (clé de dict)
+    assert np.allclose(matvec(d, np.ones(8, np.float32)), ref.sum(axis=1))
+    assert {d: 1}[d] == 1 and d in [d]
+
+
 def test_shape_errors():
     with pytest.raises(gs.ShapeMismatch, match="dimension 'k' incohérente : 'a' → 4, 'v' → 5"):
         matvec(np.zeros((3, 4), np.float32), np.zeros(5, np.float32))

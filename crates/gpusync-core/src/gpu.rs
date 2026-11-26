@@ -34,6 +34,8 @@ pub(crate) trait Gpu {
     fn pinned(&self, bytes: usize) -> Res<Self::Pin>;
     fn pin_ptr(p: &Self::Pin) -> *mut u8;
     fn recycle(&self, p: Self::Pin);
+    /// Rend un tampon épinglé que l'envoi `e` lit encore : il resservira une fois `e` terminé.
+    fn recycle_after(&self, p: Self::Pin, e: &Self::Ev) -> Res<()>;
     /// # Safety
     /// `src` doit rester valide jusqu'à la fin de l'événement renvoyé.
     unsafe fn write_at(
@@ -99,6 +101,9 @@ impl Gpu for ClDevice {
     }
     fn recycle(&self, p: Self::Pin) {
         ClDevice::recycle(self, p)
+    }
+    fn recycle_after(&self, p: Self::Pin, e: &ClEvent) -> Res<()> {
+        ClDevice::recycle_after(self, p, e)
     }
     unsafe fn write_at(
         &self,
@@ -198,6 +203,9 @@ impl Gpu for CuDevice {
     }
     fn recycle(&self, p: Self::Pin) {
         CuDevice::recycle(self, p)
+    }
+    fn recycle_after(&self, p: Self::Pin, e: &CuEvent) -> Res<()> {
+        CuDevice::recycle_after(self, p, e)
     }
     unsafe fn write_at(
         &self,

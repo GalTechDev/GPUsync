@@ -8,7 +8,7 @@
 //! - **Mémoire épinglée** : `pinned` fournit des tampons `CL_MEM_ALLOC_HOST_PTR` mappés une fois pour
 //!   toutes ; un transfert depuis (ou vers) leur pointeur se fait par DMA à pleine vitesse.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -37,6 +37,8 @@ pub struct ClDevice {
     transfer: CommandQueue,
     kernels: Mutex<HashMap<String, Arc<ClKernel>>>,
     pinned_pool: Mutex<HashMap<usize, Vec<Pinned>>>,
+    /// Tampons épinglés qu'un envoi en file lit encore, du plus ancien au plus récent.
+    pinned_busy: Mutex<VecDeque<(Pinned, Event)>>,
     pool: Arc<BufPool>,
 }
 
@@ -114,7 +116,6 @@ impl BufPool {
             return; // libéré par le driver une fois les commandes en file terminées
         }
         if let (Some(c), Some(t)) = (marker(self.compute, &[]), marker(self.transfer, &[])) {
-            self.flush(); // un marqueur jamais envoyé bloquerait la barrière de l'autre file
             g.0.push((cap, buf, [c, t]));
             g.1 += cap;
         }
@@ -137,17 +138,20 @@ impl BufPool {
         let (c, buf, [ec, et]) = g.0.swap_remove(pos);
         g.1 -= c;
         if ready.is_none() {
-            let ok = unsafe {
+            // Envelopper les cl_event retournés dans Event::new pour qu'ils soient libérés (clReleaseEvent).
+            let b1 = unsafe {
                 opencl3::command_queue::enqueue_barrier_with_wait_list(self.compute, 1, &et.get())
-                    .is_ok()
-                    && opencl3::command_queue::enqueue_barrier_with_wait_list(
-                        self.transfer,
-                        1,
-                        &ec.get(),
-                    )
-                    .is_ok()
-            };
+            }
+            .ok()
+            .map(Event::new);
+            let b2 = unsafe {
+                opencl3::command_queue::enqueue_barrier_with_wait_list(self.transfer, 1, &ec.get())
+            }
+            .ok()
+            .map(Event::new);
+            let ok = b1.is_some() && b2.is_some();
             self.flush();
+            drop((b1, b2));
             if !ok {
                 let _ = (ec.wait(), et.wait());
             }
@@ -239,6 +243,7 @@ impl ClDevice {
             transfer,
             kernels: Mutex::new(HashMap::new()),
             pinned_pool: Mutex::new(HashMap::new()),
+            pinned_busy: Mutex::default(),
         });
         open.insert(index, d.clone());
         Ok(d)
@@ -326,6 +331,7 @@ impl ClDevice {
 
     /// Tampon épinglé d'au moins `bytes` octets (pris dans le pool si possible).
     pub fn pinned(&self, bytes: usize) -> Result<Pinned, BackendError> {
+        self.reclaim();
         if let Some(p) = self
             .pinned_pool
             .lock()
@@ -365,14 +371,50 @@ impl ClDevice {
         })
     }
 
-    /// Rend un tampon épinglé au pool (il reste mappé, prêt à resservir).
+    /// Remet en réserve les tampons dont l'envoi est terminé (la file de transfert est ordonnée).
+    fn reclaim(&self) {
+        loop {
+            let p = {
+                let mut busy = self.pinned_busy.lock().unwrap_or_else(|e| e.into_inner());
+                match busy.front() {
+                    // Terminé (0) ou en erreur (négatif).
+                    Some((_, e)) if e.command_execution_status().is_ok_and(|s| s.0 <= 0) => {
+                        busy.pop_front().map(|(p, _)| p)
+                    }
+                    _ => None,
+                }
+            };
+            match p {
+                Some(p) => self.recycle(p),
+                None => return,
+            }
+        }
+    }
+
+    /// Rend un tampon épinglé que l'envoi `e` lit encore. Au-delà de 64 envois en cours, attend le plus
+    /// ancien (mémoire bornée).
+    pub fn recycle_after(&self, p: Pinned, e: &Event) -> Result<(), BackendError> {
+        unsafe { opencl3::event::retain_event(e.get()) }
+            .map_err(|e| err("événement d'envoi", opencl3::error_codes::ClError(e)))?;
+        let old = {
+            let mut busy = self.pinned_busy.lock().unwrap_or_else(|e| e.into_inner());
+            busy.push_back((p, Event::new(e.get())));
+            (busy.len() > 64).then(|| busy.pop_front()).flatten()
+        };
+        if let Some((p, e)) = old {
+            wait(&e)?;
+            self.recycle(p);
+        }
+        Ok(())
+    }
+
+    /// Rend un tampon épinglé au pool (il reste mappé, prêt à resservir ; borné par taille).
     pub fn recycle(&self, p: Pinned) {
-        self.pinned_pool
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(p.bytes)
-            .or_default()
-            .push(p);
+        let mut pool = self.pinned_pool.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = pool.entry(p.bytes).or_default();
+        if slot.len() < 6 {
+            slot.push(p);
+        }
     }
 
     /// Copie hôte → périphérique (file de transfert, non bloquante), après `wait`.

@@ -170,6 +170,21 @@ impl Device {
             Device::Cpu => Ok(()),
         }
     }
+
+    /// Ouvre un lot de commandes (wgpu : regroupe plusieurs kernels en une seule soumission GPU).
+    pub fn begin_batch(&self) {
+        if let Device::Wg(d) = self {
+            d.begin_batch();
+        }
+    }
+
+    /// Ferme le lot de commandes courant et soumet le travail accumulé.
+    pub fn end_batch(&self) -> R<()> {
+        if let Device::Wg(d) = self {
+            d.end_batch().map_err(dev_err)?;
+        }
+        Ok(())
+    }
 }
 
 /// Kernel prêt à lancer sur un périphérique donné.
@@ -366,7 +381,9 @@ pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
 
 mod exec;
 mod gpu;
+mod window;
 
 pub use exec::{
     DeviceArray, Input, Mode, Storage, TransferLimits, launch, set_transfer_limits, transfer_limits,
 };
+pub use window::{Window, WindowEvent};

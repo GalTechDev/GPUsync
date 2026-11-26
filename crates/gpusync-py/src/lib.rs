@@ -1,6 +1,7 @@
 //! Liaison Python (PyO3) : module `gpusync._core`. Seul crate du projet qui dépend de Python.
 
 mod kernel;
+mod window;
 
 use std::sync::Mutex;
 
@@ -192,5 +193,6 @@ fn gpusync_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(devices, m)?)?;
     m.add_function(wrap_pyfunction!(backends, m)?)?;
     kernel::register(m)?;
+    window::register(m)?;
     Ok(())
 }

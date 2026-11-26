@@ -53,7 +53,7 @@ create_exception!(
     "Erreur du driver ou du périphérique."
 );
 
-fn to_py(e: CoreError) -> PyErr {
+pub(crate) fn to_py(e: CoreError) -> PyErr {
     match e {
         CoreError::Syntax(m) => KernelSyntaxError::new_err(m),
         CoreError::Type(m) => TypeMismatch::new_err(m),
@@ -296,7 +296,7 @@ impl KernelIR {
 pub struct DeviceArrayPy {
     // Ordre important : `array` est détruit en premier (il attend la fin des calculs), puis
     // seulement les tableaux NumPy qu'il pouvait encore lire.
-    array: DeviceArray,
+    pub(crate) array: DeviceArray,
     keepalive: Mutex<Vec<Py<PyAny>>>,
 }
 
@@ -386,6 +386,31 @@ fn device_zero_copy(py: Python<'_>, device_id: &str) -> PyResult<bool> {
         .map_err(to_py)
 }
 
+/// Ouvre un lot de commandes sur `device_id` (wgpu : un seul CommandEncoder pour plusieurs kernels).
+#[pyfunction]
+fn begin_batch(py: Python<'_>, device_id: &str) -> PyResult<()> {
+    py.detach(|| {
+        let d = Device::open(device_id)?;
+        d.begin_batch();
+        Ok(())
+    })
+    .map_err(to_py)
+}
+
+/// Ferme le lot de commandes courant et soumet le travail au GPU.
+#[pyfunction]
+fn end_batch(py: Python<'_>, device_id: &str) -> PyResult<()> {
+    py.detach(|| Device::open(device_id)?.end_batch())
+        .map_err(to_py)
+}
+
+/// Attend la fin de tous les calculs soumis sur `device_id` (sans rapatrier de données en RAM).
+#[pyfunction]
+fn sync(py: Python<'_>, device_id: &str) -> PyResult<()> {
+    py.detach(|| Device::open(device_id)?.finish())
+        .map_err(to_py)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("GpusyncError", py.get_type::<GpusyncError>())?;
@@ -398,6 +423,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DeviceArrayPy>()?;
     m.add_function(wrap_pyfunction!(compile_kernel, m)?)?;
     m.add_function(wrap_pyfunction!(device_zero_copy, m)?)?;
+    m.add_function(wrap_pyfunction!(begin_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(end_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(sync, m)?)?;
     m.add_function(wrap_pyfunction!(get_transfer_limits, m)?)?;
     m.add_function(wrap_pyfunction!(set_transfer_limits_py, m)?)?;
     Ok(())

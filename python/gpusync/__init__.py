@@ -35,6 +35,10 @@ def _nvrtc_dirs() -> None:
 
 _nvrtc_dirs()
 
+# Le moteur graphique `gpusync.gfx` est un paquet à part (gpusync-gfx), qui ajoute `gpusync/gfx/` : installé à
+# côté de la bibliothèque ou ailleurs sur sys.path (mode modifiable), il est trouvé comme un sous-paquet.
+__path__ = __import__("pkgutil").extend_path(__path__, __name__)
+
 from . import _core  # noqa: E402
 from ._array import Array
 from ._core import (
@@ -47,17 +51,26 @@ from ._core import (
     TypeMismatch,
     UnsupportedFeature,
     __version__,
-    backends,
-    devices,
 )
-from ._device import CompatibilityWarning, default_device, device, set_default_device, set_memory_budget
+from ._device import (
+    CompatibilityWarning,
+    backends,
+    batch,
+    default_device,
+    device,
+    devices,
+    set_default_device,
+    set_memory_budget,
+    sync,
+)
 from ._kernel import Kernel, OutOfBounds, OutOfMemory, kernel
 from ._math import *  # noqa: F403  (sqrt, exp, … utilisables dans les kernels)
 from ._math import __all__ as _math_all
 from ._types import Out, f32, f64, i32, i64, u32, u64
+from ._window import Window
 
 __all__ = [
-    "kernel", "Kernel", "Array",
+    "kernel", "Kernel", "Array", "Window", "batch", "sync",
     "devices", "backends", "Device", "BackendStatus",
     "device", "default_device", "set_default_device", "set_memory_budget",
     "f32", "f64", "i32", "u32", "i64", "u64", "Out",
@@ -66,3 +79,22 @@ __all__ = [
     "__version__",
     *_math_all,
 ]
+
+
+def __getattr__(name: str):
+    if name == "gfx":
+        # `gs.gfx` : chargé au premier accès, s'il est installé
+        import importlib
+
+        try:
+            mod = importlib.import_module(".gfx", __name__)
+        except ModuleNotFoundError as e:
+            if e.name != f"{__name__}.gfx":
+                raise
+            raise ImportError(
+                "gs.gfx : le moteur graphique est un paquet à part. Installez-le : pip install gpusync-gfx "
+                "(depuis le dépôt : pip install -e gfx)"
+            ) from None
+        globals()["gfx"] = mod
+        return mod
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

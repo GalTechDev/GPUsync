@@ -39,9 +39,45 @@ def _rank(d) -> tuple:
     return (1, _INTEGRATED.get(d.backend, 9), d.index)
 
 
+class _Known:
+    """Périphériques découverts, triés, et réponses déjà données : relus à chaque lancement de kernel."""
+
+    def __init__(self) -> None:
+        self.ranked = tuple(sorted(_core.devices(), key=_rank))
+        self.by_id = {d.id: d for d in self.ranked}
+        self.resolved: dict[str, str] = {}
+
+
+_known_devices: _Known | None = None
+
+
+def _known() -> _Known:
+    global _known_devices
+    k = _known_devices
+    if k is None:
+        k = _known_devices = _Known()
+    return k
+
+
+def devices(refresh: bool = False) -> list:
+    """Périphériques disponibles (découverte faite une fois ; `refresh=True` la refait)."""
+    global _known_devices
+    if refresh:
+        _known_devices = None
+    return _core.devices(refresh=refresh)
+
+
+def backends(refresh: bool = False) -> list:
+    """État de chaque backend (utile pour comprendre pourquoi un GPU n'apparaît pas)."""
+    global _known_devices
+    if refresh:
+        _known_devices = None
+    return _core.backends(refresh=refresh)
+
+
 def ranked() -> list:
     """Périphériques dans l'ordre de préférence."""
-    return sorted(_core.devices(), key=_rank)
+    return list(_known().ranked)
 
 
 def capable(dev, req: dict) -> bool:
@@ -54,7 +90,7 @@ def capable(dev, req: dict) -> bool:
 
 
 def _by_id(dev_id: str):
-    return next(d for d in _core.devices() if d.id == dev_id)
+    return _known().by_id[dev_id]
 
 
 def resolve(device=None) -> str:
@@ -63,7 +99,8 @@ def resolve(device=None) -> str:
         stack = getattr(_local, "stack", None)
         # Ordre : `with gs.device(...)`, `gs.set_default_device(...)`, variable GPUSYNC_DEVICE.
         device = stack[-1] if stack else (_default or os.environ.get("GPUSYNC_DEVICE") or None)
-    devs = ranked()
+    known = _known()
+    devs = known.ranked
     if device is None:
         if not devs:
             raise _core.DeviceError("aucun périphérique disponible")
@@ -72,6 +109,13 @@ def resolve(device=None) -> str:
         return device.id
     if not isinstance(device, str):
         raise TypeError(f"device : Device ou chaîne attendu, reçu {type(device).__name__}")
+    found = known.resolved.get(device)
+    if found is None:
+        found = known.resolved[device] = _find(device, devs)
+    return found
+
+
+def _find(device: str, devs) -> str:
     want = device.strip().lower()
     ids = [d.id for d in devs]
     if ":" in want:
@@ -118,6 +162,27 @@ def device(device):
         yield _by_id(dev_id)
     finally:
         stack.pop()
+
+
+@contextlib.contextmanager
+def batch(device=None):
+    """`with gs.batch(): ...` : regroupe plusieurs kernels en une seule soumission GPU (wgpu / Metal / Vulkan / DX12).
+
+    Toutes les passes enregistrées dans le bloc partagent un seul `CommandEncoder` et sont soumises
+    ensemble à la sortie du bloc (ou automatiquement avant une lecture CPU ou `gs.Window.present`).
+    Sur les autres backends (OpenCL, CUDA, CPU), le bloc est sans effet (compatible partout).
+    """
+    dev_id = resolve(device)
+    _core.begin_batch(dev_id)
+    try:
+        yield
+    finally:
+        _core.end_batch(dev_id)
+
+
+def sync(device=None) -> None:
+    """Attend la fin de tous les calculs soumis sur `device` (sans copier les résultats vers la RAM)."""
+    _core.sync(resolve(device))
 
 
 def default_device(kernel=None):
