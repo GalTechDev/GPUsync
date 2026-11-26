@@ -195,6 +195,7 @@ crates/
 python/gpusync/             package Python : @gs.kernel, gs.Array, types, périphériques, gs.Window
 gfx/                        paquet gpusync-gfx : moteur graphique gpusync.gfx, ses tests (gfx/tests)
 docs/                       documentation de la bibliothèque (exemples vérifiés par tests/test_docs.py)
+docs/pages/                 site GitHub Pages, généré depuis docs/*.md par tools/build_pages.py
 tests/                      tests Python (différentiels sur chaque périphérique, erreurs)
 tools/dev.py                tâches de développement multi-plateformes
 tools/bench_m1.py           mesures du jalon M1

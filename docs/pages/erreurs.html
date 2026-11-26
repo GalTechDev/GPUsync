@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Erreurs, débogage, performances — GPUsync</title>
+<meta name="description" content="">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0..1,0&display=block">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<aside class="side" aria-label="Navigation">
+<a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
+<nav class="nav">
+<a href="index.html"><span class="icon">home</span>Accueil</a>
+<div class="nav-group">Guide</div>
+<a href="installation.html"><span class="icon">download</span>Installation</a>
+<a href="kernels.html"><span class="icon">code</span>Écrire un kernel</a>
+<a href="resultats.html"><span class="icon">database</span>Résultats et volumes</a>
+<a href="peripheriques.html"><span class="icon">developer_board</span>Périphériques</a>
+<a href="atomiques.html"><span class="icon">scatter_plot</span>Atomiques</a>
+<a href="groupes.html"><span class="icon">hub</span>Groupes de threads</a>
+<a href="fenetre.html"><span class="icon">desktop_windows</span>Fenêtre</a>
+<a href="erreurs.html" aria-current="page"><span class="icon">bug_report</span>Erreurs et performances</a>
+<div class="nav-group">API</div>
+<a href="reference.html"><span class="icon">menu_book</span>Référence</a>
+</nav>
+<div class="side-foot">Licence MIT · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Code source</a></div>
+</aside>
+<div class="scrim"></div>
+<div class="page">
+<header class="top">
+<button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
+<h1 class="top-title">Erreurs et performances</h1>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Thème"><span class="icon">dark_mode</span></button>
+<a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
+</header>
+<main class="content">
+<article class="doc"><h2 class="lead-title">Erreurs, débogage, performances</h2><hr class="rule"><h2 id="exceptions"><a class="anchor" href="#exceptions" aria-hidden="true">#</a>Exceptions</h2>
+<p>Toutes dérivent de <code>gs.GpusyncError</code>. Les messages disent ce qui ne va pas, où, et comment corriger.</p>
+<div class="table-wrap"><table><thead><tr><th>Exception</th><th>Quand</th></tr></thead><tbody><tr><td><code>gs.KernelSyntaxError</code></td><td>à la décoration : construction refusée dans le kernel, type de retour manquant, source introuvable</td></tr><tr><td><code>gs.TypeMismatch</code></td><td>à l'appel : type d'un argument différent de la signature</td></tr><tr><td><code>gs.ShapeMismatch</code></td><td>à l'appel : formes incohérentes, dimension de sortie inconnue</td></tr><tr><td><code>gs.UnsupportedFeature</code></td><td>le périphérique ne sait pas faire une opération du kernel (avec <code>compat="strict"</code> ou <code>device=</code> explicite), ou dépasse ses limites de groupe</td></tr><tr><td><code>gs.DeviceError</code></td><td>périphérique introuvable, erreur du pilote, GPU perdu</td></tr><tr><td><code>gs.OutOfMemory</code></td><td>la sortie ne peut pas être allouée en mémoire centrale : donnez <code>out=</code></td></tr><tr><td><code>gs.OutOfBounds</code></td><td>mode explicite : écriture atomique hors limites (aussi un <code>IndexError</code>)</td></tr><tr><td><code>gs.CompatibilityWarning</code></td><td>avertissement : le kernel s'exécute ailleurs que prévu (voir <a href="peripheriques.html">Périphériques</a>)</td></tr></tbody></table></div>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
+<span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
+
+<span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">def</span> norm(x: <span class="tk-gs">gs.f32</span>[:], m: <span class="tk-gs">gs.f32</span>) -&gt; <span class="tk-gs">gs.f32</span>[:]:
+    <span class="tk-kw">return</span> x - m
+
+<span class="tk-kw">try</span>:
+    norm(np.ones(<span class="tk-num">3</span>), <span class="tk-num">0.0</span>)                    <span class="tk-com"># float64 au lieu de float32</span>
+<span class="tk-kw">except</span> <span class="tk-gs">gs.TypeMismatch</span> <span class="tk-kw">as</span> e:
+    print(e)
+<span class="tk-com"># argument 'x' : gs.f32[:] attendu, reçu un tableau float64. Utilisez x.astype(np.float32),</span>
+<span class="tk-com"># ou @gs.kernel(cast='auto') pour convertir</span>
+
+<span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">def</span> add(a: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], b: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>]) -&gt; <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>]:
+    i = <span class="tk-gs">gs.index</span>()
+    <span class="tk-kw">return</span> a[i] + b[i]
+
+<span class="tk-kw">try</span>:
+    add(np.ones(<span class="tk-num">3</span>, np.float32), np.ones(<span class="tk-num">4</span>, np.float32))
+<span class="tk-kw">except</span> <span class="tk-gs">gs.ShapeMismatch</span> <span class="tk-kw">as</span> e:
+    print(e)                                 <span class="tk-com"># add() : dimension 'n' incohérente : 'a' → 3, 'b' → 4</span></code></pre></div>
+<p>Une erreur dans le corps du kernel est signalée à la décoration, avec le fichier et la ligne :</p>
+<div class="code"><div class="code-head"><span>Sortie</span><span class="spacer"></span></div><pre><code>gs.KernelSyntaxError: kernel 'k' (calcul.py), ligne 8 : appel de « foo » non supporté : seules les fonctions
+de gs et de math sont utilisables dans un kernel</code></pre></div>
+<h2 id="deboguer"><a class="anchor" href="#deboguer" aria-hidden="true">#</a>Déboguer</h2>
+<ul><li><strong>Comparer à l'interpréteur.</strong> <code>device="cpu"</code> exécute le kernel par l'interpréteur de référence : même sémantique que les GPU, résultat exact, lent. Un écart GPU / <code>cpu:0</code> révèle une course entre threads ou un problème de précision. Pour les kernels à groupes, l'interpréteur signale aussi les accès concurrents à la mémoire partagée.</li><li><strong>Comparer à NumPy.</strong> Un kernel élément par élément écrit avec les fonctions <code>gs.*</code> s'exécute aussi en NumPy (<code>kernel.py_func</code>).</li><li><strong>Lire le code généré.</strong> <code>kernel.source("cuda" | "opencl" | "wgsl" | "ir")</code> ; <code>GPUSYNC_DUMP_DIR=dossier</code> écrit chaque code au moment de sa compilation, y compris les variantes spécialisées.</li><li><strong>Diagnostic de la machine.</strong> <code>python -m gpusync</code>, <code>gs.backends()</code>.</li></ul>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>x = np.random.rand(<span class="tk-num">1000</span>).astype(np.float32)
+<span class="tk-kw">assert</span> np.allclose(norm(x, <span class="tk-num">0.5</span>), norm(x, <span class="tk-num">0.5</span>, device=<span class="tk-str">"cpu"</span>))
+print(norm.source(<span class="tk-str">"ir"</span>))</code></pre></div>
+<h2 id="pieges"><a class="anchor" href="#pieges" aria-hidden="true">#</a>Pièges</h2>
+<div class="table-wrap"><table><thead><tr><th>Piège</th><th>Ce qui se passe</th><th>À faire</th></tr></thead><tbody><tr><td><code>y + 1</code>, <code>y == 2</code> sur un <code>gs.Array</code> dans une boucle de calcul</td><td>chaque opération attend le GPU et calcule sur l'hôte</td><td>un kernel, pour rester sur le GPU</td></tr><tr><td><code>if y:</code> sur un <code>gs.Array</code></td><td>vrai dès qu'il a des éléments, quelles que soient les valeurs (NumPy lèverait une erreur)</td><td><code>if (y &gt; 0).all():</code></td></tr><tr><td>modifier une entrée NumPy avant d'avoir lu le résultat</td><td>sur mémoire unifiée, le GPU lit la mémoire modifiée</td><td>lire ou attendre le résultat d'abord</td></tr><tr><td>kernel défini dans la console ou <code>python -c</code></td><td>refusé : source introuvable</td><td>le mettre dans un fichier ou une cellule de notebook</td></tr><tr><td>changer une constante globale après la décoration</td><td>le kernel garde l'ancienne valeur</td><td>la passer en paramètre</td></tr><tr><td>un même nom pour un entier puis un flottant dans un kernel</td><td>refus ou valeur tronquée</td><td>deux noms</td></tr><tr><td>longue boucle de kernels sans jamais lire ni <code>gs.sync()</code></td><td>le travail en attente s'accumule dans la mémoire du GPU</td><td><code>gs.sync()</code> toutes les quelques itérations</td></tr><tr><td><code>math.sqrt</code> dans un kernel appelé par <code>py_func</code></td><td><code>TypeError</code> (math n'accepte pas de tableaux)</td><td><code>gs.sqrt</code></td></tr><tr><td>f64 sur un Mac</td><td>repli sur <code>cpu:0</code>, exact mais lent</td><td>f32, ou OpenCL / CUDA sur une machine qui a le f64</td></tr></tbody></table></div>
+<h2 id="performances"><a class="anchor" href="#performances" aria-hidden="true">#</a>Performances</h2>
+<ul><li><strong>Le premier appel compile</strong> le kernel pour le périphérique (de quelques millisecondes à quelques centaines pour CUDA, mis en cache sur disque). Mesurez à partir du deuxième appel.</li><li><strong>Chaque appel a un coût fixe</strong> (de l'ordre de 0,1 ms sur Vulkan, davantage en OpenCL). Un kernel qui fait peu de travail par case doit en traiter beaucoup ; pour une suite de petits kernels sur Metal, Vulkan ou DX12, <code>gs.batch()</code> les soumet en une fois.</li><li><strong>Laissez les résultats sur le GPU</strong> : enchaînez les kernels sur des <code>gs.Array</code> et ne lisez qu'à la fin.</li><li><strong>f32 plutôt que f64</strong> : les GPU grand public calculent le f64 de 16 à 64 fois plus lentement, quand ils le font.</li><li><strong>Entiers 64 bits</strong> : division et reste sont lents partout (émulés), très lents sur Metal ; <code>gs.mulhi</code> permet souvent de rester en 32 bits (multiplication modulaire de Montgomery).</li><li><strong>Spécialisation des tailles.</strong> Dans un kernel avec index, une dimension qui n'est pas un axe de la sortie (la longueur <code>t</code> d'une série, par exemple) et vaut au plus 1 024 devient une constante du code compilé : boucles déroulées, tableaux locaux en registres. Gain mesuré sur un DTW : ×1,5 à ×40 selon le GPU. Au plus 8 variantes par kernel et par périphérique ; changer la taille des axes de la sortie ne recompile rien. <code>GPUSYNC_SPECIALIZE=0</code> la désactive.</li><li><strong>Groupes et mémoire partagée</strong> (voir <a href="groupes.html">Groupes</a>) pour tout ce qui réutilise des données voisines.</li></ul>
+<h2 id="limites-connues"><a class="anchor" href="#limites-connues" aria-hidden="true">#</a>Limites connues</h2>
+<ul><li>Pas de tranches (<code>x[a:b]</code>) ni d'appels de vos propres fonctions dans un kernel.</li><li>Pas de diffusion (<em>broadcasting</em>) entre tableaux de formes différentes dans un kernel élément par élément.</li><li>Tableaux non contigus (vues NumPy transposées, à pas) : copiés en contigu à l'appel.</li><li><code>gs.Out</code> en 64 bits non permis ; <code>grid=</code> ne se combine pas avec <code>group=</code>.</li><li>Au-delà de 2³¹ − 1 éléments dans un seul tableau gardé entier sur le périphérique : géré en OpenCL, CUDA et sur <code>cpu:0</code> (variante à indices 64 bits compilée à la demande), refusé par wgpu (Metal, Vulkan, DX12).</li><li>Un GPU perdu par le pilote (<code>gs.DeviceError</code>) est rouvert à l'appel suivant, mais le calcul en cours est perdu.</li></ul><nav class="pager"><a href="fenetre.html"><span class="dir">← Précédent</span><span class="name">Fenêtre</span></a><a class="next" href="reference.html"><span class="dir">Suivant →</span><span class="name">Référence</span></a></nav></article>
+<aside class="toc" aria-label="Sur cette page"><div class="toc-title">Sur cette page</div><a href="#exceptions">Exceptions</a><a href="#deboguer">Déboguer</a><a href="#pieges">Pièges</a><a href="#performances">Performances</a><a href="#limites-connues">Limites connues</a></aside>
+</main>
+<footer class="footer"><span>GPUsync · kernels GPU en Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Généré depuis docs/ par tools/build_pages.py</span></footer>
+</div>
+</body>
+</html>

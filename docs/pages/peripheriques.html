@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Périphériques — GPUsync</title>
+<meta name="description" content="">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0..1,0&display=block">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<aside class="side" aria-label="Navigation">
+<a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
+<nav class="nav">
+<a href="index.html"><span class="icon">home</span>Accueil</a>
+<div class="nav-group">Guide</div>
+<a href="installation.html"><span class="icon">download</span>Installation</a>
+<a href="kernels.html"><span class="icon">code</span>Écrire un kernel</a>
+<a href="resultats.html"><span class="icon">database</span>Résultats et volumes</a>
+<a href="peripheriques.html" aria-current="page"><span class="icon">developer_board</span>Périphériques</a>
+<a href="atomiques.html"><span class="icon">scatter_plot</span>Atomiques</a>
+<a href="groupes.html"><span class="icon">hub</span>Groupes de threads</a>
+<a href="fenetre.html"><span class="icon">desktop_windows</span>Fenêtre</a>
+<a href="erreurs.html"><span class="icon">bug_report</span>Erreurs et performances</a>
+<div class="nav-group">API</div>
+<a href="reference.html"><span class="icon">menu_book</span>Référence</a>
+</nav>
+<div class="side-foot">Licence MIT · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Code source</a></div>
+</aside>
+<div class="scrim"></div>
+<div class="page">
+<header class="top">
+<button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
+<h1 class="top-title">Périphériques</h1>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Thème"><span class="icon">dark_mode</span></button>
+<a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
+</header>
+<main class="content">
+<article class="doc"><h2 class="lead-title">Périphériques</h2><hr class="rule"><h2 id="lister"><a class="anchor" href="#lister" aria-hidden="true">#</a>Lister</h2>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
+<span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
+
+<span class="tk-kw">for</span> d <span class="tk-kw">in</span> <span class="tk-gs">gs.devices</span>():
+    print(d.id, d.name, d.backend, d.kind, d.memory_bytes, d.f64, d.unified_memory)</code></pre></div>
+<p>Attributs d'un <code>gs.Device</code> :</p>
+<div class="table-wrap"><table><thead><tr><th>Attribut</th><th>Sens</th></tr></thead><tbody><tr><td><code>id</code></td><td>identifiant, ex. <code>"metal:0"</code>, <code>"cuda:0"</code>, <code>"opencl:1"</code>, <code>"cpu:0"</code></td></tr><tr><td><code>name</code>, <code>vendor</code>, <code>version</code></td><td>nom du matériel, fabricant, version du pilote ou de l'API</td></tr><tr><td><code>backend</code></td><td><code>"cuda"</code>, <code>"metal"</code>, <code>"vulkan"</code>, <code>"dx12"</code>, <code>"opencl"</code> ou <code>"cpu"</code></td></tr><tr><td><code>kind</code></td><td><code>"discrete_gpu"</code>, <code>"integrated_gpu"</code>, <code>"cpu"</code>…</td></tr><tr><td><code>index</code></td><td>numéro dans son backend</td></tr><tr><td><code>memory_bytes</code>, <code>max_buffer_bytes</code></td><td>mémoire du périphérique, plus gros tampon possible (<code>None</code> si inconnus)</td></tr><tr><td><code>unified_memory</code></td><td>le GPU partage la mémoire centrale (Apple Silicon, GPU intégrés)</td></tr><tr><td><code>f64</code></td><td>calcul en <code>gs.f64</code> possible</td></tr><tr><td><code>f64_math</code></td><td>fonctions mathématiques (<code>exp</code>, <code>sin</code>…) en f64 possibles</td></tr><tr><td><code>int64</code></td><td>calcul en <code>gs.i64</code> / <code>gs.u64</code> possible</td></tr><tr><td><code>max_group</code>, <code>shared_bytes</code></td><td>taille maximale d'un groupe de threads et de sa mémoire partagée (voir <a href="groupes.html">Groupes</a>)</td></tr></tbody></table></div>
+<p>La découverte est faite une fois ; <code>gs.devices(refresh=True)</code> la refait. <code>gs.backends()</code> donne l'état de chaque backend et, s'il est indisponible, la raison (<code>st.error</code>).</p>
+<h2 id="choix-automatique"><a class="anchor" href="#choix-automatique" aria-hidden="true">#</a>Choix automatique</h2>
+<p>Sans indication, GPUsync prend le premier périphérique de ce classement :</p>
+<div class="table-wrap"><table><thead><tr><th>Rang</th><th>Catégorie</th><th>Backends, dans l'ordre</th></tr></thead><tbody><tr><td>1</td><td>GPU dédié</td><td>CUDA, Vulkan, OpenCL, DX12, Metal</td></tr><tr><td>2</td><td>GPU intégré</td><td>Metal, OpenCL, Vulkan, DX12</td></tr><tr><td>3</td><td>OpenCL sur processeur (POCL…)</td><td></td></tr><tr><td>4</td><td>interpréteur</td><td><code>cpu:0</code></td></tr></tbody></table></div>
+<p>Sur un Mac : <code>metal:0</code>. Sur un PC à carte NVIDIA : <code>cuda:0</code> si NVRTC est présent, sinon <code>vulkan:0</code>.</p>
+<h2 id="choisir-soi-meme"><a class="anchor" href="#choisir-soi-meme" aria-hidden="true">#</a>Choisir soi-même</h2>
+<p>Un périphérique se désigne par un <code>gs.Device</code>, son identifiant (<code>"opencl:1"</code>), un nom de backend (<code>"cuda"</code>, <code>"opencl"</code>, <code>"metal"</code>, <code>"vulkan"</code>, <code>"dx12"</code>, <code>"cpu"</code> : le premier de ce backend) ou <code>"gpu"</code> (le premier GPU du classement).</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">def</span> square(x: <span class="tk-gs">gs.f32</span>[:]) -&gt; <span class="tk-gs">gs.f32</span>[:]:
+    <span class="tk-kw">return</span> x * x
+
+x = np.arange(<span class="tk-num">4</span>, dtype=np.float32)
+
+square(x, device=<span class="tk-str">"cpu"</span>)                 <span class="tk-com"># pour un appel</span>
+
+<span class="tk-kw">with</span> <span class="tk-gs">gs.device</span>(<span class="tk-str">"cpu"</span>):                  <span class="tk-com"># pour un bloc de code (propre au thread)</span>
+    y = square(x)
+<span class="tk-kw">assert</span> y.device == <span class="tk-str">"cpu:0"</span>
+
+<span class="tk-gs">gs.set_default_device</span>(<span class="tk-str">"cpu"</span>)            <span class="tk-com"># pour la suite du programme</span>
+<span class="tk-gs">gs.set_default_device</span>(<span class="tk-kw">None</span>)             <span class="tk-com"># retour au classement</span></code></pre></div>
+<p>Ordre de priorité : <code>device=</code> de l'appel, puis <code>with gs.device(...)</code>, puis <code>gs.set_default_device(...)</code>, puis la variable d'environnement <code>GPUSYNC_DEVICE</code>, puis le classement. Un nom introuvable lève <code>gs.DeviceError</code>, qui liste les périphériques disponibles.</p>
+<p><code>y.device</code> dit toujours où le calcul a réellement eu lieu, et <code>gs.default_device(kernel)</code> où il aurait lieu maintenant, compte tenu de ce que le kernel demande.</p>
+<h2 id="quand-une-operation-manque-compat"><a class="anchor" href="#quand-une-operation-manque-compat" aria-hidden="true">#</a>Quand une opération manque : <code>compat</code></h2>
+<p>Tous les périphériques ne savent pas tout faire : pas de f64 sur Metal ni sur la plupart des GPU intégrés, pas de fonctions mathématiques en f64 sur Vulkan, entiers 64 bits absents par endroits. GPUsync déduit de chaque kernel ce qu'il exige, et si le périphérique prévu ne convient pas :</p>
+<div class="table-wrap"><table><thead><tr><th><code>@gs.kernel(compat=...)</code></th><th>Comportement</th></tr></thead><tbody><tr><td><code>"auto"</code> (défaut)</td><td>avertissement <code>gs.CompatibilityWarning</code> (une fois par kernel), puis <strong>tout le kernel</strong> s'exécute ailleurs : CUDA ou OpenCL sur le même GPU de préférence, sinon un autre périphérique capable, sinon <code>cpu:0</code> (exact mais lent, et l'avertissement le dit)</td></tr><tr><td><code>"strict"</code></td><td><code>gs.UnsupportedFeature</code>, avec la liste des périphériques compatibles</td></tr></tbody></table></div>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> warnings
+
+<span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">def</span> decay(x: <span class="tk-gs">gs.f64</span>[:]) -&gt; <span class="tk-gs">gs.f64</span>[:]:
+    <span class="tk-kw">return</span> <span class="tk-gs">gs.exp</span>(-x)
+
+<span class="tk-kw">with</span> warnings.catch_warnings(record=<span class="tk-kw">True</span>) <span class="tk-kw">as</span> caught:
+    warnings.simplefilter(<span class="tk-str">"always"</span>)
+    r = decay(np.ones(<span class="tk-num">3</span>))
+print(r.device, [str(w.message) <span class="tk-kw">for</span> w <span class="tk-kw">in</span> caught])   <span class="tk-com"># sur un Mac : cpu:0, avec l'explication</span>
+<span class="tk-kw">assert</span> np.allclose(r, np.exp(-<span class="tk-num">1.0</span>))</code></pre></div>
+<p>Rien n'est émulé : un f64 n'est jamais simulé par deux f32, et un kernel n'est jamais coupé entre deux périphériques. Avec <code>device=</code> explicite, le périphérique demandé est utilisé tel quel, ou l'appel est refusé.</p>
+<p>Sur le PC de test, par exemple : un kernel f32 → <code>cuda:0</code> ; f64 arithmétique sous Vulkan → <code>vulkan:0</code> ; f64 avec <code>gs.exp</code> sous Vulkan → <code>opencl:0</code> (même carte).</p>
+<h2 id="memoire"><a class="anchor" href="#memoire" aria-hidden="true">#</a>Mémoire</h2>
+<p>Le <strong>budget</strong> d'un périphérique est la mémoire qu'un appel peut occuper d'un coup avant de passer en mode <code>flux</code> (par blocs) : 50 % de la mémoire du périphérique par défaut.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-gs">gs.set_memory_budget</span>(<span class="tk-num">512</span> * <span class="tk-num">2</span>**<span class="tk-num">20</span>)       <span class="tk-com"># 512 Mio</span>
+<span class="tk-gs">gs.set_memory_budget</span>(<span class="tk-kw">None</span>)              <span class="tk-com"># retour au défaut</span></code></pre></div>
+<p>Le baisser laisse de la place à d'autres programmes (ou à un rendu) ; le monter évite le découpage de calculs qui tiennent. Il ne limite pas la taille des données : au-delà, le calcul est seulement découpé.</p>
+<h2 id="un-gpu-qui-decroche"><a class="anchor" href="#un-gpu-qui-decroche" aria-hidden="true">#</a>Un GPU qui décroche</h2>
+<p>Si le pilote perd le périphérique (sous Windows, un calcul de plus de 2 s environ est interrompu par le système), l'appel lève <code>gs.DeviceError</code> avec une explication, et le périphérique est rouvert à l'appel suivant. Découpez alors le travail en appels plus courts.</p><nav class="pager"><a href="resultats.html"><span class="dir">← Précédent</span><span class="name">Résultats et volumes</span></a><a class="next" href="atomiques.html"><span class="dir">Suivant →</span><span class="name">Atomiques</span></a></nav></article>
+<aside class="toc" aria-label="Sur cette page"><div class="toc-title">Sur cette page</div><a href="#lister">Lister</a><a href="#choix-automatique">Choix automatique</a><a href="#choisir-soi-meme">Choisir soi-même</a><a href="#quand-une-operation-manque-compat">Quand une opération manque : <code>compat</code></a><a href="#memoire">Mémoire</a><a href="#un-gpu-qui-decroche">Un GPU qui décroche</a></aside>
+</main>
+<footer class="footer"><span>GPUsync · kernels GPU en Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Généré depuis docs/ par tools/build_pages.py</span></footer>
+</div>
+</body>
+</html>

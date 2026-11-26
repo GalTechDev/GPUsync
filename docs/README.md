@@ -43,4 +43,6 @@ Pour la conception interne (IR, générateurs de code, moteur de transferts, mes
 - Les exemples écrits en `python` sont exécutés par `tests/test_docs.py` : ils marchent tels quels. Ceux écrits
   en `py` (fenêtre, PyTorch, fichiers de plusieurs gigaoctets) ne le sont pas.
 - `gs` désigne `gpusync`, `np` désigne NumPy.
+- Le site web de la documentation (`docs/pages`, publié sur GitHub Pages) est généré depuis ces pages par
+  `python3 tools/build_pages.py` ; un test vérifie qu'il est à jour.
 - Les mesures citées viennent de deux machines : un Mac à puce Apple M5 Pro et un PC à RTX 4080 SUPER.

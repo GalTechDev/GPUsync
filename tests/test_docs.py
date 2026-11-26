@@ -30,3 +30,14 @@ def test_examples_of_the_page_run(page, tmp_path, monkeypatch, capsys):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # replis de périphérique annoncés par les exemples eux-mêmes
         runpy.run_path(str(script), run_name="__main__")
+
+
+def test_site_pages_are_up_to_date():
+    """docs/pages (GitHub Pages) est généré depuis docs/*.md : après une modification de la doc, relancer
+    `python3 tools/build_pages.py`."""
+    import subprocess
+    import sys
+
+    root = DOCS.parent
+    r = subprocess.run([sys.executable, str(root / "tools" / "build_pages.py"), "--check"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
