@@ -11,7 +11,7 @@
 //! may come from any thread.
 
 use std::collections::{HashMap, VecDeque};
-use std::ffi::{CString, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use gpusync_runtime::{BackendError, DeviceInfo};
@@ -397,7 +397,7 @@ impl CuDevice {
         .into_iter()
         .map(|o| CString::new(o).unwrap())
         .collect();
-        let optp: Vec<*const i8> = opts.iter().map(|o| o.as_ptr()).collect();
+        let optp: Vec<*const c_char> = opts.iter().map(|o| o.as_ptr()).collect();
         let r = unsafe { (n.nvrtcCompileProgram)(prog, optp.len() as i32, optp.as_ptr()) };
         let result = if r != 0 {
             let mut size = 0usize;
