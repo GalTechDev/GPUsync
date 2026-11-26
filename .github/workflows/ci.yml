@@ -1,0 +1,134 @@
+# Intégration continue : tests sur les trois systèmes, roues de gpusync (une par système, abi3 : Python ≥ 3.10)
+# et de gpusync-gfx (Python pur). Les machines de GitHub n'ont pas de GPU de calcul : les tests passent par
+# l'interpréteur cpu:0 (et par Metal sur macOS s'il est exposé) ; les tests GPU complets restent sur les machines
+# de test (tools/remote).
+#
+# Publication sur PyPI : seulement en poussant une étiquette `v*`, et seulement après avoir déclaré ce dépôt comme
+# « trusted publisher » des projets gpusync et gpusync-gfx sur pypi.org (environnement GitHub `pypi`).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Dépendances
+        run: python -m pip install "maturin>=1.16,<2" "flit_core>=3.10,<4" "pytest>=8" "numpy>=1.22"
+      - name: Compilation (bibliothèque et moteur, mode modifiable)
+        run: |
+          python -m pip install --no-build-isolation -e .
+          python -m pip install --no-build-isolation --no-deps -e gfx
+      - name: Diagnostic
+        run: python -m gpusync
+      - name: cargo test
+        run: cargo test --workspace -q
+      - name: Tests de la bibliothèque
+        run: python -m pytest -q -ra tests
+
+  gfx:
+    # Le moteur fait de grosses simulations : trop lent sur l'interpréteur, testé là où un GPU est exposé (Metal)
+    name: Tests du moteur (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python -m pip install "maturin>=1.16,<2" "flit_core>=3.10,<4" "pytest>=8" "numpy>=1.22"
+      - run: |
+          python -m pip install --no-build-isolation -e .
+          python -m pip install --no-build-isolation --no-deps -e gfx
+      - run: python -m gpusync
+      - run: python -m pytest -q -ra gfx/tests
+
+  wheels:
+    name: Roue ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          - { os: macos-latest, target: aarch64 }
+          - { os: macos-13, target: x86_64 }
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist
+      - name: La roue s'installe et trouve ses périphériques
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP" && python -m gpusync
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
+
+  sdist:
+    name: Archive des sources et roue du moteur
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: gpusync-gfx (sources et roue)
+        run: |
+          python -m pip install build
+          python -m build --outdir dist gfx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist-and-gfx
+          path: dist/*
+
+  publish:
+    name: Publication sur PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, gfx, wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # « trusted publishing » : aucun jeton PyPI stocké dans le dépôt
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -8,6 +8,7 @@ description = "Écrire des kernels GPU en Python et les exécuter sur n'importe 
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "GalTechDev" }, { name = "ThePhoenix78" }]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -25,7 +26,7 @@ manifest-path = "crates/gpusync-py/Cargo.toml"
 module-name = "gpusync._core"
 python-source = "python"
 features = ["pyo3/extension-module"]
-exclude = ["GPUsync-python/**", "tools/**"]
+exclude = ["GPUsync-python/**", "tools/**", "gfx/**"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "gfx/tests"]  # gfx/tests : moteur gpusync-gfx, s'il est installé

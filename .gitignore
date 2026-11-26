@@ -24,3 +24,7 @@ python/gpusync/*.pyd
 .venv-v1/
 # Noyaux générés par le prototype v1 (tools/compare_v1)
 .gpusync_debug/
+
+# Hors dépôt : démos et dossiers d'essai personnels (dont les sauvegardes de partie), captures d'écran
+/examples/
+/gpusync_engine_*.png
