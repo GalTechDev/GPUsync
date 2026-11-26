@@ -10,7 +10,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, new-rust]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
