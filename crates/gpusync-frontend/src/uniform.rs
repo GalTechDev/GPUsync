@@ -1,8 +1,8 @@
-//! Barrières d'un kernel avec `group=` : tous les threads d'un groupe doivent atteindre les mêmes
-//! `gs.barrier()`, sinon le GPU se bloque (CUDA, OpenCL) ou refuse le kernel (WGSL, analyse
-//! d'uniformité). Une valeur « propre au thread » vient de `gs.index()`, `gs.lane()`, d'une lecture de
-//! mémoire partagée, ou d'un calcul qui en dépend ; une barrière ne peut pas dépendre d'elle (condition,
-//! bornes de boucle, sortie de boucle, `return` exécuté par une partie des threads seulement).
+//! Barriers of a kernel with `group=`: every thread of a group must reach the same
+//! `gs.barrier()`, otherwise the GPU hangs (CUDA, OpenCL) or rejects the kernel (WGSL, uniformity
+//! analysis). A "thread-dependent" value comes from `gs.index()`, `gs.lane()`, a read of shared
+//! memory, or a computation that depends on them; a barrier cannot depend on it (condition,
+//! loop bounds, loop exit, `return` taken by only some of the threads).
 
 use gpusync_ir::*;
 
@@ -12,7 +12,7 @@ type R<T> = Result<T, FrontendError>;
 
 struct Taint<'a> {
     k: &'a Kernel,
-    /// Locale (ou tableau local) dont la valeur peut différer d'un thread à l'autre.
+    /// Local (or local array) whose value may differ from one thread to another.
     varying: Vec<bool>,
     changed: bool,
 }
@@ -41,8 +41,8 @@ impl Taint<'_> {
         }
     }
 
-    /// Le corps d'une boucle peut-il en sortir (break, continue, return) sur une condition propre
-    /// au thread ? Les tours suivants ne concernent alors qu'une partie du groupe.
+    /// Can the loop body leave it (break, continue, return) on a thread-dependent
+    /// condition? Later iterations then only concern part of the group.
     fn varying_exit(&self, b: &Block, cv: bool) -> bool {
         b.iter().any(|s| match s {
             Stmt::Break | Stmt::Continue | Stmt::Return(_) => cv,
@@ -54,7 +54,7 @@ impl Taint<'_> {
                 let c = cv || self.expr(cond);
                 self.varying_exit(then, c) || self.varying_exit(otherwise, c)
             }
-            // Un break d'une boucle intérieure n'en sort pas ; un return, si.
+            // A break in an inner loop does not leave it; a return does.
             Stmt::For { .. } | Stmt::While { .. } => {
                 returns_under(std::slice::from_ref(s), cv, self)
             }
@@ -143,7 +143,7 @@ struct Check<'a, 'b> {
     t: &'a Taint<'b>,
     lines: &'a [Option<u32>],
     next: usize,
-    /// Un `return` propre au thread a déjà eu lieu : une partie du groupe est terminée.
+    /// A thread-dependent `return` has already happened: part of the group has finished.
     diverged: bool,
 }
 
@@ -157,9 +157,9 @@ impl Check<'_, '_> {
                     if self.diverged {
                         return Err(err(
                             ErrorKind::Syntax,
-                            "gs.barrier() après un `return` que seule une partie des threads du groupe exécute : \
-                             les autres attendraient sans fin. Gardez le résultat dans une variable et terminez \
-                             le kernel par un seul return"
+                            "gs.barrier() after a `return` that only some threads of the group take: \
+                             the others would wait forever. Keep the result in a variable and end \
+                             the kernel with a single return"
                                 .into(),
                             line,
                         ));
@@ -167,10 +167,10 @@ impl Check<'_, '_> {
                     if cv {
                         return Err(err(
                             ErrorKind::Syntax,
-                            "gs.barrier() dans une condition ou une boucle qui dépend du thread (gs.index(), \
-                             gs.lane(), une lecture de gs.shared, ou un calcul qui en dépend) : une partie des \
-                             threads du groupe ne l'atteindrait pas. Placez la barrière hors de cette condition, \
-                             ou rendez la condition identique pour tout le groupe"
+                            "gs.barrier() inside a condition or a loop that depends on the thread (gs.index(), \
+                             gs.lane(), a read of gs.shared, or anything computed from them): some \
+                             threads of the group would not reach it. Move the barrier out of that condition, \
+                             or make the condition the same for the whole group"
                                 .into(),
                             line,
                         ));
@@ -207,8 +207,8 @@ impl Check<'_, '_> {
     }
 }
 
-/// Vérifie que chaque `gs.barrier()` est atteinte par tous les threads du groupe. `lines` : ligne de
-/// chaque barrière, dans l'ordre du code.
+/// Checks that every `gs.barrier()` is reached by all threads of the group. `lines`: line of
+/// each barrier, in code order.
 pub(crate) fn check_barriers(k: &Kernel, lines: &[Option<u32>]) -> R<()> {
     let mut t = Taint {
         k,

@@ -1,5 +1,5 @@
-"""Rasterizer de gpusync.gfx : plus de 65 536 triangles, précision de profondeur, découpe au plan proche,
-picking exact. Sur chaque GPU."""
+"""Rasterizer of gpusync.gfx: more than 65,536 triangles, depth precision, near-plane clipping,
+exact picking. On every GPU."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _covered(app):
 
 
 def _ballast_scene(n_ballast):
-    """Une boule rouge visible, précédée de `n_ballast` sphères hors champ (numéros de triangle plus petits)."""
+    """One visible red ball, preceded by `n_ballast` spheres out of view (smaller triangle numbers)."""
     sc = gfx.Scene()
     sc.camera = _cam((0.0, 0.8, 4.0), (0.0, 0.0, 0.0))
     for k in range(n_ballast):
@@ -58,26 +58,26 @@ def _floor_scene(subdivisions, pos=(0.0, 1.2, 3.0), target=(0.0, 0.3, -3.0), **k
 
 
 VIEWS = [
-    dict(),  # sommets derrière la caméra
-    dict(pos=(0.0, 0.3, 0.0), target=(5.0, 0.0, 1.0)),  # au ras du sol, en biais
-    dict(pos=(1.0, 2.0, -2.0), target=(1.0, 0.0, -2.2)),  # vers le bas, caméra au milieu du sol
-    dict(near=1.0),  # plan proche éloigné
+    dict(),  # vertices behind the camera
+    dict(pos=(0.0, 0.3, 0.0), target=(5.0, 0.0, 1.0)),  # skimming the ground, at an angle
+    dict(pos=(1.0, 2.0, -2.0), target=(1.0, 0.0, -2.2)),  # looking down, camera in the middle of the ground
+    dict(near=1.0),  # far near plane
 ]
 
 
 @pytest.mark.parametrize("dev", GPUS)
 @pytest.mark.parametrize("view", VIEWS)
 def test_near_plane_clipping(dev, view):
-    """Un sol de 2 triangles et le même sol très subdivisé donnent la même image."""
+    """A 2-triangle floor and the same floor heavily subdivided give the same image."""
     fine_app, coarse_app = _app(dev), _app(dev)
     fine = fine_app.render_rgba(_floor_scene(200, **view)).astype(int)
     coarse = coarse_app.render_rgba(_floor_scene(1, **view)).astype(int)
     mask_f, mask_c = _covered(fine_app), _covered(coarse_app)
     assert mask_c.mean() > 0.3
-    assert (mask_f != mask_c).mean() < 0.02  # bord du sol à un pixel près
+    assert (mask_f != mask_c).mean() < 0.02  # floor edge within one pixel
     both = mask_f & mask_c
     diff = np.abs(fine - coarse).max(axis=2)[both]
-    assert (diff > 12).mean() < 0.02  # bords du damier à un pixel près
+    assert (diff > 12).mean() < 0.02  # checkerboard edges within one pixel
 
 
 @pytest.mark.parametrize("dev", GPUS)
@@ -105,7 +105,7 @@ def test_pick_on_clipped_triangle(dev):
 
 @pytest.mark.parametrize("dev", GPUS)
 def test_depth_precision(dev):
-    """Deux panneaux à 2 mm l'un de l'autre, profondeur jusqu'à 400 m : celui de devant gagne partout."""
+    """Two panels 2 mm apart, depth up to 400 m: the front one wins everywhere."""
     sc = gfx.Scene()
     sc.camera = _cam((0.0, 0.0, 6.0), (0.0, 0.0, 0.0), far=400.0)
     back = gfx.Object3D("back", gfx.Mesh.quad(40.0, 40.0), gfx.Material.solid((0, 1, 0)), rot=(0.0, 0.3, 0.0))
@@ -123,7 +123,7 @@ def test_depth_precision(dev):
 
 @pytest.mark.parametrize("dev", GPUS)
 def test_pick_after_instanced_mesh(dev):
-    """Une instance avant l'objet décale les matrices : le picking doit prendre celle du sommet touché."""
+    """An instance before the object shifts the matrices: picking must take the one of the vertex hit."""
     trs = np.zeros((3, 8), dtype=np.float32)
     trs[:] = [0.0, 300.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]
     trs[0, :3] = [-3.0, 0.0, 0.0]

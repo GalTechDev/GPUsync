@@ -1,4 +1,4 @@
-"""Messages d'erreur (objectif O6) : ce qui ne va pas, où, et comment corriger. Jalon M1."""
+"""Error messages (goal O6): what is wrong, where, and how to fix it. Milestone M1."""
 
 import numpy as np
 import pytest
@@ -7,9 +7,9 @@ import gpusync as gs
 
 
 def compile_error(src: str, tmp_path, exc=gs.KernelSyntaxError):
-    """Écrit le kernel dans un fichier (le source doit être lisible) et renvoie le message d'erreur."""
+    """Writes the kernel to a file (the source must be readable) and returns the error message."""
     path = tmp_path / "k.py"
-    path.write_text("import math\nimport gpusync as gs\n\nLIMITE = 3\n\n@gs.kernel\n" + src)
+    path.write_text("import math\nimport gpusync as gs\n\nLIMIT = 3\n\n@gs.kernel\n" + src)
     ns = {}
     with pytest.raises(exc) as info:
         code = compile(path.read_text(), str(path), "exec")
@@ -21,42 +21,42 @@ def compile_error(src: str, tmp_path, exc=gs.KernelSyntaxError):
 
 
 CASES = [
-    # (source du kernel, exception, fragments attendus dans le message)
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    l = [1, 2]\n    return x\n", gs.KernelSyntaxError, ["ligne 8", "listes"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x[0]\n", gs.KernelSyntaxError, ["ligne 8", "élément courant"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x + inconnu\n", gs.KernelSyntaxError, ["ligne 8", "inconnu"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    x = x + 1.0\n    return x\n", gs.KernelSyntaxError, ["ne peut pas être modifié"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    if x > 0.0:\n        return x\n", gs.KernelSyntaxError, ["toutes les branches"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    if x:\n        return x\n    return -x\n", gs.TypeMismatch, ["ligne 8", "x != 0"]),
-    ("def k(x: gs.i32[:]) -> gs.i32[:]:\n    return x ** 2\n", gs.TypeMismatch, ["**", "flottants"]),
+    # (kernel source, exception, fragments expected in the message)
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    l = [1, 2]\n    return x\n", gs.KernelSyntaxError, ["line 8", "lists"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x[0]\n", gs.KernelSyntaxError, ["line 8", "current element"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x + unknown\n", gs.KernelSyntaxError, ["line 8", "unknown"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    x = x + 1.0\n    return x\n", gs.KernelSyntaxError, ["cannot be modified"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    if x > 0.0:\n        return x\n", gs.KernelSyntaxError, ["every branch"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    if x:\n        return x\n    return -x\n", gs.TypeMismatch, ["line 8", "x != 0"]),
+    ("def k(x: gs.i32[:]) -> gs.i32[:]:\n    return x ** 2\n", gs.TypeMismatch, ["**", "floats"]),
     ("def k(x: gs.i32[:]) -> gs.i32[:]:\n    y = x + 1\n    y = 2.5\n    return gs.i32(y)\n", None, []),
-    ("def k(x: gs.i32[:], s: gs.u32) -> gs.i32[:]:\n    return x + s\n", gs.TypeMismatch, ["i32", "u32", "explicite"]),
-    ("def k(x: gs.f32[:]) -> gs.i32[:]:\n    return x * 2.0\n", gs.TypeMismatch, ["valeur renvoyée", "f32"]),
+    ("def k(x: gs.i32[:], s: gs.u32) -> gs.i32[:]:\n    return x + s\n", gs.TypeMismatch, ["i32", "u32", "explicit"]),
+    ("def k(x: gs.f32[:]) -> gs.i32[:]:\n    return x * 2.0\n", gs.TypeMismatch, ["returned value", "f32"]),
     ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    while x > 0.0:\n        break\n    else:\n        pass\n    return x\n", gs.KernelSyntaxError, ["while ... else"]),
     ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    for i in [1, 2]:\n        pass\n    return x\n", gs.KernelSyntaxError, ["range"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    print(x)\n    return x\n", gs.KernelSyntaxError, ["expression sans effet"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return len(x)\n", gs.KernelSyntaxError, ["ligne 8", "gs.index()"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x, x\n", gs.TypeMismatch, ["ligne 8", "2 valeur(s)", "1 sortie"]),
-    # Jalon M2 : index, dimensions nommées, tableaux locaux.
-    ('def k(x: gs.f32[:]) -> gs.f32["n"]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ["« n »", "absente des entrées"]),
-    ('def k(x: gs.f32["n"]) -> gs.f32["m"]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ["« m »", "absente des entrées"]),
-    ('def k(x: gs.f32["n"]) -> gs.f32[:]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ["nommez les dimensions"]),
-    ('def k(x: gs.f32["n"]) -> gs.f32["n"]:\n    i = gs.index()\n    return x\n', gs.KernelSyntaxError, ["ligne 9"]),
-    ('def k(x: gs.f32["n", "t"]) -> gs.f32["n"]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ["ligne 9", "2 dimension(s), 1 indice(s)"]),
-    ('def k(x: gs.f32["n"], s: gs.i32) -> gs.f32["n"]:\n    i = gs.index()\n    b = gs.local(gs.f32, s)\n    return x[i]\n', gs.TypeMismatch, ["ligne 9", "constante entière"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    print(x)\n    return x\n", gs.KernelSyntaxError, ["expression without effect"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return len(x)\n", gs.KernelSyntaxError, ["line 8", "gs.index()"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x, x\n", gs.TypeMismatch, ["line 8", "2 value(s)", "1 declared output"]),
+    # Milestone M2: indexes, named dimensions, local arrays.
+    ('def k(x: gs.f32[:]) -> gs.f32["n"]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ['"n"', "is not among the inputs"]),
+    ('def k(x: gs.f32["n"]) -> gs.f32["m"]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ['"m"', "is not among the inputs"]),
+    ('def k(x: gs.f32["n"]) -> gs.f32[:]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ["name the output dimensions"]),
+    ('def k(x: gs.f32["n"]) -> gs.f32["n"]:\n    i = gs.index()\n    return x\n', gs.KernelSyntaxError, ["line 9"]),
+    ('def k(x: gs.f32["n", "t"]) -> gs.f32["n"]:\n    i = gs.index()\n    return x[i]\n', gs.TypeMismatch, ["line 9", "2 dimension(s), 1 index(es)"]),
+    ('def k(x: gs.f32["n"], s: gs.i32) -> gs.f32["n"]:\n    i = gs.index()\n    b = gs.local(gs.f32, s)\n    return x[i]\n', gs.TypeMismatch, ["line 9", "integer constant"]),
     ('def k(x: gs.f32["n"]) -> gs.f32["n"]:\n    i = gs.index()\n    b = gs.local(gs.f32, 4)\n    b[0] = x[i]\n    return b[0] + x[i]\n', None, []),
-    ("def k(x) -> gs.f32[:]:\n    return x\n", gs.KernelSyntaxError, ["'x' sans type", "gs.f32[:]"]),
-    ("def k(x: gs.f32[:]):\n    return x\n", gs.KernelSyntaxError, ["type de sortie"]),
-    ("def k(s: gs.f32) -> gs.f32[:]:\n    return s\n", gs.TypeMismatch, ["au moins un tableau"]),
-    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x * LIMITE + math.pi\n", None, []),
+    ("def k(x) -> gs.f32[:]:\n    return x\n", gs.KernelSyntaxError, ["'x' has no type", "gs.f32[:]"]),
+    ("def k(x: gs.f32[:]):\n    return x\n", gs.KernelSyntaxError, ["output type"]),
+    ("def k(s: gs.f32) -> gs.f32[:]:\n    return s\n", gs.TypeMismatch, ["at least one array"]),
+    ("def k(x: gs.f32[:]) -> gs.f32[:]:\n    return x * LIMIT + math.pi\n", None, []),
 ]
 
 
 @pytest.mark.parametrize("src,exc,fragments", CASES)
 def test_compile_errors(src, exc, fragments, tmp_path):
-    if exc is None:  # cas valides (locale retypée en f32 puis convertie, constante globale)
+    if exc is None:  # valid cases (local retyped as f32 then converted, global constant)
         path = tmp_path / "ok.py"
-        path.write_text("import math\nimport gpusync as gs\n\nLIMITE = 3\n\n@gs.kernel\n" + src)
+        path.write_text("import math\nimport gpusync as gs\n\nLIMIT = 3\n\n@gs.kernel\n" + src)
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("ok", path)
@@ -85,7 +85,7 @@ def scale(a: gs.i32[:], s: gs.u32) -> gs.i32[:]:
 
 
 def test_array_type():
-    with pytest.raises(gs.TypeMismatch, match=r"'a' : gs.f32\[:\] attendu, reçu un tableau float64.*astype"):
+    with pytest.raises(gs.TypeMismatch, match=r"'a': gs.f32\[:\] expected, got a float64 array.*astype"):
         add(np.ones(3), np.ones(3, np.float32), device="cpu")
 
 
@@ -102,13 +102,13 @@ def test_incompatible_shapes():
 def test_scalars():
     a = np.arange(4, dtype=np.int32)
     assert np.asarray(scale(a, 3, device="cpu")).tolist() == [0, 3, 6, 9]
-    with pytest.raises(gs.TypeMismatch, match="hors de la plage de u32"):
+    with pytest.raises(gs.TypeMismatch, match="out of the range of u32"):
         scale(a, -1, device="cpu")
-    with pytest.raises(gs.TypeMismatch, match="entier attendu"):
+    with pytest.raises(gs.TypeMismatch, match="integer expected"):
         scale(a, 1.5, device="cpu")
-    with pytest.raises(gs.TypeMismatch, match="scalaire attendu"):
+    with pytest.raises(gs.TypeMismatch, match="scalar expected"):
         scale(a, np.ones(3), device="cpu")
-    with pytest.raises(TypeError, match="attend 2 argument"):
+    with pytest.raises(TypeError, match="expects 2 argument"):
         scale(a)
 
 

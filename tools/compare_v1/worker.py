@@ -1,9 +1,9 @@
-"""Un processus de mesure pour une version de GPUsync (v1 = prototype Python, v2 = Rust).
+"""A measuring process for one version of GPUsync (v1 = Python prototype, v2 = Rust).
 
-    python worker.py v1|v2 BACKEND TÂCHE...     (sortie : une ligne JSON par tâche)
+    python worker.py v1|v2 BACKEND TASK...     (output: one JSON line per task)
 
-Les deux versions s'appellent `gpusync` : chacune tourne dans son propre processus (et son propre
-environnement Python pour v1). Mêmes données (graine fixe), mêmes calculs, même GPU.
+Both versions are called `gpusync`: each runs in its own process (and its own Python
+environment for v1). Same data (fixed seed), same computations, same GPU.
 """
 
 import asyncio
@@ -19,7 +19,7 @@ IMPL, BACKEND, TASKS = sys.argv[1], sys.argv[2], sys.argv[3:]
 
 
 def peak_rss() -> int:
-    """Pic de mémoire physique du processus (octets)."""
+    """Peak physical memory of the process (bytes)."""
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -30,13 +30,13 @@ def peak_rss() -> int:
                                                "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
                                                "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
         k32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
-        k32.GetCurrentProcess.restype = wintypes.HANDLE  # sinon le handle 64 bits est tronqué
+        k32.GetCurrentProcess.restype = wintypes.HANDLE  # otherwise the 64-bit handle is truncated
         psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(PMC), wintypes.DWORD]
         psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
         c = PMC()
         c.cb = ctypes.sizeof(c)
         if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(c), c.cb):
-            raise OSError("GetProcessMemoryInfo a échoué")
+            raise OSError("GetProcessMemoryInfo failed")
         return c.PeakWorkingSetSize
     import resource
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -51,10 +51,10 @@ if IMPL == "v1":
     from examples.algorithms.dtw.dtw_gpu_engine import compute_dtw_matrix
     t_import = time.perf_counter() - t_import
 
-    backend, _, name_part = BACKEND.partition("/")  # ex. "opencl/NVIDIA" : GPU dont le nom contient NVIDIA
+    backend, _, name_part = BACKEND.partition("/")  # e.g. "opencl/NVIDIA": GPU whose name contains NVIDIA
     gpus = [g for g in list_gpus() if g.backend == backend and name_part.lower() in g.name.lower()]
     if not gpus:
-        print(json.dumps({"error": f"v1 : aucun GPU {BACKEND}"}))
+        print(json.dumps({"error": f"v1: no {BACKEND} GPU"}))
         sys.exit(0)
     SCHED = Scheduler(gpu=gpus[0])
     SCHED.initialize()
@@ -70,13 +70,13 @@ if IMPL == "v1":
     def run_dtw(series, w):
         async def go():
             rows = []
-            for i in range(0, len(series), 16):  # comme tests/run_xlsx_dtw.py du prototype
+            for i in range(0, len(series), 16):  # like the prototype's tests/run_xlsx_dtw.py
                 rows.append(await compute_dtw_matrix(series, series[i:i + 16], scheduler=SCHED, w=w))
             return np.vstack(rows)
         return asyncio.run(go())
 
-    # DTW 1 contre N : examples/algorithms/dtw/benchmark.py du prototype (recopié : ce module importe
-    # numba pour sa référence CPU, absent ici).
+    # DTW 1 against N: the prototype's examples/algorithms/dtw/benchmark.py (copied: that module imports
+    # numba for its CPU reference, missing here).
     from gpusync import AsyncBuffer
     from examples.algorithms.dtw.dtw_gpu_engine import get_batch_dtw_kernel
 
@@ -144,7 +144,7 @@ else:
 
     @gs.kernel
     def dtw_1n(ref: gs.f32["t"], x: gs.f32["n", "t"]) -> gs.f32["n"]:
-        """DTW complet (sans fenêtre) de la série x[i] contre ref, ligne de la matrice en local."""
+        """Full DTW (no window) of series x[i] against ref, row of the matrix kept locally."""
         i = gs.index()
         t = len(ref)
         row = gs.local(gs.f32, 64)
@@ -184,7 +184,7 @@ for task in TASKS:
         if task == "lat":
             x = rng.random(1000, dtype=np.float32)
             t0 = time.perf_counter()
-            run_scale(x)  # premier appel : compilation comprise
+            run_scale(x)  # first call: compilation included
             out["first_call_ms"] = (time.perf_counter() - t0) * 1e3
             for _ in range(20):
                 run_scale(x)
@@ -200,13 +200,13 @@ for task in TASKS:
             out["big_ok"] = bool(np.allclose(r, x * 3 + 5))
         elif task == "huge":
             n = (1 << 30) // 4
-            base = peak_rss()  # avant l'entrée : surcoût = pic − départ − entrée − sortie
+            base = peak_rss()  # before the input: overhead = peak − start − input − output
             x = np.empty(n, dtype=np.float32)
             x[:] = 1.5
             t0 = time.perf_counter()
             r = run_scale(x)
             out["huge_s"] = time.perf_counter() - t0
-            float(r[::1024].sum())  # toucher les pages du résultat
+            float(r[::1024].sum())  # touch the result's pages
             out["huge_extra_gib"] = (peak_rss() - base - x.nbytes - r.nbytes) / 2**30
             out["huge_ok"] = bool((r[:: 4096] == 9.5).all())
         elif task == "dtw391":
@@ -217,8 +217,8 @@ for task in TASKS:
             out["dtw391_ms"] = t * 1e3
             out["dtw391_err"] = float(np.abs(r - ref).max())
         elif task == "dtw1n":
-            # Comme le benchmark du prototype : 1 référence, séries de 30 points complétées à 32 par des
-            # zéros (le DTW porte donc sur 32 points), N cibles.
+            # Like the prototype's benchmark: 1 reference, series of 30 points padded to 32 with
+            # zeros (the DTW therefore covers 32 points), N targets.
             g = np.random.default_rng(7)
             ref_pad = np.zeros(32, dtype=np.float32)
             ref_pad[:30] = g.standard_normal(30)
@@ -228,7 +228,7 @@ for task in TASKS:
                 tp = np.zeros((n, 32), dtype=np.float32)
                 tp[:, :30] = g.standard_normal((n, 30), dtype=np.float32)
                 for variant, f in run_dtw1n(ref_pad, tp).items():
-                    f()  # préchauffage (compilation, buffers)
+                    f()  # warm-up (compilation, buffers)
                     t, r = best(f, 3)
                     res.setdefault(variant, {})[n] = {"ms": t * 1e3, "sum": float(r.astype(np.float64).sum()),
                                                        "head": r[:3].astype(float).tolist()}
@@ -240,7 +240,7 @@ for task in TASKS:
             out["dtw2000_ms"] = t * 1e3
             out["dtw2000_sum"] = float(r.astype(np.float64).sum())
             out["dtw2000_corner"] = r[:4, :4].astype(float).tolist()
-    except Exception as e:  # une tâche en échec n'empêche pas les autres
+    except Exception as e:  # a failed task does not stop the others
         out[f"{task}_error"] = f"{type(e).__name__}: {e}"[:300]
 out["device"] = str(DEVICE_NAME)
 print("RESULT " + json.dumps(out), flush=True)

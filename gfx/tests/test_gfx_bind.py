@@ -1,4 +1,4 @@
-"""Objets placés par un calcul GPU (`bind_transform`) et flotteurs simulés sur GPU (`GpuFloaters`)."""
+"""Objects placed by a GPU computation (`bind_transform`) and floaters simulated on the GPU (`GpuFloaters`)."""
 
 import numpy as np
 import pytest
@@ -36,7 +36,7 @@ def move_row(src: gs.f32["n", "c8"], dx: gs.f32) -> gs.f32["n", "c8"]:
 
 @pytest.mark.parametrize("scale", [1.0, (0.6, 1.5, 0.9)])
 def test_bound_object_matches_cpu_placement(scale):
-    """Même image qu'avec `pos`/`rot` : ombres, éclairage et échelle propre de l'objet compris."""
+    """Same image as with `pos`/`rot`: shadows, lighting and the object's own scale included."""
     pos, rot = (1.2, 0.9, -0.4), (0.3, 0.8, -0.5)
     expected = _img(_scene(_box(pos=pos, rot=rot, scale=scale)))
     obj = _box(scale=scale)
@@ -60,7 +60,7 @@ def test_bound_position_follows_a_kernel_without_cpu():
         centers.append(red[:, 1].mean())
         trs = move_row(trs, 1.5)
     assert centers[0] + 15 < centers[1] < centers[2] - 15
-    assert obj.x == -2.0  # le CPU n'a rien su
+    assert obj.x == -2.0  # the CPU knew nothing
 
 
 def test_bound_scale_visibility_and_release():
@@ -82,7 +82,7 @@ def test_bound_scale_visibility_and_release():
     for bad in (np.zeros((2, 4), np.float32), np.zeros(8, np.float32)):
         with pytest.raises(ValueError, match="bind_transform"):
             obj.bind_transform(upload_f32(bad))
-    with pytest.raises(ValueError, match="ligne 3"):
+    with pytest.raises(ValueError, match="row 3"):
         obj.bind_transform(upload_f32(np.zeros((2, 8), np.float32)), 3)
 
 
@@ -98,7 +98,7 @@ def test_bound_objects_from_several_arrays_with_instances():
 
 
 def test_picking_uses_the_gpu_position():
-    obj = _box(pos=(50.0, 0.0, 0.0))  # position CPU hors de l'écran
+    obj = _box(pos=(50.0, 0.0, 0.0))  # CPU position off screen
     obj.bind_transform(upload_f32(np.array([[0.0, 0.5, 0.0, 0, 0, 0, 1, 1]], dtype=np.float32)))
     app = gfx.App(256, 144, show_fps=False)
     sc = _scene(obj)
@@ -142,7 +142,7 @@ def _floating(gpu, n, steps, *, kick=None, fps=60):
 
 @pytest.mark.parametrize("n", [1, 2, 3])
 def test_gpu_floaters_match_cpu_floaters(n):
-    """Même trajectoire, rotation, vitesse et sillage que la version CPU, collisions et plongeon compris."""
+    """Same trajectory, rotation, speed and wake as the CPU version, collisions and dive included."""
     cpu, h_cpu = _floating(False, n, 150, kick=60)
     gpu, h_gpu = _floating(True, n, 150, kick=60)
     np.testing.assert_allclose(gpu, cpu, atol=2e-3)
@@ -161,7 +161,7 @@ def test_gpu_floaters_do_not_touch_the_cpu_until_read():
     assert body.node.pos == (1.0, 1.5, 0.0)
     sim.read()
     assert body.node.y < 0.8
-    assert w._h_cpu is None  # la grille n'a jamais été rapatriée
+    assert w._h_cpu is None  # the grid was never copied back
 
 
 def test_gpu_floaters_kicks_are_applied_once():

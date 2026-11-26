@@ -1,4 +1,4 @@
-"""Application temps réel (`App`) : fenêtre native `gs.Window` zéro-copie, multi-scènes et mode headless."""
+"""Real-time application (`App`): zero-copy native `gs.Window`, multiple scenes and headless mode."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ from .ui import FPSOverlay
 
 
 class App:
-    """Boucle d'application `gpusync.gfx` (interactive sur `gs.Window` ou headless pour rendu/tests/ML).
+    """Application loop of `gpusync.gfx` (interactive on `gs.Window`, or headless for rendering / tests / ML).
 
-    Exemple :
-        app = gfx.App(1024, 576, title="Ma démo")
-        app.run(MaScene())
+    Example:
+        app = gfx.App(1024, 576, title="My demo")
+        app.run(MyScene())
     """
 
     def __init__(
@@ -65,10 +65,10 @@ class App:
     def device(self) -> str:
         return self.renderer.active_device
 
-    # ── Gestion multi-scènes ──
+    # ── Multiple scenes ──
 
     def set_scene(self, scene: Scene) -> Scene:
-        """Bascule vers une nouvelle `Scene` (décharge l'ancienne et libère son cache VRAM)."""
+        """Switches to a new `Scene` (unloads the old one and frees its VRAM cache)."""
         if self.scene is not None and self.scene is not scene:
             self.scene.unload()
             self.scene.app = None
@@ -88,7 +88,7 @@ class App:
         if self.window is not None:
             self.window.close()
 
-    # ── Picking & captures (interactif ou headless) ──
+    # ── Picking & captures (interactive or headless) ──
 
     def pick(self, x: float, y: float, scene: Scene | None = None) -> PickResult | None:
         sc = scene or self.scene
@@ -97,7 +97,7 @@ class App:
         return self.renderer.pick(sc, x, y)
 
     def dispatch_surface_event(self, ev: dict[str, Any], scene: Scene | None = None) -> bool:
-        """Transmet un événement souris vers une surface 3D interactive (écran UI/2D dans le monde)."""
+        """Forwards a mouse event to an interactive 3D surface (a UI / 2D screen in the world)."""
         sc = scene or self.scene
         if sc is None or not sc._has_interactive_rt:
             return False
@@ -117,25 +117,25 @@ class App:
         return False
 
     def render_frame(self, scene: Scene | None = None, *, profile: bool = False, host_out: bool = False) -> gs.Array:
-        """Rend une image de `scene` sur GPU (fonctionne sans fenêtre, mode headless)."""
+        """Renders a frame of `scene` on the GPU (works without a window, headless mode)."""
         sc = scene if scene is not None else self.scene
         if sc is None:
-            raise RuntimeError("Aucune scène active : passez `scene` ou appelez `app.set_scene(...)`.")
+            raise RuntimeError("No active scene: pass `scene` or call `app.set_scene(...)`.")
         if sc is not self.scene:
             self.set_scene(sc)
         return self.renderer.render_frame(sc, profile=profile, host_out=host_out)
 
     def render_rgba(self, scene: Scene | None = None, *, profile: bool = False) -> np.ndarray:
-        """Rend une image et renvoie une copie NumPy `(H, W, 4)` uint8 (mode headless inclus)."""
+        """Renders a frame and returns a NumPy copy `(H, W, 4)` uint8 (headless mode included)."""
         sc = scene if scene is not None else self.scene
         if sc is None:
-            raise RuntimeError("Aucune scène active : passez `scene` ou appelez `app.set_scene(...)`.")
+            raise RuntimeError("No active scene: pass `scene` or call `app.set_scene(...)`.")
         if sc is not self.scene:
             self.set_scene(sc)
         return self.renderer.render_rgba(sc, profile=profile).copy()
 
     def screenshot(self, path: str | Path, scene: Scene | None = None) -> Path:
-        """Enregistre une image PNG de la scène (nécessite Pillow)."""
+        """Saves a PNG image of the scene (needs Pillow)."""
         from PIL import Image
 
         p = Path(path)
@@ -144,9 +144,9 @@ class App:
         return p
 
     def benchmark(self, scene: Scene, *, frames: int = 120, dt: float = 1.0 / 60.0) -> dict[str, Any]:
-        """Exécute un benchmark GPU pur en continu (sans attente écran) et renvoie les stats."""
+        """Runs a pure GPU benchmark continuously (no screen wait) and returns the stats."""
         self.set_scene(scene)
-        # Échauffement
+        # Warm-up
         self.renderer.render_frame(scene)
         gs.sync(self.renderer.device)
 
@@ -174,7 +174,7 @@ class App:
             "passes_ms": acc,
         }
 
-    # ── Contrôleur de caméra par défaut (orbit & free-fly) ──
+    # ── Default camera controller (orbit & free-fly) ──
 
     def _apply_camera_controls(self, cam: Camera3D, dt: float) -> None:
         inp = self.input
@@ -251,7 +251,7 @@ class App:
     # ── Boucle interactive native `gs.Window` ──
 
     def run(self, scene: Scene) -> None:
-        """Ouvre la fenêtre native `gs.Window` et lance la boucle temps réel zéro-copie."""
+        """Opens the native `gs.Window` and starts the zero-copy real-time loop."""
         req_dev = self.renderer.device
         win_dev = req_dev if req_dev and req_dev.split(":")[0] in ("metal", "vulkan", "dx12") else None
 
@@ -262,7 +262,7 @@ class App:
             self.set_scene(scene)
             self._running = True
 
-            # Échauffement GPU avant le chrono
+            # GPU warm-up before timing
             fb0 = self.renderer.render_frame(self.scene)
             win.present(fb0)
 
@@ -314,13 +314,13 @@ class App:
                     if not win.open or not self._running:
                         break
 
-                    # Peut avoir changé de scène pendant on_event / clic bouton UI
+                    # The scene may have changed during on_event / a UI button click
                     cur_scene = self.scene
                     assert cur_scene is not None
                     if self.camera_controls and cur_scene.cameras and cur_scene.objects:
                         self._apply_camera_controls(cur_scene.camera, dt)
                     cur_scene.update(dt)
-                    # Mettre à jour les sous-scènes éventuelles rendues dans des RenderTargets
+                    # Update the sub-scenes rendered into RenderTargets, if any
                     for rt in cur_scene._render_targets:
                         if rt.scene is not None and rt.scene is not cur_scene:
                             rt.scene._ensure_loaded(self)
@@ -330,7 +330,7 @@ class App:
                     assert cur_scene is not None
 
                     if now >= stats_next:
-                        # Quatre images d'affilée : une seule, isolée, mesure surtout le réveil du GPU
+                        # Four frames in a row: a single isolated one mostly measures the GPU waking up
                         gs.sync(self.renderer.device)
                         t_g0 = time.perf_counter()
                         for _ in range(4):
@@ -352,7 +352,7 @@ class App:
                             cur_scene.ui.invalidate()
                         win.set_title(
                             f"{self.title} | GPU {self.fps_gpu:5.0f} FPS ({self.gpu_ms:4.2f} ms) · "
-                            f"Écran {self.fps_display:4.0f} FPS | {self.renderer.active_device}"
+                            f"Screen {self.fps_display:4.0f} FPS | {self.renderer.active_device}"
                         )
                     else:
                         fb = self.renderer.render_frame(cur_scene)

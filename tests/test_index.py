@@ -1,7 +1,7 @@
-"""Jalon M2 : kernels avec index, dimensions nommées, plusieurs sorties, tableaux locaux.
+"""Milestone M2: indexed kernels, named dimensions, several outputs, local arrays.
 
-Chaque kernel est comparé, sur chaque périphérique présent, à une référence NumPy ; le DTW est aussi
-comparé au résultat du prototype GPUsync (tests/data, calculé par l'ancienne bibliothèque).
+Each kernel is compared, on every available device, with a NumPy reference; the DTW is also
+compared with the result of the GPUsync prototype (tests/data, computed by the old library).
 """
 
 from pathlib import Path
@@ -24,7 +24,7 @@ def check(y, ref, rtol=2e-6, atol=1e-5):
         bad = np.flatnonzero(got != ref)
     else:
         bad = np.flatnonzero(~np.isclose(got, ref, rtol=rtol, atol=atol))
-    assert bad.size == 0, f"{bad.size} écart(s), ex. indice {bad[0]} : {got.flat[bad[0]]} au lieu de {ref.flat[bad[0]]}"
+    assert bad.size == 0, f"{bad.size} mismatch(es), e.g. index {bad[0]}: {got.flat[bad[0]]} instead of {ref.flat[bad[0]]}"
 
 
 # ───────────────────────────── kernels ─────────────────────────────
@@ -51,14 +51,14 @@ def matvec(a: gs.f32["m", "k"], v: gs.f32["k"]) -> gs.f32["m"]:
 
 @gs.kernel
 def transpose(a: gs.i32[:, :], b: gs.i32["c", "r"]) -> gs.i32["c", "r"]:
-    # `a` sans noms : sa forme est lue avec a.shape ; `b` ne sert qu'à nommer la sortie.
+    # `a` without names: its shape is read with a.shape; `b` only names the output.
     i, j = gs.index()
     return a[j, i] + b[i, j] * 0 + a.shape[-1] - a.shape[1]
 
 
 @gs.kernel
 def moments(x: gs.f32["n", "t"]) -> (gs.f32["n"], gs.f32["n"], gs.i32["n"]):
-    """Plusieurs sorties : moyenne, écart type et indice du maximum de chaque ligne."""
+    """Several outputs: mean, standard deviation and index of the maximum of each row."""
     i = gs.index()
     t = x.shape[1]
     s = 0.0
@@ -76,13 +76,13 @@ def moments(x: gs.f32["n", "t"]) -> (gs.f32["n"], gs.f32["n"], gs.i32["n"]):
 
 @gs.kernel
 def split(x: gs.f32[:], y: gs.f32[:]) -> (gs.f32[:], gs.f32[:]):
-    """Plusieurs sorties, élément par élément."""
+    """Several outputs, element-wise."""
     return x + y, x * y
 
 
 @gs.kernel
 def prefix(x: gs.f32["n", "t"]) -> gs.f32["n", "t"]:
-    """Tableau local : somme cumulée de chaque ligne, puis relue à l'envers."""
+    """Local array: cumulative sum of each row, then read back in reverse."""
     i, j = gs.index()
     buf = gs.local(gs.f32, 64)
     acc = 0.0
@@ -104,7 +104,7 @@ MAXT = 256
 
 @gs.kernel
 def dtw(x: gs.f32["n", "t"], w: gs.i32) -> gs.f32["n", "n"]:
-    """DTW avec fenêtre de Sakoe-Chiba entre les séries i et j (deux lignes de la matrice dp)."""
+    """DTW with a Sakoe-Chiba window between series i and j (two rows of the dp matrix)."""
     i, j = gs.index()
     t = x.shape[1]
     prev = gs.local(gs.f32, MAXT + 1)
@@ -124,7 +124,7 @@ def dtw(x: gs.f32["n", "t"], w: gs.i32) -> gs.f32["n", "n"]:
 
 
 def dtw_ref(x, w):
-    """Référence NumPy (même algorithme que le prototype, en float64)."""
+    """NumPy reference (same algorithm as the prototype, in float64)."""
     n, t = x.shape
     x = x.astype(np.float64)
     out = np.empty((n, n), dtype=np.float64)
@@ -207,7 +207,7 @@ def test_dtw_like_prototype(dev):
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_chaining_on_device(dev):
-    """La sortie d'un kernel avec index sert d'entrée au suivant, sans repasser par l'hôte."""
+    """The output of an indexed kernel is the input of the next one, without going back through the host."""
     x = RNG.random((60, 4), dtype=np.float32)
     d = pairwise(x, device=dev)
     v = np.ones(60, dtype=np.float32)
@@ -237,25 +237,25 @@ def test_reductions_on_host():
 def test_operators_compare_values_like_numpy():
     x = RNG.random((8, 3), dtype=np.float32)
     d, ref = pairwise(x), pairwise(x).numpy()
-    # Avant : `d == 0` rendait False (comparaison d'objets) et `d + 1` levait TypeError
+    # Before: `d == 0` returned False (object comparison) and `d + 1` raised TypeError
     eq = d == 0
     assert isinstance(eq, np.ndarray) and eq.dtype == bool and eq.sum() == 8
     assert np.array_equal(d + 1, ref + 1) and np.array_equal(1 - d, 1 - ref) and np.array_equal(-d, -ref)
     assert np.array_equal(d * d, ref * ref) and np.array_equal(d >= 0.5, ref >= 0.5)
     assert np.array_equal(np.maximum(d, 0.5), np.maximum(ref, 0.5)) and np.array_equal(ref + d, 2 * ref)
-    # Lu sans être consommé : passer d à un autre kernel reste possible, et il garde son identité (clé de dict)
+    # Read without being consumed: d can still be passed to another kernel, and it keeps its identity (dict key)
     assert np.allclose(matvec(d, np.ones(8, np.float32)), ref.sum(axis=1))
     assert {d: 1}[d] == 1 and d in [d]
 
 
 def test_shape_errors():
-    with pytest.raises(gs.ShapeMismatch, match="dimension 'k' incohérente : 'a' → 4, 'v' → 5"):
+    with pytest.raises(gs.ShapeMismatch, match="inconsistent dimension 'k': 'a' → 4, 'v' → 5"):
         matvec(np.zeros((3, 4), np.float32), np.zeros(5, np.float32))
-    with pytest.raises(gs.ShapeMismatch, match=r"'x' doit avoir 2 dimension\(s\) \[n, t\]"):
+    with pytest.raises(gs.ShapeMismatch, match=r"'x' must have 2 dimension\(s\) \[n, t\]"):
         pairwise(np.zeros(10, np.float32))
-    with pytest.raises(TypeError, match="3 tableau"):
+    with pytest.raises(TypeError, match="3 array"):
         moments(np.zeros((3, 4), np.float32), out=np.zeros(3, np.float32))
-    with pytest.raises(gs.ShapeMismatch, match="out : forme"):
+    with pytest.raises(gs.ShapeMismatch, match="out: shape"):
         split(np.zeros(4, np.float32), np.zeros(4, np.float32), out=(np.zeros(4, np.float32), np.zeros(3, np.float32)))
 
 

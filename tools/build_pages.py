@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Site de documentation (GitHub Pages) : docs/*.md → docs/pages/*.html, dans la direction artistique de
-bio.galtech.cc.
+"""Documentation website (GitHub Pages): docs/*.md → docs/pages/*.html, in the visual style of bio.galtech.cc.
 
-    python3 tools/build_pages.py            # régénère docs/pages
-    python3 tools/build_pages.py --check    # échoue si docs/pages n'est pas à jour (tests, CI)
+    python3 tools/build_pages.py            # regenerates docs/pages
+    python3 tools/build_pages.py --check    # fails if docs/pages is not up to date (tests, CI)
 
-Bibliothèque standard uniquement. Le convertisseur Markdown couvre ce qu'utilise docs/ : titres, paragraphes,
-listes, tableaux, blocs de code, code en ligne, gras, italique, liens. Les blocs ```python sont marqués « vérifié » :
-tests/test_docs.py les exécute.
+Standard library only. The Markdown converter covers what docs/ uses: headings, paragraphs, lists, tables, code
+blocks, inline code, bold, italics, links. ```python blocks are marked "verified": tests/test_docs.py runs them.
 """
 
 from __future__ import annotations
@@ -23,17 +21,17 @@ OUT = DOCS / "pages"
 REPO = "https://github.com/GalTechDev/GPUsync"
 BRANCH = "new-rust"
 
-# Ordre du menu, icône (Material Symbols) et titre court de chaque page
+# Menu order, icon (Material Symbols) and short title of each page
 PAGES = [
     ("installation", "download", "Installation"),
-    ("kernels", "code", "Écrire un kernel"),
-    ("resultats", "database", "Résultats et volumes"),
-    ("peripheriques", "developer_board", "Périphériques"),
-    ("atomiques", "scatter_plot", "Atomiques"),
-    ("groupes", "hub", "Groupes de threads"),
-    ("fenetre", "desktop_windows", "Fenêtre"),
-    ("erreurs", "bug_report", "Erreurs et performances"),
-    ("reference", "menu_book", "Référence"),
+    ("kernels", "code", "Writing a kernel"),
+    ("results", "database", "Results and data"),
+    ("devices", "developer_board", "Devices"),
+    ("atomics", "scatter_plot", "Atomics"),
+    ("groups", "hub", "Thread groups"),
+    ("window", "desktop_windows", "Window"),
+    ("errors", "bug_report", "Errors and performance"),
+    ("reference", "menu_book", "Reference"),
 ]
 
 FONTS = (
@@ -43,7 +41,7 @@ FONTS = (
 ICONS = "https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0..1,0&display=block"
 
 
-# ───────────────────────── Coloration du code ─────────────────────────
+# ───────────────────────── Code highlighting ─────────────────────────
 
 _PY = re.compile(
     r"(?P<com>#[^\n]*)"
@@ -72,16 +70,16 @@ def highlight(code: str, lang: str) -> str:
 
 
 def code_block(code: str, lang: str, *, show_badge: bool = True) -> str:
-    label = {"python": "Python", "py": "Python", "bash": "Terminal", "text": "Sortie"}.get(lang, lang or "Code")
+    label = {"python": "Python", "py": "Python", "bash": "Terminal", "text": "Output"}.get(lang, lang or "Code")
     if lang == "python":
-        badge = '<span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span>'
+        badge = '<span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span>'
     elif lang == "py":
-        badge = '<span class="badge badge-muted" title="Extrait non exécuté par les tests">Extrait</span>'
+        badge = '<span class="badge badge-muted" title="Excerpt not run by the tests">Excerpt</span>'
     else:
         badge = ""
     if not show_badge:
         badge = ""
-    copy = '<button class="copy" type="button">Copier</button>' if lang != "text" else ""
+    copy = '<button class="copy" type="button">Copy</button>' if lang != "text" else ""
     return (
         f'<div class="code"><div class="code-head"><span>{label}</span>{badge}<span class="spacer"></span>{copy}</div>'
         f"<pre><code>{highlight(code.rstrip(), lang)}</code></pre></div>"
@@ -99,7 +97,7 @@ def slug(text: str) -> str:
 
 
 def link_target(url: str) -> str:
-    """Liens entre pages de docs/ → pages du site ; vers le reste du dépôt → GitHub."""
+    """Links between docs/ pages → site pages; to the rest of the repository → GitHub."""
     if re.match(r"^[a-z]+://", url) or url.startswith("#"):
         return url
     path, _, frag = url.partition("#")
@@ -117,7 +115,7 @@ def link_target(url: str) -> str:
 
 
 def inline(text: str) -> str:
-    """Code en ligne, liens, gras, italique ; le reste est échappé."""
+    """Inline code, links, bold, italics; everything else is escaped."""
     parts = re.split(r"(`[^`]+`)", text)
     out = []
     for p in parts:
@@ -129,7 +127,7 @@ def inline(text: str) -> str:
         s = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"<em>\1</em>", s)
         out.append(s)
     s = "".join(out)
-    # Liens après coup : leur texte peut contenir du code
+    # Links last: their text may contain code
     return re.sub(
         r"\[([^\]]+)\]\(([^)\s]+)\)",
         lambda m: f'<a href="{html.escape(link_target(html.unescape(m.group(2))))}">{m.group(1)}</a>',
@@ -143,7 +141,7 @@ def split_row(line: str) -> list[str]:
 
 
 def markdown(text: str) -> tuple[str, str, str, list[tuple[str, str]]]:
-    """Rend un document : (titre, chapeau, corps HTML, sommaire [(ancre, titre)])."""
+    """Renders a document: (title, lead, HTML body, table of contents [(anchor, title)])."""
     lines = text.split("\n")
     title, lead, body, toc = "", "", [], []
     i, n = 0, len(lines)
@@ -229,11 +227,11 @@ def markdown(text: str) -> tuple[str, str, str, list[tuple[str, str]]]:
     return title, lead, "\n".join(body), toc
 
 
-# ───────────────────────── Gabarit ─────────────────────────
+# ───────────────────────── Template ─────────────────────────
 
 
 def nav(current: str) -> str:
-    items = [f'<a href="index.html"{_cur(current, "index")}><span class="icon">home</span>Accueil</a>']
+    items = [f'<a href="index.html"{_cur(current, "index")}><span class="icon">home</span>Home</a>']
     items.append('<div class="nav-group">Guide</div>')
     for name, icon, short in PAGES:
         if name == "reference":
@@ -249,7 +247,7 @@ def _cur(current: str, name: str) -> str:
 def layout(*, name: str, title: str, top: str, description: str, main: str, toc: str = "", version: str) -> str:
     wide = "" if toc else " wide"
     return f"""<!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -269,21 +267,21 @@ def layout(*, name: str, title: str, top: str, description: str, main: str, toc:
 <nav class="nav">
 {nav(name)}
 </nav>
-<div class="side-foot">Licence MIT · <a href="{REPO}/tree/{BRANCH}">Code source</a></div>
+<div class="side-foot">MIT licence · <a href="{REPO}/tree/{BRANCH}">Source code</a></div>
 </aside>
 <div class="scrim"></div>
 <div class="page">
 <header class="top">
 <button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
 <h1 class="top-title">{html.escape(top)}</h1>
-<button class="btn btn-plain theme-toggle" type="button" aria-label="Thème"><span class="icon">dark_mode</span></button>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Theme"><span class="icon">dark_mode</span></button>
 <a class="btn" href="{REPO}/tree/{BRANCH}"><span class="label">GitHub</span><span class="icon">terminal</span></a>
 </header>
 <main class="content{wide}">
 {main}
 {toc}
 </main>
-<footer class="footer"><span>GPUsync · kernels GPU en Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Généré depuis docs/ par tools/build_pages.py</span></footer>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
 </div>
 </body>
 </html>
@@ -299,16 +297,16 @@ def doc_page(name: str, md: str, version: str) -> str:
     nxt = PAGES[k + 1] if k + 1 < len(PAGES) else None
     pager = '<nav class="pager">'
     if prev:
-        pager += f'<a href="{prev[0]}.html"><span class="dir">← Précédent</span><span class="name">{html.escape(prev[2])}</span></a>'
+        pager += f'<a href="{prev[0]}.html"><span class="dir">← Previous</span><span class="name">{html.escape(prev[2])}</span></a>'
     if nxt:
-        pager += f'<a class="next" href="{nxt[0]}.html"><span class="dir">Suivant →</span><span class="name">{html.escape(nxt[2])}</span></a>'
+        pager += f'<a class="next" href="{nxt[0]}.html"><span class="dir">Next →</span><span class="name">{html.escape(nxt[2])}</span></a>'
     pager += "</nav>"
     head = f'<h2 class="lead-title">{inline(title)}</h2>' + (f'<p class="lead">{lead}</p>' if lead else "")
     main = f'<article class="doc">{head}<hr class="rule">{body}{pager}</article>'
     toc_html = ""
     if len(toc) >= 2:
         links = "".join(f'<a href="#{a}">{t}</a>' for a, t in toc)
-        toc_html = f'<aside class="toc" aria-label="Sur cette page"><div class="toc-title">Sur cette page</div>{links}</aside>'
+        toc_html = f'<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div>{links}</aside>'
     plain = re.sub(r"<[^>]+>", "", lead)
     return layout(
         name=name, title=f"{re.sub(r'<[^>]+>', '', inline(title))} — GPUsync", top=short,
@@ -324,35 +322,35 @@ def normalize(x: gs.f32[:], mean: gs.f32, std: gs.f32) -> gs.f32[:]:
     return (x - mean) / std
 
 x = np.random.rand(1_000_000).astype(np.float32)
-y = normalize(x, x.mean(), x.std())     # calcul lancé sur le GPU
-print(y[:5])                            # attend la fin et rapatrie'''
+y = normalize(x, x.mean(), x.std())     # runs on the GPU
+print(y[:5])                            # waits for the result and copies it back'''
 
 FEATURES = [
-    ("Kernels en Python", "Natif",
-     "On écrit le calcul d'une case du résultat, avec des types simples. GPUsync le traduit et l'exécute pour toutes les cases en parallèle.",
+    ("Kernels in Python", "Native",
+     "You write how one cell of the result is computed, with simple types. GPUsync translates it and runs it for every cell in parallel.",
      ["@gs.kernel", "gs.index()", "gs.f32", "gs.i64"]),
-    ("Tous les GPU", "Portable",
-     "Le même code sur une carte NVIDIA, un Mac ou un portable à GPU intégré. Le périphérique est choisi selon ce que le kernel demande.",
+    ("Every GPU", "Portable",
+     "The same code on an NVIDIA card, a Mac or a laptop with an integrated GPU. The device is chosen from what the kernel needs.",
      ["CUDA", "METAL", "VULKAN", "DX12", "OPENCL"]),
-    ("Sans limite de taille", "Out-of-core",
-     "Entrées et sorties plus grandes que la mémoire du GPU, ou que la mémoire centrale : le calcul est découpé et les transferts recouverts.",
+    ("No size limit", "Out-of-core",
+     "Inputs and outputs larger than GPU memory, or than main memory: the computation is split and transfers are overlapped.",
      ["np.memmap", "out=", ".stream()"]),
-    ("Asynchrone et interop", "Moderne",
-     "Les résultats restent sur le GPU jusqu'à leur lecture. await, Jupyter, plusieurs threads, échange sans copie par DLPack.",
+    ("Async and interop", "Modern",
+     "Results stay on the GPU until they are read. await, Jupyter, several threads, zero-copy exchange through DLPack.",
      ["ASYNCIO", "DLPACK", "PYTORCH"]),
-    ("Groupes et atomiques", "Avancé",
-     "Mémoire partagée, barrières vérifiées à la compilation, écritures atomiques, Tensor Cores pour les produits de matrices d'octets.",
+    ("Groups and atomics", "Advanced",
+     "Shared memory, barriers checked at compile time, atomic writes, Tensor Cores for byte matrix products.",
      ["gs.shared", "gs.barrier", "gs.atomic_add"]),
-    ("Fenêtre native", "Temps réel",
-     "Une image calculée sur le GPU passe directement à l'écran, sans repasser par la mémoire centrale.",
-     ["gs.Window", "ZÉRO COPIE"]),
+    ("Native window", "Real time",
+     "An image computed on the GPU goes straight to the screen, without going through main memory.",
+     ["gs.Window", "ZERO COPY"]),
 ]
 
 STATS = [
-    ("5", "backends : CUDA, Metal, Vulkan, DX12, OpenCL"),
-    ("× 45", "plus rapide que NumPy : histogramme de 100 millions de valeurs (Apple M5 Pro)"),
-    ("100 % portable", "le même code sur chaque machine, sans SDK GPU à installer : les pilotes présents suffisent"),
-    ("0 copie", "sur les GPU à mémoire unifiée"),
+    ("5", "backends: CUDA, Metal, Vulkan, DX12, OpenCL"),
+    ("× 45", "faster than NumPy: histogram of 100 million values (Apple M5 Pro)"),
+    ("100 % portable", "the same code on every machine, no GPU SDK to install: the drivers already there are enough"),
+    ("0 copies", "on unified-memory GPUs"),
 ]
 
 
@@ -378,28 +376,28 @@ def home(descriptions: dict[str, str], version: str) -> str:
 <section class="hero">
 <div>
 <h2 class="hero-title">GPUsync</h2>
-<p class="hero-sub">Écrire des kernels GPU en Python, et les exécuter sur n'importe quel GPU.</p>
+<p class="hero-sub">Write GPU kernels in Python, and run them on any GPU.</p>
 <div class="hero-actions">
-<a class="btn btn-primary" href="installation.html"><span class="icon">download</span>Installer</a>
-<a class="btn" href="kernels.html"><span class="icon">code</span>Premier kernel</a>
+<a class="btn btn-primary" href="installation.html"><span class="icon">download</span>Install</a>
+<a class="btn" href="kernels.html"><span class="icon">code</span>First kernel</a>
 </div>
 </div>
 <div class="callout">{code_block(HOME_CODE, "py", show_badge=False)}</div>
 </section>
 <div class="stats">{stats}</div>
-<h2 class="section-title">Ce que fait GPUsync</h2>
-<p class="section-lead">Une bibliothèque Python, un cœur en Rust, aucune dépendance GPU à installer.</p>
+<h2 class="section-title">What GPUsync does</h2>
+<p class="section-lead">A Python library with a Rust core, and no GPU dependency to install.</p>
 <div class="cards">{features}</div>
 <h2 class="section-title">Documentation</h2>
-<p class="section-lead">Chaque exemple écrit en Python est exécuté par les tests : marqué <span class="badge badge-ok">Vérifié</span>, il fonctionne tel quel.</p>
+<p class="section-lead">Every Python example is run by the tests: marked <span class="badge badge-ok">Verified</span>, it works as written.</p>
 <div class="cards">{docs_cards}</div>
-<h2 class="section-title">Moteur graphique</h2>
-<p class="section-lead">Rendu 2D et 3D, fluides, atmosphère et météo : le paquet séparé <code>gpusync-gfx</code>, écrit avec GPUsync.</p>
-<div class="cards">{card("gpusync-gfx", "Optionnel", "Installé en plus de la bibliothèque, il s'importe sous le nom gpusync.gfx. Sans lui, GPUsync fonctionne normalement.", ["pip install gpusync-gfx", "import gpusync.gfx"], f"{REPO}/tree/{BRANCH}/gfx")}</div>
+<h2 class="section-title">Graphics engine</h2>
+<p class="section-lead">2D and 3D rendering, fluids, atmosphere and weather: the separate <code>gpusync-gfx</code> package, written with GPUsync.</p>
+<div class="cards">{card("gpusync-gfx", "Optional", "Installed on top of the library, it is imported as gpusync.gfx. Without it, GPUsync works normally.", ["pip install gpusync-gfx", "import gpusync.gfx"], f"{REPO}/tree/{BRANCH}/gfx")}</div>
 </div>"""
     return layout(
-        name="index", title="GPUsync — kernels GPU en Python", top="Présentation",
-        description="Écrire des kernels GPU en Python et les exécuter sur CUDA, Metal, Vulkan, DX12 et OpenCL.",
+        name="index", title="GPUsync — GPU kernels in Python", top="Overview",
+        description="Write GPU kernels in Python and run them on CUDA, Metal, Vulkan, DX12 and OpenCL.",
         main=main, version=version,
     )
 
@@ -409,7 +407,7 @@ FAVICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect w
 
 
 def build() -> dict[Path, str]:
-    """Contenu de chaque fichier généré."""
+    """Contents of every generated file."""
     version = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(encoding="utf-8"), re.M).group(1)
     index = (DOCS / "README.md").read_text(encoding="utf-8")
     descriptions = {}
@@ -421,21 +419,29 @@ def build() -> dict[Path, str]:
     return files
 
 
+def _orphans(files: dict[Path, str]) -> list[Path]:
+    """Generated pages left over from docs that were renamed or removed."""
+    return sorted(p for p in OUT.glob("*.html") if p not in files)
+
+
 def main() -> int:
     files = build()
     if "--check" in sys.argv:
         stale = [p for p, text in files.items() if not p.exists() or p.read_text(encoding="utf-8") != text]
+        stale += _orphans(files)
         if stale:
-            print("docs/pages n'est pas à jour, lancez : python3 tools/build_pages.py")
+            print("docs/pages is not up to date, run: python3 tools/build_pages.py")
             for p in stale:
                 print("  ", p.relative_to(ROOT))
             return 1
-        print("docs/pages est à jour")
+        print("docs/pages is up to date")
         return 0
+    for p in _orphans(files):
+        p.unlink()
     for p, text in files.items():
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
-    print(f"{len(files)} fichiers écrits dans {OUT.relative_to(ROOT)}")
+    print(f"{len(files)} files written to {OUT.relative_to(ROOT)}")
     return 0
 
 

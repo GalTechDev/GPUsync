@@ -1,12 +1,12 @@
-"""Tests du framework graphique `gpusync.gfx` (Jalon 1) :
-- Cycle de vie `Scene` (`load`, `update`, `unload`, multi-scènes `app.set_scene`),
-- Hiérarchie `Node` / `Object3D` (matrices monde, visibilité héritée),
-- Export / import `.scene.json` (primitives, `.obj`, matériaux, `PointLight`, `SpotLight`, caméras/viewports),
-- Multi-caméras (`Viewport` split-screen + minimap + projection ortho),
-- `SpotLight` (cône éclairé vs hors cône),
-- Picking 3D exact `O(1)` (`object`, `world_pos`, `uv`) + priorité multi-viewport,
-- `UILayer` GPU (`Panel`, `Label`, `Button`, `ProgressBar`, clic & consommation d'événement),
-- Parité GPU / CPU du rendu RGBA.
+"""Tests of the `gpusync.gfx` graphics framework (milestone 1):
+- `Scene` life cycle (`load`, `update`, `unload`, multiple scenes with `app.set_scene`),
+- `Node` / `Object3D` hierarchy (world matrices, inherited visibility),
+- `.scene.json` export / import (primitives, `.obj`, materials, `PointLight`, `SpotLight`, cameras / viewports),
+- Multiple cameras (split-screen `Viewport` + minimap + ortho projection),
+- `SpotLight` (lit cone vs outside the cone),
+- Exact `O(1)` 3D picking (`object`, `world_pos`, `uv`) + multi-viewport priority,
+- GPU `UILayer` (`Panel`, `Label`, `Button`, `ProgressBar`, click & event consumption),
+- GPU / CPU parity of the RGBA rendering.
 """
 
 from __future__ import annotations
@@ -66,17 +66,17 @@ def test_hierarchy_transforms_and_visibility():
     child = sc.add(gfx.Object3D("child", gfx.Mesh.cube(1.0), pos=(0.0, 0.0, 3.0)), parent=parent)
     models, _, _, _ = sc.build_world_transforms()
     m = models[0].reshape(4, 4)
-    # Rotation +90° autour de Y envoie (0, 0, 3) vers (3, 0, 0), puis translation +2 → (5, 0, 0)
+    # A +90° rotation around Y sends (0, 0, 3) to (3, 0, 0), then a +2 translation → (5, 0, 0)
     np.testing.assert_allclose(m[:3, 3], [5.0, 0.0, 0.0], atol=1e-4)
 
-    # Cacher le parent met à zéro le bloc 3×3 de l'enfant (triangles ignorés sans recompiler)
+    # Hiding the parent zeroes the child's 3×3 block (triangles ignored without recompiling)
     parent.visible = False
     models2, _, _, _ = sc.build_world_transforms()
     np.testing.assert_allclose(models2[0].reshape(4, 4)[:3, :3], 0.0, atol=1e-6)
 
 
 def test_scene_json_roundtrip(tmp_path):
-    # Mini .obj pour vérifier aussi la sérialisation relative d'assets externes
+    # Mini .obj to also check the relative serialization of external assets
     obj_path = tmp_path / "tri.obj"
     obj_path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
 
@@ -101,7 +101,7 @@ def test_scene_json_roundtrip(tmp_path):
     assert isinstance(loaded.lights[1], gfx.SpotLight)
     assert loaded.lights[1].outer_deg == pytest.approx(25.0)
 
-    # Classe hybride avec `source = ...`
+    # Hybrid class with `source = ...`
     class LoadedLevel(gfx.Scene):
         source = scene_file
 
@@ -123,14 +123,14 @@ def test_picking_3d_and_uv():
     )
     app.render_frame(sc)
 
-    # Centre de l'écran : doit toucher la face avant (z = +1.0) de `target`
+    # Screen centre: must hit the front face (z = +1.0) of `target`
     hit = app.pick(app.width // 2, app.height // 2)
     assert hit is not None
     assert hit.object is target_box
     assert hit.world_pos[2] == pytest.approx(1.0, abs=0.1)
     assert 0.0 <= hit.uv[0] <= 1.0 and 0.0 <= hit.uv[1] <= 1.0
 
-    # Coin supérieur gauche : ciel vide
+    # Top-left corner: empty sky
     assert app.pick(2, 2) is None
 
 
@@ -159,11 +159,11 @@ def test_multi_camera_split_screen_and_ortho():
 
     rgba = app.render_rgba(sc)
     assert rgba.shape == (app.height, app.width, 4)
-    # Bordure colorée sur le bord gauche du viewport droit (x = app.width // 2)
+    # Coloured border on the left edge of the right viewport (x = app.width // 2)
     bx = app.width // 2
     assert tuple(int(c) for c in rgba[app.height // 2, bx, :3]) == (255, 80, 40)
 
-    # Picking dans chaque moitié renvoie la bonne caméra !
+    # Picking in each half returns the right camera!
     hit_l = app.pick(app.width // 4, app.height // 2)
     hit_r = app.pick((3 * app.width) // 4, app.height // 2)
     assert hit_l is not None and hit_l.camera is sc.cameras[0]
@@ -184,7 +184,7 @@ def test_spotlight_illuminates_cone():
     sc.add_light(spot)
     lit = app.render_rgba(sc)
 
-    # Le centre sous le spot doit être nettement plus lumineux que sans spot
+    # The centre under the spot must be clearly brighter than without the spot
     cy, cx = app.height // 2, app.width // 2
     assert float(lit[cy, cx, :3].mean()) > float(dark[cy, cx, :3].mean()) + 30.0
 
@@ -209,11 +209,11 @@ def test_ui_layer_rendering_and_button_click():
     sc.ui.add(gfx.ProgressBar(x=12, y=54, w=110, h=18, value=0.75))
 
     rgba = app.render_rgba(sc)
-    # Bordure blanche du bouton à (12, 12) et fond rouge vif à (15, 15)
+    # White border of the button at (12, 12) and bright red background at (15, 15)
     assert tuple(int(c) for c in rgba[12, 12, :3]) == (255, 255, 255)
     assert rgba[15, 15, 0] > 180 and rgba[15, 15, 1] < 60
 
-    # Simulation d'un clic dans le bouton : doit déclencher on_click ET consommer l'événement
+    # Simulated click in the button: must trigger on_click AND consume the event
     assert sc.ui.handle_event({"type": "mouse_move", "x": 30, "y": 25}, app.width, app.height) is False
     assert btn.hovered is True
     assert sc.ui.handle_event({"type": "mouse_down", "button": "left", "x": 30, "y": 25}, app.width, app.height) is True
@@ -224,7 +224,7 @@ def test_ui_layer_rendering_and_button_click():
 def test_gpu_matches_cpu_reference():
     gpu = _gpu_device()
     if gpu is None:
-        pytest.skip("aucun GPU disponible")
+        pytest.skip("no GPU available")
     sc = SimpleScene()
     sc._ensure_loaded()
     sc.camera.bloom = True
@@ -240,7 +240,7 @@ def test_gpu_matches_cpu_reference():
     assert float((diff > 10).mean()) < 0.02
 
 
-# ───────────────────────── Tests Jalon 2 : 2D pur, Textures, RenderTarget & UI-sur-3D ─────────────────────────
+# ───────────────────────── Milestone 2 tests: pure 2D, textures, RenderTarget & UI on 3D ─────────────────────────
 
 
 def test_pure_2d_scene_shapes_sprites_and_particles():
@@ -284,14 +284,14 @@ def test_pbr_textures_live_update_and_json_roundtrip(tmp_path):
     cy, cx = app.height // 2, app.width // 2
     assert rgba_red[cy, cx, 0] > 180 and rgba_red[cy, cx, 0] > int(rgba_red[cy, cx, 2]) + 100
 
-    # Mise à jour dynamique en place (type frame vidéo) → passe au bleu !
+    # Dynamic in-place update (like a video frame) → turns blue!
     blue_frame = np.zeros((8, 8, 4), dtype=np.uint8)
     blue_frame[:, :] = (30, 50, 245, 255)
     tex.update(blue_frame)
     rgba_blue = app.render_rgba(sc)
     assert rgba_blue[cy, cx, 2] > 180 and rgba_blue[cy, cx, 2] > int(rgba_blue[cy, cx, 0]) + 100
 
-    # Export / import `.scene.json` avec recette texture
+    # `.scene.json` export / import with a texture recipe
     sc.objects[0].material.emissive_map = gfx.Texture.checker(size=32, cells=4)
     p = sc.save(tmp_path / "textured.scene.json")
     sc2 = gfx.Scene.from_file(p)
@@ -303,12 +303,12 @@ def test_render_target_2d_and_camera_on_3d_surfaces():
     dev = _gpu_device() or "cpu:0"
     app = gfx.App(256, 144, device=dev, show_fps=False)
 
-    # Scène 2D verte affichée sur un quad 3D à gauche
+    # Green 2D scene shown on a 3D quad on the left
     sub2d = gfx.Scene()
     sub2d.add(gfx.Rect2D(0.0, 0.0, 200.0, 200.0, color=(30, 235, 70, 255)))
     rt_2d = gfx.RenderTarget(128, 128, scene=sub2d, interactive=False)
 
-    # Caméra 3D regardant une sphère rouge affichée sur un quad 3D à droite
+    # 3D camera looking at a red sphere, shown on a 3D quad on the right
     cam_sec = gfx.Camera3D.fixed(pos=(0.0, 0.0, 6.0), target=(0.0, 0.0, 9.0), bloom=False, fxaa=False, shadows=False)
     rt_cam = gfx.RenderTarget(128, 128, camera=cam_sec, interactive=False)
 
@@ -321,10 +321,10 @@ def test_render_target_2d_and_camera_on_3d_surfaces():
 
     rgba = app.render_rgba(sc)
     cy = app.height // 2
-    # Écran de gauche : vert (scène 2D)
+    # Left screen: green (2D scene)
     left_px = rgba[cy, app.width // 4]
     assert left_px[1] > 160 and left_px[1] > int(left_px[0]) + 80
-    # Écran de droite : rouge (caméra 3D filmant la sphère rouge derrière la caméra principale !)
+    # Right screen: red (3D camera filming the red sphere behind the main camera!)
     right_px = rgba[cy, (3 * app.width) // 4]
     assert right_px[0] > 160 and right_px[0] > int(right_px[1]) + 80
 
@@ -335,7 +335,7 @@ def test_interactive_ui_on_3d_surface_click():
 
     clicked = []
     surface_ui = gfx.UILayer()
-    # Bouton couvrant tout le centre du RenderTarget 200×200
+    # Button covering the whole centre of the 200×200 RenderTarget
     surface_ui.add(gfx.Button(20, 20, 160, 160, text="OK", bg=(40, 120, 240, 255), on_click=lambda: clicked.append("3d_ui")))
     rt = gfx.RenderTarget(200, 200, ui=surface_ui, interactive=True)
 
@@ -350,7 +350,7 @@ def test_interactive_ui_on_3d_surface_click():
     assert clicked == ["3d_ui"]
 
 
-# ───────────────────────── Tests Jalon 3 : Compute↔Rendu, Instancing GPU, Post-Effets & glTF/GLB ─────────────────────────
+# ───────────────────────── Milestone 3 tests: compute↔render, GPU instancing, post-effects & glTF/GLB ─────────────────────────
 
 
 @gs.kernel
@@ -381,12 +381,12 @@ def test_dynamic_gpu_vertices_zero_copy():
     cube = sc.add(gfx.Object3D("dyn", gfx.Mesh.cube(1.4, sub=1), gfx.Material.glow((0.2, 0.9, 1.0), 1.0)))
 
     before = app.render_rgba(sc).copy()
-    # Déplacer les sommets directement en VRAM vers +1.5 en Y sans toucher CPU !
+    # Move the vertices directly in VRAM to +1.5 in Y without touching the CPU!
     base_gpu = cube.base_positions_gpu(device=dev)
     cube.gpu_positions = _shift_verts_up(base_gpu, 1.6, device=dev)
     after = app.render_rgba(sc)
 
-    # Le centre était lumineux (cube) et redevient ciel sombre après déplacement vers le haut
+    # The centre was bright (cube) and becomes dark sky again after moving up
     cy, cx = app.height // 2, app.width // 2
     assert float(before[cy, cx, :3].mean()) > float(after[cy, cx, :3].mean()) + 30.0
     assert float(after[cy - 35, cx, :3].mean()) > float(before[cy - 35, cx, :3].mean()) + 30.0
@@ -398,7 +398,7 @@ def test_gpu_instanced_mesh_trs():
     sc = gfx.Scene()
     sc.camera = gfx.Camera3D.fixed(pos=(0.0, 0.0, 6.0), target=(0.0, 0.0, 0.0), bloom=False, fxaa=False, shadows=False)
 
-    # 2 instances placées à gauche (-2, 0, 0) et à droite (+2, 0, 0) via gpu_trs
+    # 2 instances placed left (-2, 0, 0) and right (+2, 0, 0) through gpu_trs
     trs = np.zeros((2, 8), dtype=np.float32)
     trs[0] = [-2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4, 1.0]
     trs[1] = [2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4, 1.0]
@@ -409,7 +409,7 @@ def test_gpu_instanced_mesh_trs():
 
     rgba = app.render_rgba(sc)
     cy = app.height // 2
-    # Gauche et droite contiennent les 2 instances orange, le centre est vide (ciel)
+    # Left and right contain the 2 orange instances, the centre is empty (sky)
     assert rgba[cy, app.width // 4, 0] > 180 and rgba[cy, app.width // 4, 0] > int(rgba[cy, app.width // 4, 2]) + 60
     assert rgba[cy, (3 * app.width) // 4, 0] > 180 and rgba[cy, (3 * app.width) // 4, 0] > int(rgba[cy, (3 * app.width) // 4, 2]) + 60
     assert app.pick(app.width // 2, cy) is None
@@ -426,15 +426,15 @@ def test_pluggable_post_effects_builtin_and_custom_kernel():
     sc.camera.fxaa = False
     base = app.render_rgba(sc).copy()
 
-    # Effet intégré Scanlines + ChromaticAberration
+    # Built-in Scanlines + ChromaticAberration effect
     sc.camera.add_effect(gfx.ChromaticAberration(strength=2.0))
     sc.camera.add_effect(gfx.Scanlines(intensity=0.5, pitch=2))
     styled = app.render_rgba(sc).copy()
     assert not np.array_equal(base, styled)
-    # Les lignes paires doivent être nettement assombries par Scanlines
+    # Even rows must be clearly darkened by Scanlines
     assert float(styled[0::2, :, :3].mean()) < float(styled[1::2, :, :3].mean()) * 0.75
 
-    # Effet custom @gs.kernel direct (inversion des couleurs)
+    # Direct custom @gs.kernel effect (colour inversion)
     sc.camera.clear_effects()
     sc.camera.add_effect(_invert_fb)
     inv = app.render_rgba(sc)
@@ -446,13 +446,13 @@ def test_gltf_glb_roundtrip_mesh_and_scene_import(tmp_path):
     mat_orig = gfx.Material.solid((0.2, 0.75, 0.9), metallic=0.8, roughness=0.25)
     glb_path = gfx.write_glb_from_mesh(tmp_path / "crystal.glb", mesh_orig, mat_orig)
 
-    # 1) Chargement direct en Mesh + recette .scene.json
+    # 1) Direct loading as a Mesh + .scene.json recipe
     loaded_mesh = gfx.Mesh.from_gltf(glb_path)
     assert loaded_mesh.num_vertices == mesh_orig.num_vertices
     assert loaded_mesh.num_triangles == mesh_orig.num_triangles
     np.testing.assert_allclose(loaded_mesh.positions, mesh_orig.positions, atol=1e-5)
 
-    # 2) Import complet en nœuds + matériaux PBR dans une Scene
+    # 2) Full import as nodes + PBR materials into a Scene
     sc = gfx.Scene()
     nodes = sc.import_gltf(glb_path)
     assert len(nodes) == 1
@@ -460,7 +460,7 @@ def test_gltf_glb_roundtrip_mesh_and_scene_import(tmp_path):
     assert obj.material.metallic == pytest.approx(0.8, abs=1e-4)
     assert obj.material.albedo[2] == pytest.approx(0.9, abs=1e-4)
 
-    # 3) Sérialisation `.scene.json` préserve la recette glTF relative
+    # 3) `.scene.json` serialization keeps the relative glTF recipe
     sc2 = gfx.Scene()
     sc2.add(gfx.Object3D("c", loaded_mesh, mat_orig))
     sfile = sc2.save(tmp_path / "with_glb.scene.json")
@@ -468,29 +468,29 @@ def test_gltf_glb_roundtrip_mesh_and_scene_import(tmp_path):
     assert sc3.objects[0].mesh.num_triangles == mesh_orig.num_triangles
 
 
-# ───────────────────────── Jalon 4 : Reflets Avancés (HDRI / SSR / Miroir) & Physique ─────────────────────────
+# ───────────────────────── Milestone 4: advanced reflections (HDRI / SSR / mirror) & physics ─────────────────────────
 
 
 def test_hdri_skybox_rendering_and_json(tmp_path: Path):
-    """Une skybox équirectangulaire colore le fond du ciel, éclaire les reflets IBL et survit au JSON."""
+    """An equirectangular skybox colours the sky background, lights the IBL reflections and survives JSON."""
     sc = gfx.Scene()
     sc.camera = gfx.Camera3D.fixed((0.0, 1.0, 5.0), (0.0, 1.0, 0.0), bloom=False, fxaa=False)
-    # Skybox verte unie pour contraste net vs ciel bleu procédural par défaut
+    # Plain green skybox for a sharp contrast with the default procedural blue sky
     green_sky = gfx.Texture.from_array(np.full((32, 64, 4), [20, 235, 45, 255], dtype=np.uint8))
     sc.env = gfx.Environment(skybox=green_sky, skybox_intensity=1.2)
     sc.add(gfx.Object3D("sphere", gfx.Mesh.sphere(0.8), gfx.Material.metal((1.0, 1.0, 1.0), roughness=0.05), pos=(0.0, 1.0, 0.0)))
 
     app = gfx.App(160, 120, show_fps=False)
     img = app.render_rgba(sc)
-    # Coin supérieur gauche = ciel skybox → vert largement dominant
+    # Top-left corner = skybox sky → green clearly dominant
     sky_px = img[10, 10]
     assert int(sky_px[1]) > int(sky_px[0]) + 80
     assert int(sky_px[1]) > int(sky_px[2]) + 80
-    # Centre = sphère miroir reflétant le ciel vert
+    # Centre = mirror sphere reflecting the green sky
     center_px = img[60, 80]
     assert int(center_px[1]) > int(center_px[0]) + 25
 
-    # Studio skybox procédurale + sauvegarde/rechargement JSON
+    # Procedural studio skybox + JSON save / reload
     sc_studio = gfx.Scene()
     sc_studio.env = gfx.Environment(skybox=gfx.Environment.studio_skybox(64, 32), skybox_intensity=1.0)
     sc_studio.add(gfx.Object3D("b", gfx.Mesh.box(1.0)))
@@ -501,7 +501,7 @@ def test_hdri_skybox_rendering_and_json(tmp_path: Path):
 
 
 def test_ssr_reflects_bright_object_on_glossy_floor():
-    """Avec `cam.ssr = True`, un objet émissif brillant au-dessus d'un sol brillant se reflète dessus."""
+    """With `cam.ssr = True`, a bright emissive object above a shiny floor is reflected in it."""
     sc = gfx.Scene()
     sc.env = gfx.Environment(sun=gfx.DirectionalLight(intensity=0.2), fog_density=0.0)
     sc.camera = gfx.Camera3D.fixed((0.0, 2.2, 5.2), (0.0, 0.7, 0.0), bloom=False, fxaa=False, ssr=False)
@@ -528,23 +528,23 @@ def test_ssr_reflects_bright_object_on_glossy_floor():
     sc.camera.ssr_steps = 32
     img_on = app.render_rgba(sc).copy()
 
-    # Zone du sol juste devant la boîte néon rouge (bas-centre de l'image)
+    # Floor area just in front of the red neon box (bottom centre of the image)
     floor_off = img_off[108:148, 96:160, 0].astype(np.float32).mean()
     floor_on = img_on[108:148, 96:160, 0].astype(np.float32).mean()
     assert floor_on > floor_off + 20.0
 
 
 def test_planar_reflection_mirror_sync():
-    """`PlanarReflection` + `Material.mirror` reflète la caméra et projette le reflet 1:1 sur le miroir."""
+    """`PlanarReflection` + `Material.mirror` reflects the camera and projects the reflection 1:1 on the mirror."""
     sc = gfx.Scene()
     sc.camera = gfx.Camera3D.fixed((0.0, 1.5, 4.5), (0.0, 1.5, 0.0), bloom=False, fxaa=False)
     mirror = gfx.PlanarReflection(plane_z=-2.0, width=128, height=96, match_viewport_aspect=False)
     mirror.sync(sc.camera)
-    # Symétrie z' = 2*(-2) - 4.5 = -8.5
+    # Symmetry z' = 2*(-2) - 4.5 = -8.5
     assert mirror.camera.pos[2] == pytest.approx(-8.5, abs=1e-4)
     assert mirror.camera.target[2] == pytest.approx(-4.0, abs=1e-4)
 
-    # Un cube magenta entre la caméra et le miroir doit apparaître dans le miroir
+    # A magenta cube between the camera and the mirror must appear in the mirror
     sc.add(gfx.Object3D("mirror", gfx.Mesh.quad(5.0, 3.5), gfx.Material.mirror(mirror), pos=(0.0, 1.5, -2.0)))
     sc.add(
         gfx.Object3D(
@@ -557,7 +557,7 @@ def test_planar_reflection_mirror_sync():
 
     app = gfx.App(256, 140, show_fps=False)
     img = app.render_rgba(sc)
-    # Le RenderTarget du miroir a été peuplé sur GPU et contient des pixels magenta vifs
+    # The mirror's RenderTarget was filled on the GPU and holds bright magenta pixels
     assert mirror.target._gpu_array is not None
     m_rgba = mirror.target._gpu_array.numpy().view(np.uint8).reshape(96, 128, 4)
     center = m_rgba[48, 64]
@@ -566,7 +566,7 @@ def test_planar_reflection_mirror_sync():
 
 
 def test_physics_world_collisions_triggers_and_raycast():
-    """`PhysicsWorld` gère gravité, rebond sur sol, collision sphère-sphère, triggers et raycasts."""
+    """`PhysicsWorld` handles gravity, bouncing on the ground, sphere-sphere collision, triggers and raycasts."""
     world = gfx.PhysicsWorld(gravity=(0.0, -9.81, 0.0))
     ground_node = gfx.Node("ground")
     world.add_ground(ground_node, y=0.0, restitution=0.8)
@@ -574,7 +574,7 @@ def test_physics_world_collisions_triggers_and_raycast():
     ball = gfx.Node("ball", pos=(0.0, 2.0, 0.0))
     rb_ball = world.add(gfx.RigidBody(ball, gfx.SphereCollider(0.5), mass=1.0, restitution=0.8))
 
-    # Zone trigger traversée par la balle lors de sa chute
+    # Trigger zone crossed by the ball as it falls
     triggered: list[str] = []
     zone = gfx.Node("zone", pos=(0.0, 1.2, 0.0))
     world.add(
@@ -590,11 +590,11 @@ def test_physics_world_collisions_triggers_and_raycast():
     for _ in range(90):
         world.step(1.0 / 60.0)
 
-    # La balle ne passe jamais sous le sol (y >= radius) et a déclenché le trigger
+    # The ball never goes below the ground (y >= radius) and fired the trigger
     assert ball.y >= 0.45
     assert "ball" in triggered
 
-    # Raycast analytique : touche une sphère, une boîte et le sol
+    # Analytical raycast: hits a sphere, a box and the ground
     box_node = gfx.Node("box", pos=(3.0, 1.0, 0.0))
     rb_box = world.add(gfx.RigidBody(box_node, gfx.BoxCollider((0.5, 0.5, 0.5)), static=True))
     hit_box = world.raycast((3.0, 1.0, 5.0), (0.0, 0.0, -1.0))
@@ -607,7 +607,7 @@ def test_physics_world_collisions_triggers_and_raycast():
 
 
 def test_gpu_sphere_physics_to_instanced_mesh():
-    """`GpuSpherePhysics` simule les collisions 100 % GPU et alimente directement `InstancedMesh3D.gpu_trs`."""
+    """`GpuSpherePhysics` simulates collisions 100 % on the GPU and feeds `InstancedMesh3D.gpu_trs` directly."""
     pos = np.array([[-0.3, 1.5, 0.0], [0.3, 1.5, 0.0], [0.0, 0.8, 0.0]], dtype=np.float32)
     vel = np.array([[2.0, 0.0, 0.0], [-2.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=np.float32)
     phys = gfx.GpuSpherePhysics(pos, vel, radii=0.35, gravity=9.81, box_half=3.0, floor_y=0.0, restitution=0.8)
@@ -616,13 +616,13 @@ def test_gpu_sphere_physics_to_instanced_mesh():
         trs_gpu = phys.step(1.0 / 60.0, substeps=2)
 
     p_after = phys.pos_gpu.numpy()
-    # Toutes les sphères restent au-dessus du sol (y >= r) et dans les bornes de la boîte
+    # Every sphere stays above the ground (y >= r) and within the box bounds
     assert np.all(p_after[:, 1] >= 0.34)
     assert np.all(np.abs(p_after[:, 0]) <= 3.0)
-    # Les deux premières sphères qui fonçaient l'une vers l'autre se sont repoussées
+    # The first two spheres rushing toward each other pushed each other back
     assert float(p_after[1, 0] - p_after[0, 0]) > 0.5
 
-    # Branchement direct sur `InstancedMesh3D.gpu_trs` et rendu GPU complet
+    # Direct connection to `InstancedMesh3D.gpu_trs` and full GPU rendering
     sc = gfx.Scene()
     sc.camera = gfx.Camera3D.fixed((0.0, 1.5, 5.5), (0.0, 0.8, 0.0), bloom=False, fxaa=False)
     inst = sc.add(
@@ -636,22 +636,22 @@ def test_gpu_sphere_physics_to_instanced_mesh():
     assert float(img[:, :, :3].std()) > 5.0
 
 
-# ───────────────────────── Fluides 100 % GPU (Eau 3D / SPH 3D / Navier-Stokes 2D) ─────────────────────────
+# ───────────────────────── 100 % GPU fluids (3D water / 3D SPH / 2D Navier-Stokes) ─────────────────────────
 
 
 def test_gpu_water_surface_realistic_and_low_poly_flat():
-    """`GpuWaterSurface` simule les ondes 3D sur GPU en mode lisse réaliste ET flat-shaded low-poly."""
-    # 1) Mode réaliste (maillage indexé lisse)
+    """`GpuWaterSurface` simulates 3D waves on the GPU in smooth realistic mode AND flat-shaded low-poly."""
+    # 1) Realistic mode (smooth indexed mesh)
     w_real = gfx.GpuWaterSurface(gfx.WaterSurfaceConfig.realistic(size=10.0, subdivisions=16))
     w_real.splash(0.0, 0.0, strength=-0.8, radius=0.9)
     for _ in range(8):
         pos_g, norm_g = w_real.step(1.0 / 60.0)
     pos_np = pos_g.numpy()
-    # Les vagues se sont propagées (hauteur non nulle et bornée)
+    # The waves propagated (non-zero, bounded height)
     assert float(np.abs(pos_np[:, 1]).max()) > 0.05
     assert float(np.abs(pos_np[:, 1]).max()) < 3.0
 
-    # 2) Flottaison 2-sens (`FloatingBody`) : une vague proche met la sphère en mouvement
+    # 2) Two-way flotation (`FloatingBody`): a nearby wave sets the sphere moving
     buoy_node = gfx.Node("buoy", pos=(1.0, 0.1, 0.0))
     fb = gfx.FloatingBody(buoy_node, radius=0.45, wave_push=18.0)
     w_real.reset()
@@ -661,10 +661,10 @@ def test_gpu_water_surface_realistic_and_low_poly_flat():
         w_real.step(1.0 / 60.0)
         w_real.step_floating([fb], 1.0 / 60.0)
         excursion = max(excursion, abs(buoy_node.x - 1.0))
-    # L'onde ne crée pas d'eau : la bouée part puis revient, seule l'excursion compte
+    # The wave creates no water: the buoy goes and comes back, only the excursion counts
     assert excursion > 0.015
 
-    # 3) Mode low-poly (maillage non-indexé flat-shaded : les 3 sommets d'un triangle partagent la même normale)
+    # 3) Low-poly mode (non-indexed flat-shaded mesh: the 3 vertices of a triangle share the same normal)
     w_lp = gfx.GpuWaterSurface(gfx.WaterSurfaceConfig.low_poly(size=10.0, subdivisions=8))
     w_lp.splash(0.5, -0.5, strength=-0.9, radius=1.2)
     pos_lp, norm_lp = w_lp.step(1.0 / 60.0)
@@ -673,7 +673,7 @@ def test_gpu_water_surface_realistic_and_low_poly_flat():
     np.testing.assert_allclose(n_lp[:, 0, :], n_lp[:, 2, :], atol=1e-5)
     assert np.all(n_lp[:, :, 1] > 0.0)
 
-    # Rendu complet sur GPU sans copie CPU
+    # Full GPU rendering without CPU copy
     sc = gfx.Scene()
     sc.camera = gfx.Camera3D.fixed((0.0, 4.5, 6.5), (0.0, 0.0, 0.0), bloom=False, fxaa=False)
     obj = sc.add(gfx.Object3D("water_lp", w_lp.mesh, w_lp.material))
@@ -684,7 +684,7 @@ def test_gpu_water_surface_realistic_and_low_poly_flat():
 
 
 def test_gpu_fluid_sph3d_presets_and_instancing():
-    """`GpuFluid3D` simule MAC FLIP 3D O(N) + Raymarching 3D Snell/Beer-Lambert + extraction maillage + low-poly."""
+    """`GpuFluid3D` simulates O(N) 3D MAC FLIP + 3D Snell / Beer-Lambert ray marching + mesh extraction + low-poly."""
     cfg_w = gfx.Fluid3DConfig.water(count=2000)
     assert cfg_w.solver == "mac_flip"
     assert cfg_w.render_mode == "raymarch"
@@ -699,10 +699,10 @@ def test_gpu_fluid_sph3d_presets_and_instancing():
     assert np.all(p[:, 1] >= cfg_w.floor_y)
     assert np.all(np.abs(p[:, 0]) <= bx + 1e-3)
     assert np.all(np.abs(p[:, 2]) <= bz + 1e-3)
-    # Le bloc dam-break s'est nettement déplacé vers la droite (+X)
+    # The dam-break block clearly moved to the right (+X)
     assert float(p[:, 0].mean()) > init_mean_x + 0.15
 
-    # 1) Mode Raymarching 3D volumétrique (Snell + Beer-Lambert + caustiques)
+    # 1) Volumetric 3D ray-marching mode (Snell + Beer-Lambert + caustics)
     sc_surf = gfx.Scene()
     sc_surf.camera = gfx.Camera3D.fixed((0.0, 2.2, 7.0), (0.0, 1.0, 0.0), bloom=False, fxaa=False)
     sc_surf.add(gfx.Object3D("floor", gfx.Mesh.plane(12.0, subdivisions=8), gfx.Material.checker()))
@@ -712,11 +712,11 @@ def test_gpu_fluid_sph3d_presets_and_instancing():
     img_fluid = app.render_rgba(sc_surf)
     assert float(np.abs(img_fluid.astype(np.float32) - img_empty.astype(np.float32)).mean()) > 1.5
 
-    # 2) Extraction de maillage 3D depuis le volume de densité (façon Blender / Low-Poly exportable)
+    # 2) 3D mesh extraction from the density volume (Blender-like, exportable low-poly)
     m_surf = sph_w.extract_surface_mesh()
     assert m_surf.num_triangles > 20
 
-    # 3) Preset low-poly (cubes tournants) + rendu 3D instancié 0-copie
+    # 3) Low-poly preset (spinning cubes) + zero-copy instanced 3D rendering
     cfg_lp = gfx.FluidSPHConfig.low_poly(count=48, mesh_style="cube")
     sph_lp = gfx.GpuFluidSPH3D(cfg_lp, layout="column")
     trs_lp = sph_lp.step(1.0 / 60.0)
@@ -730,12 +730,12 @@ def test_gpu_fluid_sph3d_presets_and_instancing():
 
 def test_gpu_fluid2d_navier_stokes_and_pixel_cel():
     """`GpuFluid2D` simule Navier-Stokes 2D (encre lisse + cel-shaded pixel-art) en 0-copie 2D & 3D."""
-    # 1) Encre réaliste 2D pure (`Sprite2D`)
+    # 1) Realistic pure 2D ink (`Sprite2D`)
     f_ink = gfx.GpuFluid2D(gfx.Fluid2DConfig.ink(width=64, height=48))
     f_ink.splat(0.3, 0.5, 1.0, 0.15, color=(2.0, 0.2, 0.8), radius=0.12, force=3.5)
     for _ in range(8):
         f_ink.step(1.0 / 60.0)
-    # L'encre s'est déplacée vers la droite par advection
+    # The ink moved to the right by advection
     dye_r = f_ink.dr.numpy()
     assert float(dye_r[:, 22:48].max()) > 0.25
 
@@ -746,7 +746,7 @@ def test_gpu_fluid2d_navier_stokes_and_pixel_cel():
     img2d = app.render_rgba(sc2d)
     assert int(img2d[:, :, 0].max()) > 120
 
-    # 2) Mode low-poly pixel-art cel-shaded (`posterize_levels > 1`, `bilinear=False`) plaqué sur un quad 3D
+    # 2) Low-poly pixel-art cel-shaded mode (`posterize_levels > 1`, `bilinear=False`) mapped on a 3D quad
     f_pix = gfx.GpuFluid2D(gfx.Fluid2DConfig.low_poly_pixel(width=40, height=32))
     assert f_pix.texture.bilinear is False
     f_pix.splat(0.5, 0.5, 0.0, -1.0, color=(0.2, 1.8, 2.0), radius=0.16, force=30.0)

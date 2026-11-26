@@ -1,4 +1,4 @@
-"""Kernel GPU compositeur d'interface (`UILayer`) : boîtes alpha, bordures et texte bitmap 5×6 en 1 dispatch."""
+"""GPU kernel compositing the interface (`UILayer`): alpha boxes, borders and 5×6 bitmap text in 1 dispatch."""
 
 from __future__ import annotations
 
@@ -12,15 +12,15 @@ def ui_composite(
     glyphs: gs.u32["rows", "cols"],
     n_boxes: gs.i32,
 ) -> gs.u32["h", "w"]:
-    """Superpose tous les widgets UI (`boxes` + `glyphs`) en une seule passe GPU plein écran.
+    """Overlays every UI widget (`boxes` + `glyphs`) in a single full-screen GPU pass.
 
-    Disposition de chaque ligne de `boxes` (12 i32) :
+    Layout of each row of `boxes` (12 i32):
       0: x0, 1: y0, 2: x1, 3: y1
       4: bg_rgba (R | G<<8 | B<<16 | A<<24)
-      5: border_rgba (A == 0 : pas de bordure)
-      6: glyph_row (< 0 : pas de texte)
-      7: n_cols (longueur du texte en glyphes)
-      8: scale (taille d'un pixel de glyphe)
+      5: border_rgba (A == 0: no border)
+      6: glyph_row (< 0: no text)
+      7: n_cols (text length in glyphs)
+      8: scale (size of a glyph pixel)
       9: text_x, 10: text_y
       11: text_rgba (R | G<<8 | B<<16 | A<<24)
     """
@@ -41,7 +41,7 @@ def ui_composite(
             x1 = boxes[bi, 2]
             y1 = boxes[bi, 3]
             if px >= x0 and px < x1 and py >= y0 and py < y1:
-                # Fond avec transparence alpha (0..255)
+                # Background with alpha transparency (0..255)
                 bg = gs.u32(boxes[bi, 4])
                 ba = int((bg >> gs.u32(24)) & mask)
                 if ba > 0:

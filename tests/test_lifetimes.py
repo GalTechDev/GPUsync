@@ -1,5 +1,5 @@
-"""Durée de vie de la mémoire hôte : sources libérées ou modifiées juste après l'appel, résultats
-intermédiaires libérés sans attendre, petits envois en rafale. Les valeurs doivent rester justes."""
+"""Lifetime of host memory: sources freed or modified right after the call, intermediate results
+freed without waiting, bursts of small uploads. Values must stay correct."""
 
 import gc
 import threading
@@ -20,7 +20,7 @@ def inc(x: gs.f32[:]) -> gs.f32[:]:
 
 @gs.kernel
 def slow(x: gs.f32["n"], steps: gs.i32) -> gs.f32["n"]:
-    """Assez long pour être encore en cours quand l'hôte libère ses tableaux."""
+    """Long enough to still be running when the host frees its arrays."""
     i = gs.index()
     v = x[i]
     for k in range(steps):
@@ -44,10 +44,10 @@ def aligned(n, value):
 
 @pytest.mark.parametrize("dev", GPUS)
 def test_source_of_a_chain_released_while_running(dev):
-    """Résultat zéro-copie lu par un kernel long, puis libéré aussitôt ; sa mémoire est recyclée et écrasée."""
+    """Zero-copy result read by a long kernel, then freed at once; its memory is recycled and overwritten."""
     n = 1 << 18
     for k in range(12):
-        src = inc(aligned(n, float(k)), device=dev)  # Direct sur mémoire unifiée
+        src = inc(aligned(n, float(k)), device=dev)  # Direct on unified memory
         out = slow(src, 200, device=dev)
         del src
         gc.collect()
@@ -88,12 +88,12 @@ def test_source_used_after_being_read(dev):
 @pytest.mark.parametrize("dev", GPUS)
 @pytest.mark.parametrize("size", [1, 17, 1_000, 70_000, 300_000])
 def test_burst_of_small_uploads(dev, size):
-    """Plus d'envois en cours que la réserve : chaque appel garde ses propres valeurs, même si l'appelant
-    libère ses entrées aussitôt."""
-    base = inc(inc(np.zeros(size, np.float32), device=dev), device=dev)  # vaut 2, sur le périphérique
+    """More uploads in flight than the pool: each call keeps its own values, even if the caller
+    frees its inputs at once."""
+    base = inc(inc(np.zeros(size, np.float32), device=dev), device=dev)  # equals 2, on the device
     outs = [add(base, np.full(size, float(k), np.float32), device=dev) for k in range(300)]
     for k, o in enumerate(outs):
-        assert np.all(o.numpy() == k + 2), f"appel {k}"
+        assert np.all(o.numpy() == k + 2), f"call {k}"
 
 
 @pytest.mark.parametrize("dev", GPUS)
@@ -109,8 +109,8 @@ def test_uploads_from_several_threads(dev):
                 outs = [add(base, x.copy(), device=dev) for x in xs]
                 for x, o in zip(xs, outs):
                     if not np.allclose(o.numpy(), x + 2, atol=1e-5):
-                        errors.append(f"thread {seed} : résultat faux")
-        except Exception as e:  # relu par le test
+                        errors.append(f"thread {seed}: wrong result")
+        except Exception as e:  # read back by the test
             errors.append(repr(e))
 
     threads = [threading.Thread(target=worker, args=(s,)) for s in range(4)]
@@ -131,8 +131,8 @@ def test_refresh_keeps_kernels_working():
 @pytest.mark.parametrize("dev", GPUS)
 @pytest.mark.parametrize("n", [1 << 14, 1 << 16, 1 << 18])
 def test_source_mixing_devices_released_while_running(dev, n):
-    """Source zéro-copie dont une entrée vient d'un autre périphérique : déjà synchronisée à sa création,
-    elle ne doit pas être libérée pendant qu'un kernel la lit sur place."""
+    """Zero-copy source with an input coming from another device: already synchronized when created,
+    it must not be freed while a kernel reads it in place."""
     other = next((d.id for d in gs.devices() if d.id != dev and d.backend != "cpu"), "cpu:0")
     ones = inc(inc(aligned(n, -1.0), device=other), device=other)
     for k in range(20):
@@ -162,7 +162,7 @@ def _long_work(x: gs.f32["n"], k: gs.i32) -> gs.f32["n"]:
 
 @pytest.mark.parametrize("device", [d.id for d in gs.devices() if d.backend == "metal"])
 def test_small_page_aligned_array_is_copied(device):
-    """Un petit tableau placé en début de page est copié : le libérer n'attend pas le travail en cours."""
+    """A small array placed at the start of a page is copied: freeing it does not wait for running work."""
     raw = np.zeros(16384 * 3, dtype=np.uint8)
     off = -raw.ctypes.data % 16384
     small = raw[off : off + 768].view(np.float32)
@@ -181,6 +181,6 @@ def test_small_page_aligned_array_is_copied(device):
     released = time.perf_counter() - t0
     gs.sync(device)
     total = time.perf_counter() - t0
-    assert total > 0.005  # le lot lourd dure vraiment
+    assert total > 0.005  # the heavy batch really takes time
     assert released < 0.5 * total
     assert np.isfinite(heavy.numpy()).all() and warm is not None

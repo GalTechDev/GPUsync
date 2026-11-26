@@ -1,4 +1,4 @@
-"""Eau 3D : repos de la simulation, caustiques, objets immergés, embruns et écume."""
+"""3D water: simulation at rest, caustics, submerged objects, spray and foam."""
 
 import numpy as np
 import pytest
@@ -17,7 +17,7 @@ def _flat_volume(fl, level):
 
 
 def _surface(fl):
-    """Hauteur de la surface par colonne (m), hors bords, et nombre de voxels creux sous la surface."""
+    """Surface height per column (m), edges excluded, and number of hollow voxels below the surface."""
     dx, dy, dz = fl.config.vol_res
     dens = fl.vol_dens_gpu.numpy().reshape(dz, dy, dx)
     iso = fl.config.iso_level
@@ -32,7 +32,7 @@ def _surface(fl):
 
 @pytest.mark.parametrize("make", [gfx.Fluid3DConfig.water, gfx.Fluid3DConfig.water_sph])
 def test_water_comes_to_rest(make):
-    """Au repos : immobile, centrée, plate, sans poche d'air, au volume de départ."""
+    """At rest: motionless, centred, flat, without air pockets, at the starting volume."""
     fl = gfx.GpuFluid3D(make(count=14000), layout="dam_break")
     for _ in range(3600):
         fl.step(1.0 / 60.0)
@@ -40,12 +40,12 @@ def test_water_comes_to_rest(make):
     assert speed < 0.08
     center = fl.pos_gpu.numpy()[:, :3].mean(0)
     assert abs(center[0]) < 0.15 and abs(center[2]) < 0.1
-    # 28 % du bassin au départ : ni gonflement ni tassement
+    # 28 % of the basin at the start: neither swelling nor compacting
     assert abs(center[1] - 0.14 * fl.config.bounds[1]) < 0.06
     height, holes = _surface(fl)
     assert holes == 0
     assert height.std() < 0.02
-    # Plus d'agitation : plus d'écume
+    # More agitation: more foam
     assert (fl.ww_pos_gpu.numpy()[:, 3] > 0).sum() < 60
 
 
@@ -69,7 +69,7 @@ def test_caustics_are_cached_until_water_changes():
 
 
 def test_submerged_object_is_visible():
-    """Un objet entièrement sous l'eau se voit à travers la vitre et la surface."""
+    """An object fully under water can be seen through the glass and the surface."""
 
     def render(with_object):
         fl = gfx.GpuFluid3D(gfx.Fluid3DConfig.water(count=2000), layout="column")
@@ -102,12 +102,12 @@ def test_whitewater_is_born_and_bounded():
     assert {0, 1} <= seen
 
 
-# ───────────────────────── Surface à vagues et encre 2D ─────────────────────────
+# ───────────────────────── Wave surface and 2D ink ─────────────────────────
 
 
 @pytest.mark.parametrize("boundary_point", [(0.0, 0.0), (5.0, -4.5)])
 def test_wave_surface_keeps_its_volume(boundary_point):
-    """Une éclaboussure déplace l'eau sans en créer, même près d'un bord."""
+    """A splash moves the water without creating any, even near an edge."""
     cfg = gfx.WaterSurfaceConfig.realistic()
     cfg.ambient_waves = 0.0
     w = gfx.GpuWaterSurface(cfg)
@@ -148,7 +148,7 @@ def test_wave_surface_is_stable_and_calms_down():
 
 
 def test_wave_speed_can_change_while_running():
-    """Le nombre de sous-pas change avec la vitesse : l'onde ne doit ni sauter ni diverger."""
+    """The number of sub-steps changes with the speed: the wave must neither jump nor diverge."""
     cfg = gfx.WaterSurfaceConfig.realistic()
     cfg.ambient_waves = 0.0
     w = gfx.GpuWaterSurface(cfg)
@@ -174,7 +174,7 @@ def test_ink_does_not_depend_on_the_frame_rate(make):
 
 
 def test_ink_fixed_step_can_be_refined():
-    """Un pas deux fois plus fin change peu la quantité d'encre : les coefficients sont bien par seconde."""
+    """A step twice as fine barely changes the amount of ink: the coefficients really are per second."""
     total = []
     for fixed_dt in (1.0 / 60.0, 1.0 / 120.0):
         cfg = gfx.Fluid2DConfig.ink(96, 64)
@@ -187,7 +187,7 @@ def test_ink_fixed_step_can_be_refined():
     assert abs(total[0] - total[1]) < 0.12 * total[0]
 
 
-# ───────────────────────── Optique de la surface d'eau ─────────────────────────
+# ───────────────────────── Optics of the water surface ─────────────────────────
 
 
 def _pool(objects=(), *, pos=(0.0, 0.0, 0.0), cam=None, subdivisions=24, **cfg_changes):
@@ -220,14 +220,14 @@ def test_pool_shows_submerged_objects(pos):
     _, seen = _img(_pool([_ball(-0.9, pos)], pos=pos)[0])
     red = (seen[:, :, 0] - seen[:, :, 2]) - (empty[:, :, 0] - empty[:, :, 2])
     assert (red > 40).sum() > 120
-    # La même boule sous une surface opaque reste invisible
+    # The same ball under an opaque surface stays invisible
     _, hidden = _img(_pool([_ball(-0.9, pos)], pos=pos, optics=False)[0])
     _, opaque = _img(_pool(pos=pos, optics=False)[0])
     assert np.abs(hidden - opaque).max() < 8
 
 
 def test_deeper_water_is_darker_in_red():
-    """Absorption : plus l'eau est profonde, moins il revient de rouge, et le bleu résiste mieux."""
+    """Absorption: the deeper the water, the less red comes back, and blue holds up better."""
     mid = []
     for depth in (0.3, 1.5, 5.0):
         _, img = _img(_pool(depth=depth, walls=False, tint=(0.0, 0.0, 0.0), caustics=0.0)[0])
@@ -267,7 +267,7 @@ def test_pool_caustics_of_flat_water_are_uniform():
 
 
 def test_pool_caustics_match_geometric_optics():
-    """Sous un creux, soleil au zénith : éclairement = 1 / (1 + (1 - 1/n) · profondeur · courbure)²."""
+    """Under a trough, sun at the zenith: irradiance = 1 / (1 + (1 - 1/n) · depth · curvature)²."""
     _, water, _ = _pool(subdivisions=56)
     cfg = water.config
     water.splash(0.0, 0.0, strength=-0.6, radius=1.5)
@@ -295,11 +295,11 @@ def test_two_pools_and_orthographic_camera():
     assert np.isfinite(app.render_rgba(sc)).all()
 
 
-# ───────────────────────── Optimisations : mêmes résultats ─────────────────────────
+# ───────────────────────── Optimizations: same results ─────────────────────────
 
 
 def test_fused_pressure_matches_plain_jacobi():
-    """Deux itérations par lancement = deux itérations de Jacobi ordinaires, air, parois et surface compris."""
+    """Two iterations per launch = two ordinary Jacobi iterations, air, walls and surface included."""
     from gpusync.gfx.kernels.kfluid3d import mac_pressure_diag, mac_pressure_jacobi2
 
     nx, ny, nz = 9, 7, 6
@@ -338,7 +338,7 @@ def test_render_scale_keeps_image_picking_and_interface():
     img = app.render_rgba(sc)[:, :, :3].astype(np.float32)
     assert img.shape == full.shape
     assert np.abs(img - full).mean() < 4
-    # L'interface reste à pleine résolution (semi-transparente : le fond agrandi y compte un peu)
+    # The interface stays at full resolution (semi-transparent: the scaled-up background counts a little there)
     assert np.abs(img[10:34, 10:70] - full[10:34, 10:70]).max() <= 3
     assert app.pick(256, 144).object.name == "ball"
     assert app.pick(80, 144).object is obj

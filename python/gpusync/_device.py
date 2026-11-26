@@ -1,13 +1,13 @@
-"""Choix du périphérique (§4.8 de l'architecture).
+"""Device choice (§4.8 of the architecture).
 
-Sans `device=` ni `with gs.device(...)`, le périphérique prévu est le premier du **classement** :
-GPU dédiés (Vulkan, puis OpenCL), puis GPU intégrés (Metal, puis OpenCL : zéro-copie), puis CPU.
-Si ce périphérique ne sait pas exécuter le kernel (ex. `gs.exp` en f64 sur Vulkan), l'option `compat`
-du kernel décide : `"auto"` → avertissement puis repli sur OpenCL (même GPU de préférence), sinon `cpu:0` ;
+Without `device=` or `with gs.device(...)`, the planned device is the first of the **ranking**:
+discrete GPUs (CUDA, then Vulkan, then OpenCL), then integrated GPUs (Metal, then OpenCL: zero-copy), then CPU.
+If that device cannot run the kernel (e.g. `gs.exp` in f64 on Vulkan), the kernel's `compat` option
+decides: `"auto"` → warning then fallback to OpenCL (same GPU if possible), otherwise `cpu:0`;
 `"strict"` → `gs.UnsupportedFeature`.
 
-Un périphérique se désigne par un objet `Device`, un identifiant (`"opencl:1"`), un nom de backend
-(`"cuda"`, `"opencl"`, `"metal"`, `"vulkan"`, `"dx12"`, `"cpu"`) ou `"gpu"` (premier GPU du classement).
+A device is named by a `Device` object, an identifier (`"opencl:1"`), a backend name
+(`"cuda"`, `"opencl"`, `"metal"`, `"vulkan"`, `"dx12"`, `"cpu"`) or `"gpu"` (first GPU of the ranking).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ _INTEGRATED = {"metal": 0, "opencl": 1, "vulkan": 2, "dx12": 3}
 
 
 class CompatibilityWarning(UserWarning):
-    """Le kernel s'exécute sur un autre périphérique que prévu, faute d'une opération disponible."""
+    """The kernel runs on another device than planned, because an operation is missing."""
 
 
 def _rank(d) -> tuple:
@@ -34,13 +34,13 @@ def _rank(d) -> tuple:
         return (3, 0, d.index)
     if d.kind == "discrete_gpu":
         return (0, _DISCRETE.get(d.backend, 9), d.index)
-    if d.kind == "cpu":  # OpenCL sur CPU (POCL…)
+    if d.kind == "cpu":  # OpenCL on a CPU (POCL…)
         return (2, 0, d.index)
     return (1, _INTEGRATED.get(d.backend, 9), d.index)
 
 
 class _Known:
-    """Périphériques découverts, triés, et réponses déjà données : relus à chaque lancement de kernel."""
+    """Discovered devices, sorted, and answers already given: read again at every kernel launch."""
 
     def __init__(self) -> None:
         self.ranked = tuple(sorted(_core.devices(), key=_rank))
@@ -60,7 +60,7 @@ def _known() -> _Known:
 
 
 def devices(refresh: bool = False) -> list:
-    """Périphériques disponibles (découverte faite une fois ; `refresh=True` la refait)."""
+    """Available devices (discovery done once; `refresh=True` runs it again)."""
     global _known_devices
     if refresh:
         _known_devices = None
@@ -68,7 +68,7 @@ def devices(refresh: bool = False) -> list:
 
 
 def backends(refresh: bool = False) -> list:
-    """État de chaque backend (utile pour comprendre pourquoi un GPU n'apparaît pas)."""
+    """Status of each backend (useful to understand why a GPU does not show up)."""
     global _known_devices
     if refresh:
         _known_devices = None
@@ -76,12 +76,12 @@ def backends(refresh: bool = False) -> list:
 
 
 def ranked() -> list:
-    """Périphériques dans l'ordre de préférence."""
+    """Devices in order of preference."""
     return list(_known().ranked)
 
 
 def capable(dev, req: dict) -> bool:
-    """Le périphérique sait-il exécuter un kernel ayant ces besoins ?"""
+    """Can the device run a kernel with these requirements?"""
     return (
         (dev.f64 or not req["f64"])
         and (dev.f64_math or not req["f64_math"])
@@ -94,7 +94,7 @@ def _by_id(dev_id: str):
 
 
 def resolve(device=None) -> str:
-    """Identifiant (`"metal:0"`…) du périphérique prévu : demandé, ou premier du classement."""
+    """Identifier (`"metal:0"`…) of the planned device: requested, or first of the ranking."""
     if device is None:
         stack = getattr(_local, "stack", None)
         # Ordre : `with gs.device(...)`, `gs.set_default_device(...)`, variable GPUSYNC_DEVICE.
@@ -103,12 +103,12 @@ def resolve(device=None) -> str:
     devs = known.ranked
     if device is None:
         if not devs:
-            raise _core.DeviceError("aucun périphérique disponible")
+            raise _core.DeviceError("no device available")
         return devs[0].id
     if isinstance(device, _core.Device):
         return device.id
     if not isinstance(device, str):
-        raise TypeError(f"device : Device ou chaîne attendu, reçu {type(device).__name__}")
+        raise TypeError(f"device: Device or string expected, got {type(device).__name__}")
     found = known.resolved.get(device)
     if found is None:
         found = known.resolved[device] = _find(device, devs)
@@ -129,12 +129,12 @@ def _find(device: str, devs) -> str:
         for d in devs:
             if d.backend == want:
                 return d.id
-    raise _core.DeviceError(f"périphérique « {device} » introuvable. Disponibles : {', '.join(ids)}")
+    raise _core.DeviceError(f"device \"{device}\" not found. Available: {', '.join(ids)}")
 
 
 def fallback(planned: str, req: dict) -> str | None:
-    """Repli pour un kernel que `planned` ne sait pas exécuter : CUDA ou OpenCL sur le même GPU
-    physique, puis un autre CUDA / OpenCL compatible, puis cpu:0."""
+    """Fallback for a kernel that `planned` cannot run: CUDA or OpenCL on the same physical
+    GPU, then another compatible CUDA / OpenCL device, then cpu:0."""
     plan = _by_id(planned)
     full = [d for d in ranked() if d.backend in ("cuda", "opencl") and capable(d, req)]
     same_gpu = [d for d in full if d.name == plan.name]
@@ -145,14 +145,14 @@ def fallback(planned: str, req: dict) -> str | None:
 
 
 def set_default_device(device) -> None:
-    """Change le périphérique par défaut (None : revenir au premier du classement)."""
+    """Changes the default device (None: back to the first of the ranking)."""
     global _default
     _default = None if device is None else resolve(device)
 
 
 @contextlib.contextmanager
 def device(device):
-    """`with gs.device("opencl"): ...` : périphérique utilisé dans le bloc (par thread)."""
+    """`with gs.device("opencl"): ...`: device used in the block (per thread)."""
     dev_id = resolve(device)
     stack = getattr(_local, "stack", None)
     if stack is None:
@@ -166,11 +166,11 @@ def device(device):
 
 @contextlib.contextmanager
 def batch(device=None):
-    """`with gs.batch(): ...` : regroupe plusieurs kernels en une seule soumission GPU (wgpu / Metal / Vulkan / DX12).
+    """`with gs.batch(): ...`: groups several kernels into a single GPU submission (wgpu / Metal / Vulkan / DX12).
 
-    Toutes les passes enregistrées dans le bloc partagent un seul `CommandEncoder` et sont soumises
-    ensemble à la sortie du bloc (ou automatiquement avant une lecture CPU ou `gs.Window.present`).
-    Sur les autres backends (OpenCL, CUDA, CPU), le bloc est sans effet (compatible partout).
+    Every pass recorded in the block shares a single `CommandEncoder`, and they are submitted
+    together when the block exits (or automatically before a CPU read or `gs.Window.present`).
+    On the other backends (OpenCL, CUDA, CPU), the block has no effect (compatible everywhere).
     """
     dev_id = resolve(device)
     _core.begin_batch(dev_id)
@@ -181,12 +181,12 @@ def batch(device=None):
 
 
 def sync(device=None) -> None:
-    """Attend la fin de tous les calculs soumis sur `device` (sans copier les résultats vers la RAM)."""
+    """Waits for all work submitted on `device` (without copying the results to RAM)."""
     _core.sync(resolve(device))
 
 
 def default_device(kernel=None):
-    """Le périphérique qui serait utilisé maintenant (pour `kernel`, compte tenu de ses besoins)."""
+    """The device that would be used now (for `kernel`, given its requirements)."""
     dev_id = resolve(None)
     if kernel is not None:
         dev_id = kernel._choose(None)[0]
@@ -194,12 +194,12 @@ def default_device(kernel=None):
 
 
 def set_memory_budget(nbytes=None) -> None:
-    """Budget mémoire par périphérique pour le mode Résident (None : 50 % de la mémoire du périphérique).
-    Au-delà, les calculs passent en mode Flux (par blocs), sans limite de taille."""
+    """Memory budget per device for Resident mode (None: 50 % of the device's memory).
+    Beyond it, computations switch to Flux mode (chunk by chunk), with no size limit."""
     limits = _core.get_transfer_limits()
     _core.set_transfer_limits(limits["chunk_bytes"], None if nbytes is None else int(nbytes), limits["direct_chunk_bytes"])
 
 
 def _set_transfer_limits(chunk_bytes=64 << 20, budget_bytes=None, direct_chunk_bytes=None) -> None:
-    """Réglages internes du moteur de transferts (tests : forcer le découpage sur de petits tableaux)."""
+    """Internal settings of the transfer engine (tests: force chunking on small arrays)."""
     _core.set_transfer_limits(int(chunk_bytes), budget_bytes, direct_chunk_bytes)

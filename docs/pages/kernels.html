@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Écrire un kernel — GPUsync</title>
-<meta name="description" content="Un kernel est une fonction Python décorée par @gs.kernel. On n&#x27;y écrit pas de boucle sur les données : on écrit le calcul d&#x27;une case du résultat, et le GPU l&#x27;exécute pour toutes les cases à la fois, c">
+<title>Writing a kernel — GPUsync</title>
+<meta name="description" content="A kernel is a Python function decorated with @gs.kernel. You do not write a loop over the data: you write how one cell of the result is computed, and the GPU runs it for every cell at once, each on it">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
@@ -17,35 +17,35 @@
 <aside class="side" aria-label="Navigation">
 <a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
 <nav class="nav">
-<a href="index.html"><span class="icon">home</span>Accueil</a>
+<a href="index.html"><span class="icon">home</span>Home</a>
 <div class="nav-group">Guide</div>
 <a href="installation.html"><span class="icon">download</span>Installation</a>
-<a href="kernels.html" aria-current="page"><span class="icon">code</span>Écrire un kernel</a>
-<a href="resultats.html"><span class="icon">database</span>Résultats et volumes</a>
-<a href="peripheriques.html"><span class="icon">developer_board</span>Périphériques</a>
-<a href="atomiques.html"><span class="icon">scatter_plot</span>Atomiques</a>
-<a href="groupes.html"><span class="icon">hub</span>Groupes de threads</a>
-<a href="fenetre.html"><span class="icon">desktop_windows</span>Fenêtre</a>
-<a href="erreurs.html"><span class="icon">bug_report</span>Erreurs et performances</a>
+<a href="kernels.html" aria-current="page"><span class="icon">code</span>Writing a kernel</a>
+<a href="results.html"><span class="icon">database</span>Results and data</a>
+<a href="devices.html"><span class="icon">developer_board</span>Devices</a>
+<a href="atomics.html"><span class="icon">scatter_plot</span>Atomics</a>
+<a href="groups.html"><span class="icon">hub</span>Thread groups</a>
+<a href="window.html"><span class="icon">desktop_windows</span>Window</a>
+<a href="errors.html"><span class="icon">bug_report</span>Errors and performance</a>
 <div class="nav-group">API</div>
-<a href="reference.html"><span class="icon">menu_book</span>Référence</a>
+<a href="reference.html"><span class="icon">menu_book</span>Reference</a>
 </nav>
-<div class="side-foot">Licence MIT · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Code source</a></div>
+<div class="side-foot">MIT licence · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Source code</a></div>
 </aside>
 <div class="scrim"></div>
 <div class="page">
 <header class="top">
 <button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
-<h1 class="top-title">Écrire un kernel</h1>
-<button class="btn btn-plain theme-toggle" type="button" aria-label="Thème"><span class="icon">dark_mode</span></button>
+<h1 class="top-title">Writing a kernel</h1>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Theme"><span class="icon">dark_mode</span></button>
 <a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
 </header>
 <main class="content">
-<article class="doc"><h2 class="lead-title">Écrire un kernel</h2><p class="lead">Un kernel est une fonction Python décorée par <code>@gs.kernel</code>. On n'y écrit pas de boucle sur les données : on écrit le calcul <strong>d'une case du résultat</strong>, et le GPU l'exécute pour toutes les cases à la fois, chacune sur son propre fil d'exécution (thread).</p><hr class="rule"><p>Il y a trois formes de kernel :</p>
-<div class="table-wrap"><table><thead><tr><th>Forme</th><th>On écrit</th><th>Pour</th></tr></thead><tbody><tr><td>élément par élément</td><td>une formule sur des tableaux de même forme</td><td>transformations point à point</td></tr><tr><td>avec index (<code>gs.index()</code>)</td><td>le calcul de la case <code>(i, j…)</code> de la sortie, en lisant où l'on veut dans les entrées</td><td>distances, convolutions, réductions par ligne, tout le reste</td></tr><tr><td>explicite (<code>grid=</code>)</td><td>ce que fait un thread par <strong>entrée</strong>, avec des écritures atomiques</td><td>histogrammes, dispersion : voir <a href="atomiques.html">Mode explicite</a></td></tr></tbody></table></div>
-<p>Un kernel doit être défini dans un fichier <code>.py</code> ou une cellule de notebook : GPUsync relit son code source à la décoration. Défini dans <code>python -c</code> ou dans la console interactive, il est refusé avec un message qui le dit.</p>
-<h2 id="element-par-element"><a class="anchor" href="#element-par-element" aria-hidden="true">#</a>Élément par élément</h2>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
+<article class="doc"><h2 class="lead-title">Writing a kernel</h2><p class="lead">A kernel is a Python function decorated with <code>@gs.kernel</code>. You do not write a loop over the data: you write how <strong>one cell of the result</strong> is computed, and the GPU runs it for every cell at once, each on its own thread.</p><hr class="rule"><p>There are three kinds of kernel:</p>
+<div class="table-wrap"><table><thead><tr><th>Kind</th><th>You write</th><th>For</th></tr></thead><tbody><tr><td>element-wise</td><td>a formula over arrays of the same shape</td><td>point-wise transformations</td></tr><tr><td>indexed (<code>gs.index()</code>)</td><td>how cell <code>(i, j…)</code> of the output is computed, reading anywhere in the inputs</td><td>distances, convolutions, per-row reductions, everything else</td></tr><tr><td>explicit (<code>grid=</code>)</td><td>what one thread per <strong>input</strong> does, with atomic writes</td><td>histograms, scattering: see <a href="atomics.html">Explicit mode</a></td></tr></tbody></table></div>
+<p>A kernel must be defined in a <code>.py</code> file or a notebook cell: GPUsync reads its source code when it is decorated. Defined in <code>python -c</code> or in the interactive console, it is rejected with a message that says so.</p>
+<h2 id="element-wise"><a class="anchor" href="#element-wise" aria-hidden="true">#</a>Element-wise</h2>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
 <span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
 
 <span class="tk-dec">@gs.kernel</span>
@@ -56,9 +56,9 @@ a = np.zeros((<span class="tk-num">480</span>, <span class="tk-num">640</span>),
 b = np.ones((<span class="tk-num">480</span>, <span class="tk-num">640</span>), np.float32)
 c = blend(a, b, <span class="tk-num">0.25</span>)
 <span class="tk-kw">assert</span> c.shape == (<span class="tk-num">480</span>, <span class="tk-num">640</span>) <span class="tk-kw">and</span> np.allclose(c, <span class="tk-num">0.25</span>)</code></pre></div>
-<ul><li><code>gs.f32[:]</code> accepte un tableau de <strong>n'importe quelle forme</strong> ; tous les tableaux d'un même appel doivent avoir la même forme, qui est celle de la sortie. Il n'y a pas de diffusion (<em>broadcasting</em>) à la NumPy : une valeur commune à toutes les cases se passe en scalaire (<code>t: gs.f32</code>).</li><li>Le type de retour est obligatoire (<code>-&gt; gs.f32[:]</code>).</li><li>Dans le corps, un tableau désigne <strong>sa valeur dans la case courante</strong> : <code>a * (1.0 - t)</code> multiplie deux nombres.</li></ul>
-<p>On peut y mettre des variables, des conditions et des boucles :</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<ul><li><code>gs.f32[:]</code> accepts an array of <strong>any shape</strong>; all arrays of a call must have the same shape, which is the shape of the output. There is no NumPy-style broadcasting: a value shared by every cell is passed as a scalar (<code>t: gs.f32</code>).</li><li>The return type is required (<code>-&gt; gs.f32[:]</code>).</li><li>In the body, an array stands for <strong>its value in the current cell</strong>: <code>a * (1.0 - t)</code> multiplies two numbers.</li></ul>
+<p>You can use variables, conditions and loops:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> clamp_or_log(x: <span class="tk-gs">gs.f32</span>[:], limit: <span class="tk-gs">gs.f32</span>) -&gt; <span class="tk-gs">gs.f32</span>[:]:
     <span class="tk-kw">if</span> x &gt; limit:
         <span class="tk-kw">return</span> limit
@@ -69,11 +69,11 @@ c = blend(a, b, <span class="tk-num">0.25</span>)
 
 r = clamp_or_log(np.array([<span class="tk-num">0.5</span>, <span class="tk-num">2.0</span>, <span class="tk-num">50.0</span>], np.float32), <span class="tk-num">10.0</span>)
 <span class="tk-kw">assert</span> np.allclose(r[<span class="tk-num">2</span>], <span class="tk-num">10.0</span>)</code></pre></div>
-<h2 id="avec-index"><a class="anchor" href="#avec-index" aria-hidden="true">#</a>Avec index</h2>
-<p><code>gs.index()</code> donne les coordonnées de la case de sortie calculée. Les dimensions des tableaux portent des noms ; la forme de la sortie est écrite avec ces noms, et GPUsync en déduit sa taille :</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<h2 id="indexed"><a class="anchor" href="#indexed" aria-hidden="true">#</a>Indexed</h2>
+<p><code>gs.index()</code> gives the coordinates of the output cell being computed. Array dimensions have names; the output shape is written with these names, and GPUsync works out its size:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> pairwise_dist(x: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>, <span class="tk-str">"d"</span>]) -&gt; <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>, <span class="tk-str">"n"</span>]:
-    i, j = <span class="tk-gs">gs.index</span>()                      <span class="tk-com"># la case (i, j) de la sortie</span>
+    i, j = <span class="tk-gs">gs.index</span>()                      <span class="tk-com"># cell (i, j) of the output</span>
     acc = <span class="tk-num">0.0</span>
     <span class="tk-kw">for</span> k <span class="tk-kw">in</span> range(x.shape[<span class="tk-num">1</span>]):
         diff = x[i, k] - x[j, k]
@@ -84,11 +84,11 @@ pts = np.random.rand(<span class="tk-num">500</span>, <span class="tk-num">3</sp
 dist = pairwise_dist(pts)                  <span class="tk-com"># (500, 3) → (500, 500)</span>
 ref = np.sqrt(((pts[:, <span class="tk-kw">None</span>] - pts[<span class="tk-kw">None</span>]) ** <span class="tk-num">2</span>).sum(-<span class="tk-num">1</span>))
 <span class="tk-kw">assert</span> np.allclose(dist, ref, atol=<span class="tk-num">1e-5</span>)</code></pre></div>
-<p>Règles des dimensions :</p>
-<div class="table-wrap"><table><thead><tr><th>Écriture</th><th>Signification</th></tr></thead><tbody><tr><td><code>gs.f32["n", "t"]</code></td><td>deux dimensions nommées ; un même nom impose la même taille partout où il apparaît</td></tr><tr><td><code>gs.f32[:, :]</code></td><td>deux dimensions sans nom, de taille libre, lisible par <code>x.shape[k]</code></td></tr><tr><td><code>gs.f32["n", 3]</code></td><td>taille fixe : l'appel est refusé si l'axe n'a pas 3 éléments</td></tr><tr><td><code>-&gt; gs.f32["n"]</code></td><td>la sortie : uniquement des noms d'entrée ou des tailles entières</td></tr></tbody></table></div>
-<p>Une incohérence (<code>'a' → 3, 'b' → 4</code> pour une même dimension <code>n</code>) lève <code>gs.ShapeMismatch</code> avant tout calcul.</p>
-<p>Dans le corps, on indexe avec des entiers (<code>x[i, k]</code>), on lit <code>x.shape[k]</code> et <code>len(x)</code> (la première dimension). Pas de tranches (<code>x[i, :]</code>) : on écrit la boucle.</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<p>Dimension rules:</p>
+<div class="table-wrap"><table><thead><tr><th>Written</th><th>Meaning</th></tr></thead><tbody><tr><td><code>gs.f32["n", "t"]</code></td><td>two named dimensions; a name means the same size everywhere it appears</td></tr><tr><td><code>gs.f32[:, :]</code></td><td>two unnamed dimensions, any size, readable through <code>x.shape[k]</code></td></tr><tr><td><code>gs.f32["n", 3]</code></td><td>fixed size: the call is rejected if the axis does not have 3 elements</td></tr><tr><td><code>-&gt; gs.f32["n"]</code></td><td>the output: only input dimension names or integer sizes</td></tr></tbody></table></div>
+<p>A mismatch (<code>'a' → 3, 'b' → 4</code> for the same dimension <code>n</code>) raises <code>gs.ShapeMismatch</code> before anything runs.</p>
+<p>In the body you index with integers (<code>x[i, k]</code>), and read <code>x.shape[k]</code> and <code>len(x)</code> (the first dimension). No slices (<code>x[i, :]</code>): write the loop.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> row_mean(x: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>, <span class="tk-str">"t"</span>]) -&gt; <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>]:
     i = <span class="tk-gs">gs.index</span>()
     s = <span class="tk-num">0.0</span>
@@ -98,9 +98,9 @@ ref = np.sqrt(((pts[:, <span class="tk-kw">None</span>] - pts[<span class="tk-kw
 
 m = np.arange(<span class="tk-num">12</span>, dtype=np.float32).reshape(<span class="tk-num">3</span>, <span class="tk-num">4</span>)
 <span class="tk-kw">assert</span> np.allclose(row_mean(m), m.mean(axis=<span class="tk-num">1</span>))</code></pre></div>
-<h3 id="plusieurs-sorties"><a class="anchor" href="#plusieurs-sorties" aria-hidden="true">#</a>Plusieurs sorties</h3>
-<p>Un tuple de types en retour, un tuple de valeurs dans le <code>return</code> ; l'appel rend un tuple de résultats :</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<h3 id="several-outputs"><a class="anchor" href="#several-outputs" aria-hidden="true">#</a>Several outputs</h3>
+<p>A tuple of types as the return type, a tuple of values in <code>return</code>; the call returns a tuple of results:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> stats(x: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>, <span class="tk-str">"t"</span>]) -&gt; (<span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>]):
     i = <span class="tk-gs">gs.index</span>()
     t = x.shape[<span class="tk-num">1</span>]
@@ -117,10 +117,10 @@ m = np.arange(<span class="tk-num">12</span>, dtype=np.float32).reshape(<span cl
 series = np.random.rand(<span class="tk-num">100</span>, <span class="tk-num">365</span>).astype(np.float32)
 mean, std = stats(series)
 <span class="tk-kw">assert</span> np.allclose(std, series.std(axis=<span class="tk-num">1</span>), atol=<span class="tk-num">1e-5</span>)</code></pre></div>
-<p>Toutes les sorties ont la même forme.</p>
-<h3 id="tableaux-locaux"><a class="anchor" href="#tableaux-locaux" aria-hidden="true">#</a>Tableaux locaux</h3>
-<p><code>gs.local(type, taille)</code> crée un tableau propre à chaque case, mis à zéro, de taille constante :</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<p>All outputs have the same shape.</p>
+<h3 id="local-arrays"><a class="anchor" href="#local-arrays" aria-hidden="true">#</a>Local arrays</h3>
+<p><code>gs.local(type, size)</code> creates an array private to each cell, zero-filled, of constant size:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> histogram_per_row(x: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>, <span class="tk-str">"t"</span>]) -&gt; <span class="tk-gs">gs.i32</span>[<span class="tk-str">"n"</span>]:
     i = <span class="tk-gs">gs.index</span>()
     bins = <span class="tk-gs">gs.local</span>(<span class="tk-gs">gs.i32</span>, <span class="tk-num">10</span>)
@@ -131,51 +131,51 @@ mean, std = stats(series)
     <span class="tk-kw">for</span> b <span class="tk-kw">in</span> range(<span class="tk-num">10</span>):
         <span class="tk-kw">if</span> bins[b] &gt; bins[best]:
             best = b
-    <span class="tk-kw">return</span> best                            <span class="tk-com"># la classe la plus peuplée de la ligne</span>
+    <span class="tk-kw">return</span> best                            <span class="tk-com"># the most populated bin of the row</span>
 
 data = np.random.rand(<span class="tk-num">4</span>, <span class="tk-num">1000</span>).astype(np.float32)
 <span class="tk-kw">assert</span> histogram_per_row(data).shape == (<span class="tk-num">4</span>,)</code></pre></div>
-<p>Un tableau local vit dans la mémoire privée du thread : quelques dizaines à quelques centaines d'éléments au plus, au-delà il devient lent.</p>
+<p>A local array lives in the thread's private memory: a few tens to a few hundred elements at most; beyond that it gets slow.</p>
 <h2 id="types"><a class="anchor" href="#types" aria-hidden="true">#</a>Types</h2>
-<div class="table-wrap"><table><thead><tr><th>Type</th><th>NumPy</th><th>Remarques</th></tr></thead><tbody><tr><td><code>gs.f32</code></td><td><code>float32</code></td><td>le type de calcul normal sur GPU</td></tr><tr><td><code>gs.f64</code></td><td><code>float64</code></td><td>absent de Metal et de nombreux GPU grand public : voir <a href="peripheriques.html">Périphériques</a></td></tr><tr><td><code>gs.i32</code>, <code>gs.u32</code></td><td><code>int32</code>, <code>uint32</code></td><td></td></tr><tr><td><code>gs.i64</code>, <code>gs.u64</code></td><td><code>int64</code>, <code>uint64</code></td><td>division et reste 64 bits lents sur Metal (préférer OpenCL sur Mac pour ces calculs)</td></tr></tbody></table></div>
-<p>Les tableaux passés doivent avoir <strong>exactement</strong> le type déclaré. Un tableau <code>float64</code> passé à un paramètre <code>gs.f32[:]</code> est refusé (<code>gs.TypeMismatch</code>, avec la correction à faire) ; <code>@gs.kernel(cast="auto")</code> autorise la conversion, qui coûte une copie.</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(cast=<span class="tk-str">"auto"</span>)
+<div class="table-wrap"><table><thead><tr><th>Type</th><th>NumPy</th><th>Notes</th></tr></thead><tbody><tr><td><code>gs.f32</code></td><td><code>float32</code></td><td>the usual GPU compute type</td></tr><tr><td><code>gs.f64</code></td><td><code>float64</code></td><td>missing on Metal and on many consumer GPUs: see <a href="devices.html">Devices</a></td></tr><tr><td><code>gs.i32</code>, <code>gs.u32</code></td><td><code>int32</code>, <code>uint32</code></td><td></td></tr><tr><td><code>gs.i64</code>, <code>gs.u64</code></td><td><code>int64</code>, <code>uint64</code></td><td>64-bit division and remainder are slow on Metal (prefer OpenCL on a Mac for these)</td></tr></tbody></table></div>
+<p>Arrays must have <strong>exactly</strong> the declared type. A <code>float64</code> array passed to a <code>gs.f32[:]</code> parameter is rejected (<code>gs.TypeMismatch</code>, with the fix to apply); <code>@gs.kernel(cast="auto")</code> allows the conversion, which costs a copy.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(cast=<span class="tk-str">"auto"</span>)
 <span class="tk-kw">def</span> twice(x: <span class="tk-gs">gs.f32</span>[:]) -&gt; <span class="tk-gs">gs.f32</span>[:]:
     <span class="tk-kw">return</span> x * <span class="tk-num">2.0</span>
 
-<span class="tk-kw">assert</span> twice(np.arange(<span class="tk-num">3</span>)).dtype == np.float32      <span class="tk-com"># entiers 64 bits convertis en float32</span></code></pre></div>
-<p>Dans un kernel :</p>
-<ul><li><strong>les littéraux prennent le type du contexte</strong> : <code>0.0</code> dans un calcul en f32 est un f32 (il ne force jamais du f64) ;</li><li>les mélanges suivent <code>entier op flottant → flottant</code>, jamais vers f64 sans le demander ; entre entiers, l'élargissement sans perte est implicite (i32 → i64, u32 → i64, u32 → u64), le reste se convertit à la main ;</li><li>conversions : <code>float(v)</code>, <code>int(v)</code> (troncature vers zéro, comme Python), <code>gs.f32(v)</code>, <code>gs.i32(v)</code>, <code>gs.u32(v)</code>, <code>gs.i64(v)</code>… ;</li><li><code>//</code> et <code>%</code> se comportent comme en Python, y compris sur les négatifs (<code>-7 // 3 == -3</code>, <code>-7 % 3 == 2</code>) ;</li><li>les variables sont typées à leur première affectation ; donner à un même nom des valeurs de types différents (un compteur entier puis un flottant) est refusé ou source d'erreur : prenez deux noms.</li></ul>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">assert</span> twice(np.arange(<span class="tk-num">3</span>)).dtype == np.float32      <span class="tk-com"># 64-bit integers converted to float32</span></code></pre></div>
+<p>Inside a kernel:</p>
+<ul><li><strong>literals take the type of their context</strong>: <code>0.0</code> in an f32 computation is an f32 (it never forces f64);</li><li>mixed operations follow <code>integer op float → float</code>, never to f64 unless asked; between integers, lossless widening is implicit (i32 → i64, u32 → i64, u32 → u64), the rest is converted by hand;</li><li>conversions: <code>float(v)</code>, <code>int(v)</code> (truncation toward zero, as in Python), <code>gs.f32(v)</code>, <code>gs.i32(v)</code>, <code>gs.u32(v)</code>, <code>gs.i64(v)</code>…;</li><li><code>//</code> and <code>%</code> behave as in Python, negatives included (<code>-7 // 3 == -3</code>, <code>-7 % 3 == 2</code>);</li><li>variables are typed at their first assignment; giving one name values of different types (an integer counter, then a float) is rejected or causes errors: use two names.</li></ul>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> divmod_like_python(x: <span class="tk-gs">gs.i32</span>[:]) -&gt; <span class="tk-gs">gs.i32</span>[:]:
     <span class="tk-kw">return</span> x // <span class="tk-num">3</span> * <span class="tk-num">100</span> + x % <span class="tk-num">3</span>
 
 <span class="tk-kw">assert</span> list(divmod_like_python(np.array([-<span class="tk-num">7</span>, <span class="tk-num">7</span>], np.int32))) == [-<span class="tk-num">298</span>, <span class="tk-num">201</span>]</code></pre></div>
-<h2 id="ce-qu-on-peut-ecrire-dans-un-kernel"><a class="anchor" href="#ce-qu-on-peut-ecrire-dans-un-kernel" aria-hidden="true">#</a>Ce qu'on peut écrire dans un kernel</h2>
-<div class="table-wrap"><table><thead><tr><th>Permis</th><th>Refusé</th></tr></thead><tbody><tr><td>arithmétique, comparaisons, <code>and</code> / <code>or</code> / <code>not</code></td><td>listes, tuples (hors <code>gs.index()</code> et <code>return</code>), dictionnaires, chaînes</td></tr><tr><td>bit à bit <code>&amp;</code> <code>|</code> <code>^</code> <code>~</code> <code>&lt;&lt;</code> <code>&gt;&gt;</code> sur les entiers ; <code>&amp;</code> <code>|</code> <code>^</code> sur les booléens</td><td>appels de fonctions Python (y compris les vôtres)</td></tr><tr><td><code>a if c else b</code>, <code>if</code> / <code>elif</code> / <code>else</code></td><td>récursion, <code>lambda</code>, générateurs</td></tr><tr><td><code>for k in range(...)</code>, <code>while</code>, <code>break</code>, <code>continue</code></td><td><code>try</code>, <code>with</code></td></tr><tr><td>variables locales scalaires, <code>gs.local</code></td><td>tranches <code>x[a:b]</code>, allocation de taille variable</td></tr><tr><td>constantes globales numériques du module</td><td>objets, attributs autres que <code>x.shape</code></td></tr><tr><td>fonctions <code>gs.*</code> et <code>math.*</code> listées ci-dessous</td><td></td></tr></tbody></table></div>
-<p>Une construction refusée lève <code>gs.KernelSyntaxError</code> à la décoration, avec le fichier, la ligne et la cause.</p>
-<p>Fonctions mathématiques (<code>gs.nom</code> ou <code>math.nom</code>) :</p>
-<div class="table-wrap"><table><tbody><tr><td>racines, exponentielles</td><td><code>sqrt</code>, <code>exp</code>, <code>exp2</code>, <code>log</code>, <code>log2</code>, <code>pow</code></td></tr><tr><td>trigonométrie</td><td><code>sin</code>, <code>cos</code>, <code>tan</code>, <code>tanh</code>, <code>atan2</code></td></tr><tr><td>arrondis</td><td><code>floor</code>, <code>ceil</code>, <code>abs</code></td></tr><tr><td>extremums</td><td><code>gs.min(a, b, …)</code>, <code>gs.max(a, b, …)</code> (2 valeurs ou plus)</td></tr><tr><td>entiers</td><td><code>gs.mulhi(a, b)</code> : partie haute du produit complet (ex. <code>(a * b) &gt;&gt; 32</code> sans débordement, pour des u32)</td></tr><tr><td>constantes</td><td><code>gs.pi</code>, <code>gs.e</code>, <code>gs.tau</code>, <code>gs.inf</code>, <code>gs.nan</code> (et <code>math.pi</code>…)</td></tr></tbody></table></div>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> math
+<h2 id="what-you-can-write-in-a-kernel"><a class="anchor" href="#what-you-can-write-in-a-kernel" aria-hidden="true">#</a>What you can write in a kernel</h2>
+<div class="table-wrap"><table><thead><tr><th>Allowed</th><th>Rejected</th></tr></thead><tbody><tr><td>arithmetic, comparisons, <code>and</code> / <code>or</code> / <code>not</code></td><td>lists, tuples (except <code>gs.index()</code> and <code>return</code>), dicts, strings</td></tr><tr><td>bitwise <code>&amp;</code> <code>|</code> <code>^</code> <code>~</code> <code>&lt;&lt;</code> <code>&gt;&gt;</code> on integers; <code>&amp;</code> <code>|</code> <code>^</code> on booleans</td><td>calls to Python functions (including your own)</td></tr><tr><td><code>a if c else b</code>, <code>if</code> / <code>elif</code> / <code>else</code></td><td>recursion, <code>lambda</code>, generators</td></tr><tr><td><code>for k in range(...)</code>, <code>while</code>, <code>break</code>, <code>continue</code></td><td><code>try</code>, <code>with</code></td></tr><tr><td>scalar local variables, <code>gs.local</code></td><td>slices <code>x[a:b]</code>, variable-size allocation</td></tr><tr><td>numeric global constants of the module</td><td>objects, attributes other than <code>x.shape</code></td></tr><tr><td>the <code>gs.*</code> and <code>math.*</code> functions listed below</td><td></td></tr></tbody></table></div>
+<p>A rejected construct raises <code>gs.KernelSyntaxError</code> at decoration time, with the file, the line and the reason.</p>
+<p>Math functions (<code>gs.name</code> or <code>math.name</code>):</p>
+<div class="table-wrap"><table><tbody><tr><td>roots, exponentials</td><td><code>sqrt</code>, <code>exp</code>, <code>exp2</code>, <code>log</code>, <code>log2</code>, <code>pow</code></td></tr><tr><td>trigonometry</td><td><code>sin</code>, <code>cos</code>, <code>tan</code>, <code>tanh</code>, <code>atan2</code></td></tr><tr><td>rounding</td><td><code>floor</code>, <code>ceil</code>, <code>abs</code></td></tr><tr><td>extremes</td><td><code>gs.min(a, b, …)</code>, <code>gs.max(a, b, …)</code> (2 values or more)</td></tr><tr><td>integers</td><td><code>gs.mulhi(a, b)</code>: high half of the full product (e.g. <code>(a * b) &gt;&gt; 32</code> without overflow, for u32)</td></tr><tr><td>constants</td><td><code>gs.pi</code>, <code>gs.e</code>, <code>gs.tau</code>, <code>gs.inf</code>, <code>gs.nan</code> (and <code>math.pi</code>…)</td></tr></tbody></table></div>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">import</span> math
 
-GAIN = <span class="tk-num">3.0</span>                                  <span class="tk-com"># constante globale : lue à la décoration</span>
+GAIN = <span class="tk-num">3.0</span>                                  <span class="tk-com"># global constant: read at decoration time</span>
 
 <span class="tk-dec">@gs.kernel</span>
 <span class="tk-kw">def</span> gained(x: <span class="tk-gs">gs.f32</span>[:]) -&gt; <span class="tk-gs">gs.f32</span>[:]:
     <span class="tk-kw">return</span> math.sqrt(x) * GAIN + <span class="tk-gs">gs.max</span>(x, <span class="tk-num">0.0</span>, -<span class="tk-num">1.0</span>)
 
 <span class="tk-kw">assert</span> np.allclose(gained(np.array([<span class="tk-num">4.0</span>], np.float32)), <span class="tk-num">10.0</span>)</code></pre></div>
-<p>Une constante globale est figée quand le kernel est décoré : la modifier ensuite ne change pas le kernel.</p>
-<h2 id="la-fonction-python-reste-utilisable"><a class="anchor" href="#la-fonction-python-reste-utilisable" aria-hidden="true">#</a>La fonction Python reste utilisable</h2>
-<p><code>gs.sqrt</code>, <code>gs.exp</code>… sont, hors kernel, les fonctions NumPy correspondantes, et <code>kernel.py_func</code> est la fonction d'origine : un kernel élément par élément écrit avec les fonctions <code>gs.*</code> s'exécute aussi en NumPy pur, pratique pour comparer.</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">assert</span> np.allclose(blend.py_func(a, b, <span class="tk-num">0.25</span>), blend(a, b, <span class="tk-num">0.25</span>))</code></pre></div>
-<p>Ce n'est pas vrai avec <code>math.*</code> (qui n'accepte pas de tableaux), ni des kernels avec index : <code>gs.index()</code> n'a pas de sens hors du GPU.</p>
+<p>A global constant is frozen when the kernel is decorated: changing it afterwards does not change the kernel.</p>
+<h2 id="the-python-function-stays-usable"><a class="anchor" href="#the-python-function-stays-usable" aria-hidden="true">#</a>The Python function stays usable</h2>
+<p>Outside a kernel, <code>gs.sqrt</code>, <code>gs.exp</code>… are the matching NumPy functions, and <code>kernel.py_func</code> is the original function: an element-wise kernel written with <code>gs.*</code> functions also runs in plain NumPy, which is handy to compare.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">assert</span> np.allclose(blend.py_func(a, b, <span class="tk-num">0.25</span>), blend(a, b, <span class="tk-num">0.25</span>))</code></pre></div>
+<p>This does not hold with <code>math.*</code> (which does not accept arrays), nor for indexed kernels: <code>gs.index()</code> has no meaning outside the GPU.</p>
 <h2 id="compilation"><a class="anchor" href="#compilation" aria-hidden="true">#</a>Compilation</h2>
-<p>Un kernel est traduit une fois à la décoration (vérification des types, représentation interne), puis compilé pour un périphérique au premier appel qui l'y exécute. Les appels suivants réutilisent le code compilé. <code>kernel.source(cible)</code> montre le code généré (<code>"cuda"</code>, <code>"opencl"</code>, <code>"wgsl"</code> ou <code>"ir"</code>) :</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>print(blend.source(<span class="tk-str">"opencl"</span>))</code></pre></div><nav class="pager"><a href="installation.html"><span class="dir">← Précédent</span><span class="name">Installation</span></a><a class="next" href="resultats.html"><span class="dir">Suivant →</span><span class="name">Résultats et volumes</span></a></nav></article>
-<aside class="toc" aria-label="Sur cette page"><div class="toc-title">Sur cette page</div><a href="#element-par-element">Élément par élément</a><a href="#avec-index">Avec index</a><a href="#types">Types</a><a href="#ce-qu-on-peut-ecrire-dans-un-kernel">Ce qu'on peut écrire dans un kernel</a><a href="#la-fonction-python-reste-utilisable">La fonction Python reste utilisable</a><a href="#compilation">Compilation</a></aside>
+<p>A kernel is translated once when it is decorated (type checking, internal representation), then compiled for a device on the first call that runs it there. Later calls reuse the compiled code. <code>kernel.source(target)</code> shows the generated code (<code>"cuda"</code>, <code>"opencl"</code>, <code>"wgsl"</code> or <code>"ir"</code>):</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>print(blend.source(<span class="tk-str">"opencl"</span>))</code></pre></div><nav class="pager"><a href="installation.html"><span class="dir">← Previous</span><span class="name">Installation</span></a><a class="next" href="results.html"><span class="dir">Next →</span><span class="name">Results and data</span></a></nav></article>
+<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#element-wise">Element-wise</a><a href="#indexed">Indexed</a><a href="#types">Types</a><a href="#what-you-can-write-in-a-kernel">What you can write in a kernel</a><a href="#the-python-function-stays-usable">The Python function stays usable</a><a href="#compilation">Compilation</a></aside>
 </main>
-<footer class="footer"><span>GPUsync · kernels GPU en Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Généré depuis docs/ par tools/build_pages.py</span></footer>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
 </div>
 </body>
 </html>

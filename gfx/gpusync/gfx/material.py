@@ -1,4 +1,4 @@
-"""Matériaux PBR Cook-Torrance, sources de lumière unifiées et environnement."""
+"""Cook-Torrance PBR materials, unified light sources and environment."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import numpy as np
 from .math3d import normalize
 from .texture import Texture
 
-# Motifs procéduraux évalués directement dans le kernel de shading GPU
+# Procedural patterns evaluated directly in the GPU shading kernel
 PATTERN_SOLID = 0
 PATTERN_CHECKER = 1
 PATTERN_GRID = 2
@@ -21,7 +21,7 @@ PATTERN_MARBLE = 4
 PATTERN_MIRROR_Z = 5
 PATTERN_MIRROR_Y = 6
 
-# Types de lumière dans le buffer unifié (16 floats par lumière)
+# Light types in the unified buffer (16 floats per light)
 LIGHT_OFF = 0
 LIGHT_POINT = 1
 LIGHT_SPOT = 2
@@ -29,7 +29,7 @@ LIGHT_SPOT = 2
 
 @dataclass
 class Material:
-    """Matériau PBR Cook-Torrance (albedo, metallic, roughness, émissif, motif ou textures 2D/RenderTarget)."""
+    """Cook-Torrance PBR material (albedo, metallic, roughness, emissive, pattern or 2D / RenderTarget textures)."""
 
     albedo: tuple[float, float, float] = (0.8, 0.8, 0.8)
     metallic: float = 0.0
@@ -144,7 +144,7 @@ class Material:
         brightness: float = 1.05,
         roughness: float = 0.55,
     ) -> Material:
-        """Matériau d'écran lumineux antireflet (moniteur 3D, caméra de surveillance, borne 2D/UI interactive)."""
+        """Anti-reflective glowing screen material (3D monitor, security camera, interactive 2D / UI kiosk)."""
         return cls(
             albedo=(0.02, 0.02, 0.03),
             metallic=0.0,
@@ -162,10 +162,10 @@ class Material:
         tint: tuple[float, float, float] = (0.94, 0.97, 1.0),
         reflectivity: float = 0.94,
     ) -> Material:
-        """Matériau miroir planaire optique (projection écran exacte + verre argenté).
+        """Optical planar mirror material (exact screen projection + silvered glass).
 
-        Accepte directement un `PlanarReflection` (détecte automatiquement miroir vertical `plane_z`
-        ou horizontal `plane_y`) ou un `RenderTarget`.
+        Directly accepts a `PlanarReflection` (automatically detects a vertical `plane_z` mirror
+        or a horizontal `plane_y` one) or a `RenderTarget`.
         """
         from .texture import PlanarReflection
 
@@ -192,7 +192,7 @@ class Material:
         emissive_tid: int = -1,
         roughness_tid: int = -1,
     ) -> np.ndarray:
-        """Emballe le matériau en 16 `float32` pour `shade_pbr` (indices de textures dans les slots 13..15)."""
+        """Packs the material into 16 `float32` for `shade_pbr` (texture indices in slots 13..15)."""
         return np.array(
             [
                 self.albedo[0],
@@ -256,7 +256,7 @@ class Material:
 
 @dataclass
 class DirectionalLight:
-    """Lumière directionnelle (soleil) avec shadow map directionnelle."""
+    """Directional light (sun) with a directional shadow map."""
 
     direction: tuple[float, float, float] = (0.55, 0.80, 0.42)
     color: tuple[float, float, float] = (1.0, 0.94, 0.84)
@@ -293,12 +293,12 @@ class DirectionalLight:
 
 @dataclass
 class PointLight:
-    """Lumière ponctuelle omnidirectionnelle."""
+    """Omnidirectional point light."""
 
     pos: tuple[float, float, float] = (0.0, 3.0, 0.0)
     color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     intensity: float = 12.0
-    range: float = 0.0  # 0 = portée illimitée (atténuation quadratique)
+    range: float = 0.0  # 0 = unlimited range (quadratic attenuation)
     enabled: bool = True
 
     def pack(self) -> np.ndarray:
@@ -335,7 +335,7 @@ class PointLight:
 
 @dataclass
 class SpotLight:
-    """Projecteur conique (direction + angles interne/externe en degrés)."""
+    """Cone spotlight (direction + inner/outer angles in degrees)."""
 
     pos: tuple[float, float, float] = (0.0, 5.0, 0.0)
     direction: tuple[float, float, float] = (0.0, -1.0, 0.0)
@@ -406,7 +406,7 @@ def light_from_dict(data: dict[str, Any]) -> Light:
 
 @dataclass
 class Environment:
-    """Environnement global : soleil, brouillard exponentiel et skybox equirectangulaire / HDRI."""
+    """Global environment: sun, exponential fog and equirectangular / HDRI skybox."""
 
     sun: DirectionalLight = field(default_factory=DirectionalLight)
     fog_density: float = 0.0012
@@ -416,18 +416,18 @@ class Environment:
 
     @staticmethod
     def studio_skybox(width: int = 512, height: int = 256) -> Texture:
-        """Génère une skybox equirectangulaire studio/néon (bandes lumineuses idéales pour reflets IBL)."""
+        """Generates a studio / neon equirectangular skybox (light strips, ideal for IBL reflections)."""
         yy, xx = np.indices((height, width), dtype=np.float32)
         u = (xx + 0.5) / width
         v = (yy + 0.5) / height
         phi = u * 2.0 * math.pi
         theta = v * math.pi
         ry = np.cos(theta)
-        # Dégradé ciel profond + horizon ambre + 2 softboxes studio pour des reflets chromés nets
+        # Deep-sky gradient + amber horizon + 2 studio softboxes for crisp chrome reflections
         r = np.clip(0.06 + 0.35 * np.power(1.0 - np.abs(ry), 3.0), 0.0, 1.0)
         g = np.clip(0.08 + 0.28 * np.power(1.0 - np.abs(ry), 3.0) + 0.06 * np.maximum(ry, 0.0), 0.0, 1.0)
         b = np.clip(0.18 + 0.38 * np.power(1.0 - np.abs(ry), 2.5) + 0.18 * np.maximum(ry, 0.0), 0.0, 1.0)
-        # Panneaux lumineux doux (gaussiens) : chaud + cyan pour reflets chromés naturels
+        # Soft (Gaussian) light panels: warm + cyan for natural chrome reflections
         soft1 = np.exp(-((phi - 1.1) / 0.36) ** 2 - ((ry - 0.52) / 0.22) ** 2).astype(np.float32)
         soft2 = np.exp(-((phi - 4.3) / 0.42) ** 2 - ((ry - 0.44) / 0.22) ** 2).astype(np.float32)
         r = np.clip(r + soft1 * 0.92 + soft2 * 0.22, 0.0, 1.0)
@@ -444,7 +444,7 @@ class Environment:
 
     @staticmethod
     def daylight_skybox(width: int = 512, height: int = 256) -> Texture:
-        """Génère une skybox équirectangulaire plein jour ensoleillé (ciel bleu clair, horizon lumineux, soleil, nuages doux)."""
+        """Generates a sunny full-daylight equirectangular skybox (light blue sky, bright horizon, sun, soft clouds)."""
         yy, xx = np.indices((height, width), dtype=np.float32)
         u = (xx + 0.5) / width
         v = (yy + 0.5) / height
@@ -454,21 +454,21 @@ class Environment:
         rx = np.sin(theta) * np.cos(phi)
         rz = np.sin(theta) * np.sin(phi)
 
-        # Dégradé ciel diurne réaliste : bleu azur au zénith, blanc-bleu lumineux à l'horizon, sol clair en dessous
+        # Realistic daytime sky gradient: azure at the zenith, bright blue-white at the horizon, light ground below
         up_t = np.clip(ry, 0.0, 1.0)
         hz = np.power(1.0 - np.abs(ry), 4.0)
         r = 0.24 + 0.54 * (1.0 - np.power(up_t, 0.55)) + 0.18 * hz
         g = 0.48 + 0.36 * (1.0 - np.power(up_t, 0.60)) + 0.14 * hz
         b = 0.86 + 0.12 * (1.0 - np.power(up_t, 0.65)) + 0.04 * hz
 
-        # Sol neutre clair sous l'horizon (pour des reflets réalistes par dessous)
+        # Light neutral ground below the horizon (for realistic reflections from below)
         below = (ry < 0.0).astype(np.float32)
         gt = np.clip(-ry * 2.5, 0.0, 1.0)
         r = r * (1.0 - below) + (0.68 - 0.30 * gt) * below
         g = g * (1.0 - below) + (0.72 - 0.30 * gt) * below
         b = b * (1.0 - below) + (0.78 - 0.28 * gt) * below
 
-        # Nuages doux hauts dans le ciel
+        # Soft clouds high in the sky
         cloud = (
             0.5
             + 0.28 * np.sin(phi * 3.0 + ry * 5.0) * np.cos(phi * 2.0 - ry * 4.0)

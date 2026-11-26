@@ -1,20 +1,20 @@
-"""SPH faiblement compressible sur grille triée.
+"""Weakly compressible SPH on a sorted grid.
 
-- Grille uniforme par tri (Green, « CUDA Particles », NVIDIA) : cellule de côté `h`, 27 cellules voisines.
-- Noyau spline cubique, équation d'état, pression symétrique, viscosité et pas de temps (Koschier et al., « SPH Techniques for the
-  Physics Based Simulation of Fluids and Solids », 2019).
-- Un seul noyau pour la densité et la force : avec poly6 et spiky (Müller et al., SCA 2003), la force ne dérive
-  pas d'une énergie et l'eau s'agite sans fin (0,2 m/s mesurés au repos).
-- Parois : demi-espaces d'eau au repos, intégrés exactement (ni particules de bord, ni densité manquante).
+- Uniform grid by sorting (Green, "CUDA Particles", NVIDIA): cells of side `h`, 27 neighbouring cells.
+- Cubic spline kernel, equation of state, symmetric pressure, viscosity and time step (Koschier et al., "SPH Techniques for the
+  Physics Based Simulation of Fluids and Solids", 2019).
+- A single kernel for density and force: with poly6 and spiky (Müller et al., SCA 2003), the force does not derive
+  from an energy and the water keeps sloshing forever (0.2 m/s measured at rest).
+- Walls: half-spaces of water at rest, integrated exactly (no boundary particles, no missing density).
 
-Unités : masse volumique au repos 1, donc `m = espacement³` et les densités calculées sont relatives.
+Units: rest density 1, so `m = spacing³` and the computed densities are relative.
 """
 
 import gpusync as gs
 
 SORT_TILE = 256
 SORT_TILE_BITS = 8
-# Clé de tri : cellule << 18 | particule, donc 262 144 particules et 16 384 cellules au plus
+# Sort key: cell << 18 | particle, hence 262,144 particles and 16,384 cells at most
 
 
 @gs.kernel
@@ -29,7 +29,7 @@ def sph_cell_keys(
     bz: gs.f32,
     floor_y: gs.f32,
 ) -> gs.u32["np"]:
-    """Clé de tri de chaque particule ; les cases au-delà de `n` (puissance de deux) restent en fin de liste."""
+    """Sort key of each particle; the slots beyond `n` (a power of two) stay at the end of the list."""
     i = gs.index()
     if i >= pos.shape[0]:
         return gs.u32(4294967295)
@@ -48,10 +48,10 @@ def bitonic_steps(
     m2: gs.i32,
     m3: gs.i32,
 ) -> gs.u32["np"]:
-    """Quatre étapes de tri bitonique en un lancement (masque 0 : étape vide).
+    """Four bitonic sort steps in one launch (mask 0: empty step).
 
-    À chaque étape, la case `a` se compare à `a ^ masque` et la plus petite des deux adresses garde le minimum.
-    Une case ne dépend donc que des 16 adresses `i ^ (xor d'une partie des masques)`."""
+    At each step, slot `a` compares itself with `a ^ mask` and the smaller of the two addresses keeps the minimum.
+    A slot therefore only depends on the 16 addresses `i ^ (xor of part of the masks)`."""
     i = gs.index()
     v = gs.local(gs.u32, 16)
     addr = gs.local(gs.i32, 16)
@@ -68,7 +68,7 @@ def bitonic_steps(
         addr[s] = a
         v[s] = keys[a]
     for step in range(4):
-        # Après une étape, seules les adresses sans ce masque servent encore
+        # After a step, only the addresses without this mask are still used
         bit = 1 << step
         for s in range(16):
             if (s & (2 * bit - 1)) == 0:
@@ -82,7 +82,7 @@ def bitonic_steps(
 
 @gs.kernel(group=SORT_TILE)
 def sort_tiles(keys: gs.u32["np"]) -> gs.u32["np"]:
-    """Trie chaque tuile de 256 clés en mémoire partagée."""
+    """Sorts each tile of 256 keys in shared memory."""
     i = gs.index()
     r = gs.lane()
     t = gs.shared(gs.u32, SORT_TILE)
@@ -90,7 +90,7 @@ def sort_tiles(keys: gs.u32["np"]) -> gs.u32["np"]:
     gs.barrier()
     for p in range(1, SORT_TILE_BITS + 1):
         for q in range(p):
-            # Première étape d'un niveau : en miroir ; les suivantes par moitiés
+            # First step of a level: mirrored; the next ones by halves
             mask = (1 << p) - 1
             if q > 0:
                 mask = 1 << (p - 1 - q)
@@ -106,7 +106,7 @@ def sort_tiles(keys: gs.u32["np"]) -> gs.u32["np"]:
 
 @gs.kernel(group=SORT_TILE)
 def merge_tiles(keys: gs.u32["np"]) -> gs.u32["np"]:
-    """Fin d'un niveau de fusion : les étapes internes à chaque tuile."""
+    """End of a merge level: the steps internal to each tile."""
     i = gs.index()
     r = gs.lane()
     t = gs.shared(gs.u32, SORT_TILE)
@@ -130,7 +130,7 @@ def sph_cell_ranges(
     start: gs.Out[gs.u32["nc"], 4294967295],
     count: gs.Out[gs.u32["nc"], 0],
 ):
-    """Première particule et nombre de particules de chaque cellule, dans la liste triée."""
+    """First particle and number of particles of each cell, in the sorted list."""
     i = gs.index()
     k = keys[i]
     if k != gs.u32(4294967295):
@@ -144,7 +144,7 @@ def sph_gather(
     src: gs.f32["n", "c4"],
     keys: gs.u32["np"],
 ) -> gs.f32["n", "c4"]:
-    """Recopie un tableau dans l'ordre des cellules (voisins proches en mémoire)."""
+    """Copies an array in cell order (close neighbours in memory)."""
     i, c = gs.index()
     return src[int(keys[i] & gs.u32(262143)), c]
 
@@ -165,7 +165,7 @@ def sph_density(
     bz: gs.f32,
     floor_y: gs.f32,
 ) -> gs.f32["n"]:
-    """Densité relative (spline cubique), eau fictive derrière les parois comprise."""
+    """Relative density (cubic spline), fictitious water behind the walls included."""
     i = gs.index()
     px = spos[i, 0]
     py = spos[i, 1]
@@ -204,7 +204,7 @@ def sph_density(
                                             total += 2.0 * u * u * u
     # Spline cubique : 8 / (π h³)
     rho = total * mass * 2.5464791 * inv_h * inv_h * inv_h
-    # Intégrale de la spline sur le demi-espace situé derrière chaque paroi, à la distance x·h
+    # Integral of the spline over the half-space behind each wall, at distance x·h
     for w in range(5):
         dist = py - floor_y
         if w == 0:
@@ -221,7 +221,7 @@ def sph_density(
             if x >= 0.5:
                 rho += u * u * u * u * u * (1.6 - 1.0666667 * u)
             else:
-                # 1/60 : valeur en x = 0,5 ; puis primitive de la branche centrale
+                # 1/60: value at x = 0.5; then antiderivative of the central branch
                 x2 = x * x
                 prim = x2 * x * (0.1666667 + x2 * (x * 0.2 - 0.3))
                 rho += 0.0333333 + 16.0 * (0.0875 * (0.5 - x) - (0.0145833 - prim))
@@ -259,7 +259,7 @@ def sph_integrate(
     damping: gs.f32,
     max_speed: gs.f32,
 ) -> (gs.f32["n", "c4"], gs.f32["n", "c4"]):
-    """Pression symétrique, viscosité, cohésion, parois, puis Euler symplectique (ordre d'origine conservé)."""
+    """Symmetric pressure, viscosity, cohesion, walls, then symplectic Euler (original order kept)."""
     i, c = gs.index()
     px = pos[i, 0]
     py = pos[i, 1]
@@ -274,7 +274,7 @@ def sph_integrate(
     iy = gs.min(gs.max(int((py - floor_y) * inv_c), 0), ny - 1)
     iz = gs.min(gs.max(int((pz + bz) * inv_c), 0), nz - 1)
 
-    # Retrouver sa propre densité dans la liste triée
+    # Find its own density in the sorted list
     own = (iz * ny + iy) * nx + ix
     me = int(start[own])
     for j in range(int(start[own]), int(start[own]) + int(count[own])):
@@ -283,7 +283,7 @@ def sph_integrate(
             break
     c2 = sound * sound
     rho_i = gs.max(rho[me], 0.1)
-    # p = c² (ρ/ρ0 - 1), jamais négative
+    # p = c² (ρ/ρ0 - 1), never negative
     pr_i = c2 * gs.max(rho_i - 1.0, 0.0) / (rho_i * rho_i)
 
     ax = grav_x
@@ -291,7 +291,7 @@ def sph_integrate(
     az = grav_z
     h2 = h * h
     inv_h3 = inv_h * inv_h * inv_h
-    # Même noyau que la densité : sinon la force n'est plus le gradient de l'énergie et l'eau s'agite toute seule
+    # Same kernel as the density: otherwise the force is no longer the gradient of the energy and the water sloshes by itself
     scale = 15.2788745 * inv_h3 * inv_h
     for oz in range(-1, 2):
         cz = iz + oz
@@ -321,9 +321,9 @@ def sph_integrate(
                                         rho_j = gs.max(rho[j], 0.1)
                                         pr_j = c2 * gs.max(rho_j - 1.0, 0.0) / (rho_j * rho_j)
                                         f = mass * (pr_i + pr_j) * grad / r
-                                        # Cohésion douce au-delà de la distance de repos
+                                        # Soft cohesion beyond the rest distance
                                         f -= cohesion * mass * inv_h3 * q * (1.0 - q) / r
-                                        # Viscosité : 2 (d + 2) ν Σ m/ρ (v·x)/(x² + 0,01 h²) ∇W
+                                        # Viscosity: 2 (d + 2) ν Σ m/ρ (v·x)/(x² + 0.01 h²) ∇W
                                         vdx = vx - svel[j, 0]
                                         vdy = vy - svel[j, 1]
                                         vdz = vz - svel[j, 2]
@@ -333,7 +333,7 @@ def sph_integrate(
                                         ay += ey * f
                                         az += ez * f
 
-    # Poussée du demi-espace d'eau fictive derrière chaque paroi : gradient exact de sa part de densité
+    # Push of the fictitious half-space of water behind each wall: exact gradient of its share of density
     for w in range(5):
         dist = py - floor_y
         if w == 0:
@@ -347,7 +347,7 @@ def sph_integrate(
         x = gs.max(dist * inv_h, 0.0)
         if x < 1.0:
             u = 1.0 - x
-            # Intégrale de la spline sur le plan à la distance x·h
+            # Integral of the spline over the plane at distance x·h
             plane_w = 32.0 * u * u * u * u * (0.25 - 0.2 * u)
             if x < 0.5:
                 x2 = x * x
@@ -377,12 +377,12 @@ def sph_integrate(
     py += vy * dt
     pz += vz * dt
 
-    # Une particule représente un cube d'eau : son centre reste près d'un demi-espacement (0,25 h) des parois
+    # A particle stands for a cube of water: its centre stays about half a spacing (0.25 h) from the walls
     margin = 0.2 * h
     if py < floor_y + margin:
         py = floor_y + margin
         vy = gs.abs(vy) * restitution
-        # Frottement sur le fond : 0,9 par seconde
+        # Friction on the bottom: 0.9 per second
         rub = gs.max(1.0 - 0.9 * dt, 0.0)
         vx = vx * rub
         vz = vz * rub
@@ -424,7 +424,7 @@ def _global_steps(keys: gs.Array, masks: list[int], device: str | None) -> gs.Ar
 
 
 def sort_keys(keys: gs.Array, size: int, *, device: str | None = None) -> gs.Array:
-    """Trie `size` clés u32 (puissance de deux) en ordre croissant, sur GPU."""
+    """Sorts `size` u32 keys (a power of two) in ascending order, on the GPU."""
     levels = size.bit_length() - 1
     tiled = levels >= SORT_TILE_BITS
     if tiled:

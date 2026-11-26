@@ -1,4 +1,4 @@
-//! Liaison Python (PyO3) : module `gpusync._core`. Seul crate du projet qui dépend de Python.
+//! Python binding (PyO3): the `gpusync._core` module. The only crate of the project that depends on Python.
 
 mod kernel;
 mod window;
@@ -11,18 +11,18 @@ use gpusync_backend_wgpu::WgpuBackend;
 use gpusync_runtime::{Backend, BackendStatus, DeviceInfo, all_devices, discover};
 use pyo3::prelude::*;
 
-/// Résultat de la découverte, gardé en cache : créer une instance wgpu coûte ~100 ms.
+/// Discovery result, cached: creating a wgpu instance costs ~100 ms.
 static CACHE: Mutex<Option<Vec<BackendStatus>>> = Mutex::new(None);
 
-/// Backends interrogés : CUDA, wgpu (Metal / Vulkan / DX12) puis OpenCL ; le classement des
-/// périphériques est fait côté Python (§4.8 de l'architecture).
+/// Backends queried: CUDA, wgpu (Metal / Vulkan / DX12) then OpenCL; devices are ranked
+/// on the Python side (§4.8 of the architecture).
 fn statuses(py: Python<'_>, refresh: bool) -> Vec<BackendStatus> {
     py.detach(|| {
         let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if refresh || cache.is_none() {
             let backends: [&dyn Backend; 3] = [&CudaBackend, &WgpuBackend, &OpenClBackend];
             let mut st = discover(&backends);
-            // L'interpréteur de référence, toujours disponible, en dernier recours.
+            // The reference interpreter, always available, as a last resort.
             st.push(BackendStatus {
                 name: "cpu",
                 devices: vec![::gpusync_core::cpu_info()],
@@ -34,35 +34,35 @@ fn statuses(py: Python<'_>, refresh: bool) -> Vec<BackendStatus> {
     })
 }
 
-/// Un périphérique de calcul.
+/// A compute device.
 #[pyclass(name = "Device", module = "gpusync", frozen, get_all)]
 struct PyDevice {
-    /// Nom commercial du périphérique.
+    /// Commercial name of the device.
     name: String,
-    /// API utilisée : "cuda", "metal", "vulkan", "dx12" ou "opencl".
+    /// API used: "cuda", "metal", "vulkan", "dx12" or "opencl".
     backend: String,
-    /// Index parmi les périphériques du même backend.
+    /// Index among the devices of the same backend.
     index: usize,
-    /// "discrete_gpu", "integrated_gpu", "virtual_gpu", "cpu" ou "other".
+    /// "discrete_gpu", "integrated_gpu", "virtual_gpu", "cpu" or "other".
     kind: String,
     vendor: String,
-    /// Version de l'API ou du driver.
+    /// API or driver version.
     version: String,
-    /// Calcul en float64 supporté (arithmétique).
+    /// float64 computation supported (arithmetic).
     f64: bool,
-    /// Fonctions transcendantes (exp, log, sin…) en float64 supportées.
+    /// Transcendental functions (exp, log, sin…) supported in float64.
     f64_math: bool,
-    /// Entiers 64 bits (gs.i64, gs.u64) supportés.
+    /// 64-bit integers (gs.i64, gs.u64) supported.
     int64: bool,
-    /// Mémoire partagée avec l'hôte (zéro-copie possible).
+    /// Memory shared with the host (zero-copy possible).
     unified_memory: bool,
-    /// Mémoire globale en octets (None si le backend ne l'expose pas).
+    /// Global memory in bytes (None if the backend does not expose it).
     memory_bytes: Option<u64>,
-    /// Taille max d'un buffer en octets.
+    /// Largest buffer size in bytes.
     max_buffer_bytes: Option<u64>,
-    /// Threads au plus par groupe (`@gs.kernel(group=n)`).
+    /// Most threads per group (`@gs.kernel(group=n)`).
     max_group: u32,
-    /// Mémoire partagée (`gs.shared`) au plus par groupe, en octets.
+    /// Most shared memory (`gs.shared`) per group, in bytes.
     shared_bytes: u64,
 }
 
@@ -89,7 +89,7 @@ impl From<&DeviceInfo> for PyDevice {
 
 #[pymethods]
 impl PyDevice {
-    /// Identifiant court, ex. "opencl:1" : utilisable comme `device="opencl:1"`.
+    /// Short identifier, e.g. "opencl:1": usable as `device="opencl:1"`.
     #[getter]
     fn id(&self) -> String {
         format!("{}:{}", self.backend, self.index)
@@ -127,12 +127,12 @@ fn py_bool(b: bool) -> &'static str {
     if b { "True" } else { "False" }
 }
 
-/// État d'un backend : disponible ou non, et pourquoi.
+/// Status of a backend: available or not, and why.
 #[pyclass(name = "BackendStatus", module = "gpusync", frozen, get_all)]
 struct PyBackendStatus {
     name: String,
     available: bool,
-    /// Raison de l'indisponibilité (None si disponible).
+    /// Reason it is unavailable (None if available).
     error: Option<String>,
     devices: Vec<Py<PyDevice>>,
 }
@@ -142,7 +142,7 @@ impl PyBackendStatus {
     fn __repr__(&self) -> String {
         match &self.error {
             None => format!(
-                "BackendStatus('{}', disponible, {} périphérique(s))",
+                "BackendStatus('{}', available, {} device(s))",
                 self.name,
                 self.devices.len()
             ),
@@ -151,9 +151,9 @@ impl PyBackendStatus {
     }
 }
 
-/// Liste les périphériques de calcul disponibles, dans l'ordre de préférence.
+/// Lists the available compute devices, in order of preference.
 ///
-/// La découverte est faite une fois puis mise en cache ; `refresh=True` la refait.
+/// Discovery runs once and is cached; `refresh=True` runs it again.
 #[pyfunction]
 #[pyo3(signature = (refresh = false))]
 fn devices(py: Python<'_>, refresh: bool) -> Vec<PyDevice> {
@@ -163,7 +163,7 @@ fn devices(py: Python<'_>, refresh: bool) -> Vec<PyDevice> {
         .collect()
 }
 
-/// État de chaque backend (utile pour comprendre pourquoi un GPU n'apparaît pas).
+/// Status of each backend (useful to understand why a GPU does not show up).
 #[pyfunction]
 #[pyo3(signature = (refresh = false))]
 fn backends(py: Python<'_>, refresh: bool) -> PyResult<Vec<PyBackendStatus>> {

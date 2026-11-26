@@ -1,7 +1,7 @@
-"""Fonction Python → description JSON pour le frontend Rust (voir crates/gpusync-frontend).
+"""Python function → JSON description for the Rust frontend (see crates/gpusync-frontend).
 
-Le Python fournit ce que lui seul connaît : le source, la signature (annotations évaluées), les
-constantes globales et les modules utilisés. Le typage et la validation sont faits en Rust.
+Python provides what only it knows: the source, the signature (evaluated annotations), the
+global constants and the modules used. Typing and validation are done in Rust.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from ._types import ArrayType, DType, OutType
 
 
 class KernelDeclarationError(Exception):
-    """Erreur dans la déclaration (signature) d'un kernel : convertie en gs.KernelSyntaxError."""
+    """Error in a kernel's declaration (signature): converted into gs.KernelSyntaxError."""
 
 
 def _dump(node):
@@ -59,8 +59,8 @@ def _const_json(value):
 
 
 def _scope(func) -> dict:
-    """Noms visibles depuis `func` : intégrés, globaux, puis variables de fermeture (comme
-    inspect.getclosurevars, sans désassembler le code : 40 % du temps d'analyse en moins)."""
+    """Names visible from `func`: builtins, globals, then closure variables (like
+    inspect.getclosurevars, without disassembling the code: 40 % less analysis time)."""
     g = func.__globals__
     b = g.get("__builtins__", builtins)
     scope = dict(b.__dict__ if isinstance(b, types.ModuleType) else b)
@@ -68,13 +68,13 @@ def _scope(func) -> dict:
     for name, cell in zip(func.__code__.co_freevars, func.__closure__ or ()):
         try:
             scope[name] = cell.cell_contents
-        except ValueError:  # variable de fermeture pas encore affectée
+        except ValueError:  # closure variable not assigned yet
             pass
     return scope
 
 
 def return_types(func, ret) -> tuple[list, bool]:
-    """Sorties déclarées : ([ArrayType], tuple ?) pour `-> gs.f32[:]` ou `-> (gs.f32[:], gs.i32[:])`."""
+    """Declared outputs: ([ArrayType], tuple?) for `-> gs.f32[:]` or `-> (gs.f32[:], gs.i32[:])`."""
     if isinstance(ret, ArrayType):
         return [ret], False
     items = None
@@ -85,39 +85,39 @@ def return_types(func, ret) -> tuple[list, bool]:
     if items and all(isinstance(r, ArrayType) for r in items):
         return list(items), True
     raise KernelDeclarationError(
-        f"'{func.__name__}' : précisez le type de sortie, ex. -> gs.f32[:] (élément par élément), "
-        '-> gs.f32["n", "n"] (avec gs.index()) ou -> (gs.f32[:], gs.f32[:]) (plusieurs sorties)'
+        f"'{func.__name__}': give the output type, e.g. -> gs.f32[:] (element-wise), "
+        '-> gs.f32["n", "n"] (with gs.index()) or -> (gs.f32[:], gs.f32[:]) (several outputs)'
     )
 
 
 def kernel_spec(func, grid=None, group=None, cells=None) -> tuple[dict, list]:
-    """Renvoie (spec JSON pour le frontend, liste des paramètres [(nom, kind, DType, dims)])."""
+    """Returns (JSON spec for the frontend, list of parameters [(name, kind, DType, dims)])."""
     try:
         lines, start = inspect.getsourcelines(func)
     except (OSError, TypeError) as e:
         raise KernelDeclarationError(
-            f"source de '{func.__name__}' introuvable ({e}) : un kernel doit être défini dans un fichier ou un notebook"
+            f"source of '{func.__name__}' not found ({e}): a kernel must be defined in a file or a notebook"
         ) from None
     source = textwrap.dedent("".join(lines))
     tree = ast.parse(source)
     fdef = next((n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
     if not isinstance(fdef, ast.FunctionDef):
-        raise KernelDeclarationError("@gs.kernel s'applique à une fonction (def), pas async def")
+        raise KernelDeclarationError("@gs.kernel applies to a function (def), not async def")
 
     a = fdef.args
     if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs or a.defaults:
         raise KernelDeclarationError(
-            f"'{func.__name__}' : paramètres simples uniquement (pas de *args, **kwargs, valeurs par défaut ni paramètres nommés)"
+            f"'{func.__name__}': plain parameters only (no *args, **kwargs, default values or keyword-only parameters)"
         )
     annotations = inspect.get_annotations(func, eval_str=True)
     params = []
-    fills = {}  # gs.Out : valeur de départ
+    fills = {}  # gs.Out: start value
     for arg in a.args:
         ann = annotations.get(arg.arg)
         if isinstance(ann, OutType):
             if grid is None:
                 raise KernelDeclarationError(
-                    f"paramètre '{arg.arg}' : gs.Out s'utilise avec une grille explicite, ex. @gs.kernel(grid=\"x\")"
+                    f"parameter '{arg.arg}': gs.Out is used with an explicit grid, e.g. @gs.kernel(grid=\"x\")"
                 )
             params.append((arg.arg, "out", ann.array.dtype, ann.array.dims))
             fills[arg.arg] = ann.fill
@@ -127,24 +127,24 @@ def kernel_spec(func, grid=None, group=None, cells=None) -> tuple[dict, list]:
             params.append((arg.arg, "scalar", ann, None))
         elif ann is None:
             raise KernelDeclarationError(
-                f"paramètre '{arg.arg}' sans type : annotez-le, ex. {arg.arg}: gs.f32[:] (tableau) ou {arg.arg}: gs.f32 (scalaire)"
+                f"parameter '{arg.arg}' has no type: annotate it, e.g. {arg.arg}: gs.f32[:] (array) or {arg.arg}: gs.f32 (scalar)"
             )
         else:
-            raise KernelDeclarationError(f"paramètre '{arg.arg}' : type {ann!r} non supporté (gs.f32[:], gs.f32, gs.i32…)")
+            raise KernelDeclarationError(f"parameter '{arg.arg}': type {ann!r} not supported (gs.f32[:], gs.f32, gs.i32…)")
     if grid is None:
         outs, _ = return_types(func, annotations.get("return"))
     else:
         outs = []
         if annotations.get("return") is not None:
             raise KernelDeclarationError(
-                f"'{func.__name__}' : avec grid=, les résultats sont les paramètres gs.Out ; retirez le type de retour (-> ...)"
+                f"'{func.__name__}': with grid=, the results are the gs.Out parameters; remove the return type (-> ...)"
             )
         if not any(k == "out" for _, k, _, _ in params):
             raise KernelDeclarationError(
-                f"'{func.__name__}' : avec grid=, déclarez au moins une sortie, ex. counts: gs.Out[gs.i32[10]]"
+                f"'{func.__name__}': with grid=, declare at least one output, e.g. counts: gs.Out[gs.i32[10]]"
             )
 
-    # Noms libres : constantes numériques globales et modules gs / math.
+    # Free names: numeric global constants and the gs / math modules.
     import gpusync
 
     names = {n.id for n in ast.walk(fdef) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
@@ -164,7 +164,7 @@ def kernel_spec(func, grid=None, group=None, cells=None) -> tuple[dict, list]:
 
     spec = {
         "name": func.__name__,
-        "filename": inspect.getsourcefile(func) or "<inconnu>",
+        "filename": inspect.getsourcefile(func) or "<unknown>",
         "line_offset": start - 1,
         "params": [
             {"name": n, "kind": k, "dtype": d.name, **({"dims": list(dims)} if k != "scalar" else {})}
@@ -183,10 +183,10 @@ def kernel_spec(func, grid=None, group=None, cells=None) -> tuple[dict, list]:
 
 
 def kernel_json(func, grid=None, group=None, cells=None) -> tuple[str, list, list, bool, dict]:
-    """(spec JSON, paramètres, sorties [ArrayType], la sortie est-elle un tuple ?, valeur de départ
-    de chaque gs.Out).
+    """(JSON spec, parameters, outputs [ArrayType], is the output a tuple?, start value
+    of each gs.Out).
 
-    Mode explicite (`grid=`) : les sorties sont les paramètres gs.Out (tuple s'il y en a plusieurs).
+    Explicit mode (`grid=`): the outputs are the gs.Out parameters (a tuple if there are several).
     """
     spec, params = kernel_spec(func, grid, group, cells)
     fills = spec.pop("_fills")

@@ -1,5 +1,5 @@
-"""Opérations bit à bit (&, |, ^, ~, <<, >>) et gs.mulhi, sur les quatre types entiers, comparées à
-NumPy (et à Python pour les décalages au-delà de la largeur) sur chaque périphérique."""
+"""Bitwise operations (&, |, ^, ~, <<, >>) and gs.mulhi, on the four integer types, compared with
+NumPy (and with Python for shifts beyond the width) on every device."""
 
 import numpy as np
 import pytest
@@ -48,7 +48,7 @@ def hi64(a: gs.u64[:], b: gs.u64[:], c: gs.i64[:], d: gs.i64[:]) -> (gs.u64[:], 
 
 @gs.kernel
 def montgomery(a: gs.u32[:], b: gs.u32[:], p: gs.u32, pinv: gs.u32) -> gs.u32[:]:
-    """Produit de Montgomery a·b·2⁻³² mod p (p < 2³¹) en arithmétique 32 bits seulement."""
+    """Montgomery product a·b·2⁻³² mod p (p < 2³¹) in 32-bit arithmetic only."""
     lo = a * b
     hi = gs.mulhi(a, b)
     m = lo * pinv
@@ -69,10 +69,10 @@ def flags(x: gs.i32[:], y: gs.i32[:]) -> gs.i32[:]:
 
 
 def shift_ref(x, n, width, left):
-    """Décalage avec la sémantique de GPUsync : compte lu comme non signé, ≥ largeur → 0 / −1."""
+    """Shift with GPUsync semantics: count read as unsigned, ≥ width → 0 / −1."""
     out = []
     for v, k in zip(x.tolist(), n.tolist()):
-        k = k % (1 << width)  # non signé
+        k = k % (1 << width)  # unsigned
         if left:
             r = (v << k) if k < width else 0
             r &= (1 << width) - 1
@@ -114,7 +114,7 @@ def test_bits_i32_u32(dev):
 @pytest.mark.parametrize("dev", DEVICES)
 def test_bits_i64_u64(dev):
     if not has_int64(dev):
-        pytest.skip("pas d'entiers 64 bits")
+        pytest.skip("no 64-bit integers")
     x = RNG.integers(-(1 << 63), (1 << 63) - 1, 3000, dtype=np.int64)
     y = RNG.integers(-(1 << 63), (1 << 63) - 1, 3000, dtype=np.int64)
     n = RNG.integers(-2, 70, 3000, dtype=np.int64)
@@ -179,9 +179,9 @@ def test_messages(tmp_path):
         spec = importlib.util.spec_from_file_location(name, path)
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
-    with pytest.raises(gs.TypeMismatch, match="attend des entiers"):
+    with pytest.raises(gs.TypeMismatch, match="expects integers"):
         load("@gs.kernel\ndef k(x: gs.f32[:]) -> gs.f32[:]:\n    return x & 1\n", "k1")
-    with pytest.raises(gs.TypeMismatch, match="~ attend un entier"):
+    with pytest.raises(gs.TypeMismatch, match="~ expects an integer"):
         load("@gs.kernel\ndef k(x: gs.f32[:]) -> gs.f32[:]:\n    return ~x\n", "k2")
     with pytest.raises(gs.TypeMismatch, match="mulhi"):
         load("@gs.kernel\ndef k(x: gs.f32[:]) -> gs.f32[:]:\n    return gs.mulhi(x, x)\n", "k3")

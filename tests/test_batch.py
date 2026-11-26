@@ -1,5 +1,5 @@
-"""gs.batch() : mêmes résultats qu'hors du lot, y compris avec plusieurs threads, des lectures au milieu,
-des buffers réutilisés par le lot en cours et des entrées par blocs."""
+"""gs.batch(): same results as outside a batch, including with several threads, reads in the middle,
+buffers reused by the current batch and chunked inputs."""
 
 import threading
 
@@ -85,8 +85,8 @@ def test_several_threads(dev):
                     for _ in range(4):
                         a = add1(a, device=dev)
                 if not np.allclose(a.numpy(), x + 5, atol=1e-5):
-                    errors.append(f"thread {seed} : résultat faux")
-        except Exception as e:  # relu par le test
+                    errors.append(f"thread {seed}: wrong result")
+        except Exception as e:  # read back by the test
             errors.append(repr(e))
 
     threads = [threading.Thread(target=worker, args=(s,)) for s in range(4)]
@@ -111,8 +111,8 @@ def test_threads_with_and_without_batch(dev):
                 else:
                     a = add1(inc(x, device=dev), device=dev)
                 if not np.allclose(a.numpy(), x + 2, atol=1e-5):
-                    errors.append(f"thread {seed} : résultat faux")
-        except Exception as e:  # relu par le test
+                    errors.append(f"thread {seed}: wrong result")
+        except Exception as e:  # read back by the test
             errors.append(repr(e))
 
     threads = [threading.Thread(target=worker, args=(s, s % 2 == 0)) for s in range(4)]
@@ -125,10 +125,10 @@ def test_threads_with_and_without_batch(dev):
 
 @pytest.mark.parametrize("dev", GPUS)
 def test_chunked_explicit_kernel(dev):
-    """Entrée envoyée par petits blocs dans le même buffer : chaque bloc doit attendre le calcul du précédent."""
+    """Input uploaded in small chunks into the same buffer: each chunk must wait for the previous computation."""
     idx = np.zeros(4_000_001, dtype=np.int32)
     idx[1:] = np.arange(4_000_000) // 500_000
-    idx = idx[1:]  # adresse non alignée : pas de zéro-copie
+    idx = idx[1:]  # unaligned address: no zero-copy
     gs.set_memory_budget(6 << 20)
     try:
         with gs.batch(dev):

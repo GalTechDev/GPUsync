@@ -1,118 +1,118 @@
 # Installation
 
-GPUsync n'est pas publié sur PyPI : on le compile depuis le dépôt. La compilation produit un module natif
-(`gpusync._core`, écrit en Rust) et installe le paquet Python en mode modifiable.
+GPUsync is not on PyPI yet: you build it from the repository. The build produces a native module
+(`gpusync._core`, written in Rust) and installs the Python package in editable mode.
 
-## Prérequis
+## Requirements
 
 | | macOS | Windows | Linux |
 |---|---|---|---|
 | Rust | `rustup` | `rustup` | `rustup` |
 | Python | ≥ 3.10 | ≥ 3.10 | ≥ 3.10 |
-| Compilateur C | Xcode Command Line Tools | Visual Studio Build Tools, charge « C++ » | `gcc` ou `clang` |
+| C compiler | Xcode Command Line Tools | Visual Studio Build Tools, "C++" workload | `gcc` or `clang` |
 
-Aucune bibliothèque GPU n'est nécessaire à la compilation : les pilotes (OpenCL, CUDA) sont chargés au
-démarrage s'ils sont présents, et leur absence désactive seulement le backend correspondant.
+No GPU library is needed to build: drivers (OpenCL, CUDA) are loaded at startup when present, and a missing one
+only disables the matching backend.
 
-## Compiler
-
-```bash
-python3 tools/dev.py setup      # crée .venv, installe maturin, pytest, NumPy, puis compile
-```
-
-Après une modification du code Rust :
+## Build
 
 ```bash
-python3 tools/dev.py build      # recompile l'extension dans .venv
-python3 tools/dev.py test       # recompile, puis cargo test, pytest et le diagnostic
+python3 tools/dev.py setup      # creates .venv, installs maturin, pytest, NumPy, then builds
 ```
 
-Les scripts se lancent avec le Python de `.venv` (`.venv/bin/python`, ou `.venv\Scripts\python.exe` sous
-Windows), ou par `python3 tools/dev.py run script.py`.
+After changing Rust code:
 
-Seule dépendance d'exécution : NumPy ≥ 1.22.
+```bash
+python3 tools/dev.py build      # rebuilds the extension in .venv
+python3 tools/dev.py test       # rebuilds, then cargo test, pytest and the diagnostic
+```
 
-`setup` et `build` installent aussi le moteur graphique `gpusync.gfx`, qui est un paquet à part
-([gpusync-gfx](../gfx/README.md), dossier `gfx/`, Python pur). Pour la bibliothèque seule, ignorez-le : sans lui,
-tout fonctionne, et `gs.gfx` lève une `ImportError` qui donne la commande d'installation. Pour l'ajouter ou le
-retirer à la main :
+Run scripts with the Python from `.venv` (`.venv/bin/python`, or `.venv\Scripts\python.exe` on Windows), or with
+`python3 tools/dev.py run script.py`.
+
+The only runtime dependency is NumPy ≥ 1.22.
+
+`setup` and `build` also install the graphics engine `gpusync.gfx`, which is a separate package
+([gpusync-gfx](../gfx/README.md), folder `gfx/`, pure Python). If you only want the library, ignore it: everything
+works without it, and `gs.gfx` raises an `ImportError` that gives the install command. To add or remove it by
+hand:
 
 ```bash
 .venv/bin/python -m pip install --no-build-isolation --no-deps -e gfx
 .venv/bin/python -m pip uninstall gpusync-gfx
 ```
 
-## Vérifier ce qui est détecté
+## Check what is detected
 
 ```bash
 .venv/bin/python -m gpusync
 ```
 
-affiche chaque backend, ses périphériques et, s'il est indisponible, pourquoi (ici sur le Mac) :
+lists each backend, its devices and, when a backend is unavailable, why (here on the Mac):
 
 ```text
 gpusync 0.1.0 — Darwin arm64, Python 3.15.2
 
-[cuda] indisponible : pas de driver CUDA sous macOS (aucun GPU NVIDIA)
-[wgpu] 1 périphérique(s)
+[cuda] unavailable: no CUDA driver on macOS (no NVIDIA GPU)
+[wgpu] 1 device(s)
   metal:0    Apple M5 Pro
-             integrated_gpu, Apple, metal | mémoire ?, buffer max 4.0 Go | mémoire unifiée
-[opencl] 1 périphérique(s)
+             integrated_gpu, Apple, metal | memory ?, buffer max 4.0 GB | unified memory
+[opencl] 1 device(s)
   opencl:0   Apple M5 Pro
-             integrated_gpu, Apple, OpenCL 1.2 | mémoire 17.8 Go, buffer max 3.3 Go | mémoire unifiée
-[cpu] 1 périphérique(s)
-  cpu:0      Interpréteur GPUsync (CPU, lent)
-             cpu, GPUsync, 0.1.0 | mémoire ?, buffer max ? | f64, mémoire unifiée
+             integrated_gpu, Apple, OpenCL 1.2 | memory 17.8 GB, buffer max 3.3 GB | unified memory
+[cpu] 1 device(s)
+  cpu:0      GPUsync interpreter (CPU, slow)
+             cpu, GPUsync, 0.1.0 | memory ?, buffer max ? | f64, unified memory
 
-Périphérique par défaut : Device('Apple M5 Pro', backend='metal', f64=False, unified_memory=True)
+Default device: Device('Apple M5 Pro', backend='metal', f64=False, unified_memory=True)
 ```
 
-Depuis Python :
+From Python:
 
 ```python
 import gpusync as gs
 
-for st in gs.backends():                       # un état par backend : cuda, wgpu, opencl, cpu
+for st in gs.backends():                       # one status per backend: cuda, wgpu, opencl, cpu
     print(st.name, st.available, st.error)
-for d in gs.devices():                         # périphériques utilisables
-    print(d.id, d.name, d.kind, "f64" if d.f64 else "sans f64")
+for d in gs.devices():                         # usable devices
+    print(d.id, d.name, d.kind, "f64" if d.f64 else "no f64")
 ```
 
-`cpu:0` existe toujours : c'est l'interpréteur de référence de GPUsync, exact mais lent, utile pour vérifier
-un résultat ou déboguer.
+`cpu:0` always exists: it is GPUsync's reference interpreter, exact but slow, useful to check a result or to
+debug.
 
 ## Backends
 
-| Backend | Périphériques | Remarques |
+| Backend | Devices | Notes |
 |---|---|---|
-| CUDA | GPU NVIDIA | préféré sur un GPU NVIDIA ; demande le pilote et NVRTC (voir plus bas) |
-| wgpu | Metal (macOS), Vulkan, DX12 | Metal sur Mac ; Vulkan sur les GPU dédiés sans CUDA |
-| OpenCL ≥ 1.2 | tout pilote OpenCL installé | zéro-copie sur les GPU à mémoire unifiée ; repli quand une opération manque ailleurs |
-| cpu | interpréteur | toujours disponible |
+| CUDA | NVIDIA GPUs | preferred on an NVIDIA GPU; needs the driver and NVRTC (see below) |
+| wgpu | Metal (macOS), Vulkan, DX12 | Metal on a Mac; Vulkan on discrete GPUs without CUDA |
+| OpenCL ≥ 1.2 | any installed OpenCL driver | zero-copy on unified-memory GPUs; fallback when an operation is missing elsewhere |
+| cpu | interpreter | always available |
 
-### CUDA et NVRTC
+### CUDA and NVRTC
 
-Le backend CUDA compile les kernels avec NVRTC, la bibliothèque de compilation de NVIDIA. Sans elle,
-`gs.backends()` l'explique et Vulkan prend le relais sur le même GPU. Deux façons de l'obtenir :
+The CUDA backend compiles kernels with NVRTC, NVIDIA's runtime compilation library. Without it, `gs.backends()`
+says so and Vulkan takes over on the same GPU. Two ways to get it:
 
 ```bash
-pip install nvidia-cuda-nvrtc-cu12      # une bibliothèque, pas un compilateur à installer
+pip install nvidia-cuda-nvrtc-cu12      # a library, not a compiler to install
 ```
 
-ou le toolkit CUDA. GPUsync cherche NVRTC dans les roues pip `nvidia-*` visibles par Python, puis dans le
-toolkit et le `PATH`. Le code compilé (PTX) est gardé en cache sur disque.
+or the CUDA toolkit. GPUsync looks for NVRTC in the `nvidia-*` pip wheels visible to Python, then in the toolkit
+and on the `PATH`. Compiled code (PTX) is cached on disk.
 
-## Variables d'environnement
+## Environment variables
 
-| Variable | Effet |
+| Variable | Effect |
 |---|---|
-| `GPUSYNC_DEVICE` | périphérique par défaut, ex. `opencl`, `cuda:0`, `cpu` (voir [Périphériques](peripheriques.md)) |
-| `GPUSYNC_CACHE_DIR` | dossier du cache du code CUDA compilé |
-| `GPUSYNC_CACHE=0` | désactive ce cache |
-| `GPUSYNC_NVRTC` | chemin exact de la bibliothèque NVRTC |
-| `GPUSYNC_NVRTC_DIRS` | dossiers où chercher NVRTC (séparés par `:`, ou `;` sous Windows) ; vide : ne pas chercher dans les roues pip |
-| `GPUSYNC_SPECIALIZE=0` | désactive la spécialisation des tailles (voir [Erreurs, débogage, performances](erreurs.md)) |
-| `GPUSYNC_DUMP_DIR` | écrit dans ce dossier chaque code généré au moment de sa compilation |
+| `GPUSYNC_DEVICE` | default device, e.g. `opencl`, `cuda:0`, `cpu` (see [Devices](devices.md)) |
+| `GPUSYNC_CACHE_DIR` | folder of the compiled CUDA code cache |
+| `GPUSYNC_CACHE=0` | disables that cache |
+| `GPUSYNC_NVRTC` | exact path of the NVRTC library |
+| `GPUSYNC_NVRTC_DIRS` | folders where NVRTC is looked for (separated by `:`, or `;` on Windows); empty: do not look in pip wheels |
+| `GPUSYNC_SPECIALIZE=0` | disables size specialization (see [Errors, debugging, performance](errors.md)) |
+| `GPUSYNC_DUMP_DIR` | writes every generated code to this folder when it is compiled |
 
 ## Tests
 
@@ -120,7 +120,7 @@ toolkit et le `PATH`. Le code compilé (PTX) est gardé en cache sur disque.
 python3 tools/dev.py test
 ```
 
-Les tests différentiels exécutent chaque kernel sur tous les périphériques de la machine et comparent les
-résultats à l'interpréteur. `GS_EXPECT=metal,opencl` (ou `vulkan,opencl`…) fait échouer la suite si l'un de
-ces backends n'a aucun périphérique, pour ne pas croire testé ce qui ne l'est pas. Les tests du moteur
-(`gfx/tests`) sont lancés avec les autres s'il est installé, ignorés sinon.
+Differential tests run each kernel on every device of the machine and compare the results with the interpreter.
+`GS_EXPECT=metal,opencl` (or `vulkan,opencl`…) makes the suite fail if one of these backends has no device, so
+that nothing is believed tested when it is not. The engine tests (`gfx/tests`) run with the others when the
+engine is installed, and are skipped otherwise.

@@ -1,4 +1,4 @@
-"""Mathématiques 3D pour `gpusync.gfx` (vecteurs, matrices 4×4, transforms hiérarchiques en batch)."""
+"""3D maths for `gpusync.gfx` (vectors, 4×4 matrices, batched hierarchical transforms)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 
 def normalize(v: np.ndarray | tuple[float, float, float]) -> np.ndarray:
     arr = np.asarray(v, dtype=np.float32)
-    if arr.shape == (3,):  # cas courant, plusieurs fois par image : sans np.linalg
+    if arr.shape == (3,):  # common case, several times per frame: without np.linalg
         x, y, z = arr.tolist()
         n = math.sqrt(x * x + y * y + z * z)
     else:
@@ -18,7 +18,7 @@ def normalize(v: np.ndarray | tuple[float, float, float]) -> np.ndarray:
 
 
 def cross3(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Produit vectoriel de deux vecteurs (3,) (bien plus rapide que np.cross)."""
+    """Cross product of two (3,) vectors (much faster than np.cross)."""
     ax, ay, az = (float(x) for x in a)
     bx, by, bz = (float(x) for x in b)
     return np.array([ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx], dtype=np.float32)
@@ -81,7 +81,7 @@ def mat4_trs(
     rot: tuple[float, float, float] | np.ndarray = (0.0, 0.0, 0.0),
     scale: float | tuple[float, float, float] | np.ndarray = 1.0,
 ) -> np.ndarray:
-    """Matrice locale `T @ Ry @ Rx @ Rz @ S` (float32)."""
+    """Local matrix `T @ Ry @ Rx @ Rz @ S` (float32)."""
     if isinstance(scale, (int, float)):
         sx = sy = sz = float(scale)
     else:
@@ -109,7 +109,7 @@ def mat4_trs(
 
 
 def batch_trs(pos: np.ndarray, rot: np.ndarray, scl: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Calcule `(models, normals)` en batch NumPy `(N, 4, 4)` float32 sans appel `linalg.inv`."""
+    """Computes `(models, normals)` as a NumPy batch `(N, 4, 4)` float32 without calling `linalg.inv`."""
     n = pos.shape[0]
     cx, cy, cz = np.cos(rot[:, 0]), np.cos(rot[:, 1]), np.cos(rot[:, 2])
     sx, sy, sz = np.sin(rot[:, 0]), np.sin(rot[:, 1]), np.sin(rot[:, 2])
@@ -155,12 +155,12 @@ def batch_trs(pos: np.ndarray, rot: np.ndarray, scl: np.ndarray) -> tuple[np.nda
 
 
 def batch_normal_from_models(m4: np.ndarray) -> np.ndarray:
-    """Inverse transposée du bloc 3×3 en batch (utilisé uniquement si hiérarchie parent/enfant active)."""
+    """Batched inverse transpose of the 3×3 block (used only when a parent/child hierarchy is active)."""
     n = m4.shape[0]
     n4 = np.zeros((n, 4, 4), dtype=np.float32)
     n4[:, 3, 3] = 1.0
     a = m4[:, :3, :3]
-    # Cofacteur 3×3 vectorisé (sans np.linalg.inv, robuste même pour des matrices d'échelle nulle)
+    # Vectorized 3×3 cofactor (without np.linalg.inv, robust even for zero-scale matrices)
     c00 = a[:, 1, 1] * a[:, 2, 2] - a[:, 1, 2] * a[:, 2, 1]
     c01 = a[:, 1, 2] * a[:, 2, 0] - a[:, 1, 0] * a[:, 2, 2]
     c02 = a[:, 1, 0] * a[:, 2, 1] - a[:, 1, 1] * a[:, 2, 0]
@@ -183,7 +183,7 @@ def mat4_look_at(
     target: tuple[float, float, float] | np.ndarray,
     up: tuple[float, float, float] | np.ndarray = (0.0, 1.0, 0.0),
 ) -> np.ndarray:
-    """Matrice vue main droite : caméra regarde vers -Z."""
+    """Right-handed view matrix: the camera looks toward -Z."""
     eye_v = np.asarray(eye, dtype=np.float32)
     target_v = np.asarray(target, dtype=np.float32)
     up_v = np.asarray(up, dtype=np.float32)
@@ -206,7 +206,7 @@ def mat4_look_at(
 
 
 def mat4_perspective(fov_deg: float, aspect: float, near: float, far: float) -> np.ndarray:
-    """Projection perspective (NDC x,y dans [-1, 1], profondeur linéaire gérée côté shader)."""
+    """Perspective projection (NDC x, y in [-1, 1], linear depth handled in the shader)."""
     f = 1.0 / math.tan(math.radians(fov_deg) * 0.5)
     m = np.zeros((4, 4), dtype=np.float32)
     m[0, 0] = f / max(aspect, 1e-4)
@@ -220,7 +220,7 @@ def mat4_perspective(fov_deg: float, aspect: float, near: float, far: float) -> 
 def mat4_ortho(
     left: float, right: float, bottom: float, top: float, near: float, far: float
 ) -> np.ndarray:
-    """Projection orthographique (NDC x,y dans [-1, 1], z dans [0, 1])."""
+    """Orthographic projection (NDC x, y in [-1, 1], z in [0, 1])."""
     m = np.zeros((4, 4), dtype=np.float32)
     m[0, 0] = 2.0 / (right - left)
     m[1, 1] = 2.0 / (top - bottom)

@@ -1,8 +1,8 @@
-"""Sonde : débit de gs.matmul_u8 (Tensor Cores en CUDA, boucle portable ailleurs).
+"""Probe: throughput of gs.matmul_u8 (Tensor Cores with CUDA, a portable loop elsewhere).
 
     python tools/probe/matmul_tops.py DEVICE [DEVICE…]
 
-Chaque groupe de 256 threads enchaîne REPS produits 64 × 64 × 128 (octets) en mémoire partagée.
+Each group of 256 threads chains REPS products of 64 × 64 × 128 (bytes) in shared memory.
 """
 import sys
 import time

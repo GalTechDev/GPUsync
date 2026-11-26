@@ -1,9 +1,9 @@
-"""Effets de post-traitement GPU pluggables (`camera.add_effect(...)`) écrits en pur `@gs.kernel`.
+"""Pluggable GPU post-processing effects (`camera.add_effect(...)`) written in pure `@gs.kernel`.
 
-Chaque effet peut être :
-- une instance d'un effet intégré (`ChromaticAberration`, `Scanlines`, `ColorGrade`, `Pixelate`),
-- ou directement un `@gs.kernel` utilisateur `fn(fb: gs.u32["h", "w"]) -> gs.u32["h", "w"]`
-  (ou un effet HDR `stage="hdr"` prenant `(hr, hg, hb)`).
+Each effect can be:
+- an instance of a built-in effect (`ChromaticAberration`, `Scanlines`, `ColorGrade`, `Pixelate`),
+- or directly a user `@gs.kernel` `fn(fb: gs.u32["h", "w"]) -> gs.u32["h", "w"]`
+  (or an HDR effect `stage="hdr"` taking `(hr, hg, hb)`).
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def _pixelate_k(src: gs.u32["h", "w"], block: gs.i32) -> gs.u32["h", "w"]:
 
 
 class PostEffect:
-    """Classe de base d'un effet de post-traitement GPU (`stage='ldr'` ou `'hdr'`)."""
+    """Base class of a GPU post-processing effect (`stage='ldr'` or `'hdr'`)."""
 
     stage: str = "ldr"
     enabled: bool = True
@@ -95,7 +95,7 @@ class PostEffect:
 
 @dataclass
 class ChromaticAberration(PostEffect):
-    """Aberration chromatique radiale sur les bords de l'écran."""
+    """Radial chromatic aberration at the edges of the screen."""
 
     strength: float = 2.5
     enabled: bool = True
@@ -106,7 +106,7 @@ class ChromaticAberration(PostEffect):
 
 @dataclass
 class Scanlines(PostEffect):
-    """Lignes de balayage CRT rétro."""
+    """Retro CRT scanlines."""
 
     intensity: float = 0.28
     pitch: int = 3
@@ -118,7 +118,7 @@ class Scanlines(PostEffect):
 
 @dataclass
 class ColorGrade(PostEffect):
-    """Étalonnage colorimétrique (saturation, contraste, teinte RGB)."""
+    """Colour grading (saturation, contrast, RGB tint)."""
 
     saturation: float = 1.15
     contrast: float = 1.08
@@ -140,7 +140,7 @@ class ColorGrade(PostEffect):
 
 @dataclass
 class Pixelate(PostEffect):
-    """Effet pixel-art par blocs carrés."""
+    """Pixel-art effect with square blocks."""
 
     block_size: int = 4
     enabled: bool = True

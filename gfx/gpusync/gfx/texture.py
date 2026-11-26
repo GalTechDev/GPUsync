@@ -1,10 +1,10 @@
-"""Textures GPU unifiées (`Texture`, `RenderTarget`, `TexturePool`) pour 3D, 2D, vidéo et surfaces dynamiques.
+"""Unified GPU textures (`Texture`, `RenderTarget`, `TexturePool`) for 3D, 2D, video and dynamic surfaces.
 
-Tout repose sur un buffer `u32[H, W]` (RGBA8 empaqueté) résident en VRAM :
-- `Texture.from_file("wood.png")` / `Texture.from_array(rgba)` / `tex.update(frame)` (vidéo),
-- `Texture.from_gpu(gs_array)` (sortie directe d'un `@gs.kernel`, 0-copie),
-- `RenderTarget(w, h, camera=..., scene=..., ui=...)` : caméra 3D, scène 2D ou UI interactive
-  rendue en direct sur n'importe quel matériau 3D (`albedo_map` / `emissive_map`) ou `Sprite2D`.
+Everything rests on a `u32[H, W]` buffer (packed RGBA8) resident in VRAM:
+- `Texture.from_file("wood.png")` / `Texture.from_array(rgba)` / `tex.update(frame)` (video),
+- `Texture.from_gpu(gs_array)` (direct output of a `@gs.kernel`, zero-copy),
+- `RenderTarget(w, h, camera=..., scene=..., ui=...)`: a 3D camera, a 2D scene or an interactive UI
+  rendered live onto any 3D material (`albedo_map` / `emissive_map`) or `Sprite2D`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .kernels.k3d import blit_viewport, upload_i32, upload_u32
 
 
 def pack_rgba_u8_to_u32(arr: np.ndarray) -> np.ndarray:
-    """Convertit un tableau `(H, W, 3|4)` uint8 ou `(H, W)` uint32 en `(H, W)` uint32 contigu RGBA8."""
+    """Converts a `(H, W, 3|4)` uint8 or `(H, W)` uint32 array into a contiguous `(H, W)` uint32 RGBA8 array."""
     a = np.asarray(arr)
     if a.ndim == 2 and a.dtype == np.uint32:
         return np.ascontiguousarray(a, dtype=np.uint32)
@@ -32,11 +32,11 @@ def pack_rgba_u8_to_u32(arr: np.ndarray) -> np.ndarray:
         out[:, :, :3] = a
         out[:, :, 3] = 255
         return out.view(np.uint32).reshape(h, w)
-    raise TypeError(f"Texture attend (H, W) uint32 ou (H, W, 3|4) uint8, reçu {a.shape} {a.dtype}")
+    raise TypeError(f"Texture expects (H, W) uint32 or (H, W, 3|4) uint8, got {a.shape} {a.dtype}")
 
 
 class Texture:
-    """Texture 2D RGBA8 (`u32[H, W]`) utilisable en 3D (`Material`) et en 2D (`Sprite2D`)."""
+    """RGBA8 2D texture (`u32[H, W]`) usable in 3D (`Material`) and in 2D (`Sprite2D`)."""
 
     def __init__(
         self,
@@ -53,7 +53,7 @@ class Texture:
 
         if isinstance(pixels, gs.Array):
             if pixels.ndim != 2 or pixels.dtype != np.uint32:
-                raise TypeError(f"Texture GPU attend un gs.Array u32 2D, reçu {pixels.shape} {pixels.dtype}")
+                raise TypeError(f"GPU texture expects a 2-D u32 gs.Array, got {pixels.shape} {pixels.dtype}")
             self._gpu_array = pixels
             self.height, self.width = int(pixels.shape[0]), int(pixels.shape[1])
         else:
@@ -74,10 +74,10 @@ class Texture:
         return self._cpu_pixels
 
     def update(self, pixels: np.ndarray | gs.Array) -> None:
-        """Met à jour la texture en place (ex. nouvelle frame vidéo, canvas CPU ou sortie `@gs.kernel`)."""
+        """Updates the texture in place (e.g. a new video frame, a CPU canvas or a `@gs.kernel` output)."""
         if isinstance(pixels, gs.Array):
             if pixels.ndim != 2 or pixels.dtype != np.uint32:
-                raise TypeError("Texture.update(gs.Array) attend un tableau u32 2D")
+                raise TypeError("Texture.update(gs.Array) expects a 2-D u32 array")
             self._gpu_array = pixels
             self._cpu_pixels = None
             self.height, self.width = int(pixels.shape[0]), int(pixels.shape[1])
@@ -96,7 +96,7 @@ class Texture:
 
     @classmethod
     def from_gpu(cls, arr: gs.Array, *, bilinear: bool = True) -> Texture:
-        """Enveloppe directement un `gs.Array` `u32[H, W]` produit par un `@gs.kernel` (0-copie)."""
+        """Wraps a `gs.Array` `u32[H, W]` produced by a `@gs.kernel` directly (zero-copy)."""
         return cls(arr, bilinear=bilinear)
 
     @classmethod
@@ -184,17 +184,17 @@ class Texture:
             from .material import Environment
 
             return Environment.daylight_skybox(int(data.get("width", 512)), int(data.get("height", 256)))
-        raise ValueError(f"Recette de texture inconnue : {kind!r}")
+        raise ValueError(f"Unknown texture recipe: {kind!r}")
 
 
 class RenderTarget(Texture):
-    """Texture dynamique rendue en direct sur GPU chaque image.
+    """Dynamic texture rendered live on the GPU every frame.
 
-    Peut être alimentée par :
-    - une `camera` (`Camera3D`) regardant la scène courante (ou une autre `scene`),
-    - une `scene` 2D / 3D complète (ex. mini-jeu 2D affiché sur un écran 3D),
-    - une `ui` (`UILayer`) interactive : si `interactive=True`, cliquer ou survoler la surface 3D
-      qui porte ce `RenderTarget` transmet automatiquement les coordonnées UV `(u*W, (1-v)*H)` !
+    It can be fed by:
+    - a `camera` (`Camera3D`) looking at the current scene (or another `scene`),
+    - a complete 2D / 3D `scene` (e.g. a 2D mini-game shown on a 3D screen),
+    - an interactive `ui` (`UILayer`): with `interactive=True`, clicking or hovering the 3D surface
+      that carries this `RenderTarget` automatically forwards the UV coordinates `(u*W, (1-v)*H)`!
     """
 
     def __init__(
@@ -232,7 +232,7 @@ class RenderTarget(Texture):
         self._version += 1
 
     def handle_uv_event(self, event: dict[str, Any], uv: tuple[float, float]) -> bool:
-        """Traduit un événement souris 3D à `uv=(u, v)` en coordonnées pixels `(x, y)` de la surface."""
+        """Translates a 3D mouse event at `uv=(u, v)` into pixel coordinates `(x, y)` of the surface."""
         if not self.interactive:
             return False
         u = float(uv[0]) % 1.0
@@ -252,10 +252,10 @@ class RenderTarget(Texture):
 
 
 class PlanarReflection:
-    """Reflet planaire optique exact (miroir vertical `z=plane_z` ou sol/eau horizontal `y=plane_y`).
+    """Exact optical planar reflection (vertical mirror `z=plane_z` or horizontal floor/water `y=plane_y`).
 
-    Encapsule une `Camera3D` miroir et son `RenderTarget` calibré sur le ratio d'aspect du viewport :
-    appelez `mirror.sync(scene.camera)` dans `update()` et utilisez `Material.mirror(mirror)` sur la surface.
+    Wraps a mirror `Camera3D` and its `RenderTarget` matched to the viewport's aspect ratio:
+    call `mirror.sync(scene.camera)` in `update()` and use `Material.mirror(mirror)` on the surface.
     """
 
     def __init__(
@@ -283,7 +283,7 @@ class PlanarReflection:
         )
 
     def sync(self, main_cam: Any) -> None:
-        """Synchronise la caméra miroir avec la caméra principale."""
+        """Synchronizes the mirror camera with the main camera."""
         p = np.asarray(main_cam.pos, dtype=np.float32).copy()
         t = np.asarray(main_cam.target, dtype=np.float32).copy()
         if self.plane_y is not None:
@@ -298,14 +298,14 @@ class PlanarReflection:
 
 
 class TexturePool:
-    """Gestionnaire bindless : regroupe les textures statiques (1 upload) et dynamiques (0-copie GPU).
+    """Bindless manager: gathers static textures (1 upload) and dynamic ones (zero-copy on the GPU).
 
-    Chaque texture reçoit un identifiant entier `tid >= 0` indexant `meta[tid]` :
+    Each texture gets an integer identifier `tid >= 0` indexing `meta[tid]`:
     `[offset_or_x, y_or_0, width, flags_and_height]`
-    - `meta[tid, 0]` : offset linéaire dans `static_pool` (si statique) ou `ox` dans `dyn_atlas` (si dynamique)
-    - `meta[tid, 1]` : `0` (statique) ou `oy` dans `dyn_atlas` (dynamique)
-    - `meta[tid, 2]` : `width`
-    - `meta[tid, 3]` : `height | (1 << 20 si dynamique) | (1 << 21 si bilinéaire)`
+    - `meta[tid, 0]`: linear offset in `static_pool` (if static) or `ox` in `dyn_atlas` (if dynamic)
+    - `meta[tid, 1]`: `0` (static) or `oy` in `dyn_atlas` (dynamic)
+    - `meta[tid, 2]`: `width`
+    - `meta[tid, 3]`: `height | (1 << 20 if dynamic) | (1 << 21 if bilinear)`
     """
 
     FLAG_DYNAMIC = 1 << 20
@@ -343,7 +343,7 @@ class TexturePool:
         textures: list[Texture],
         device: str | None,
     ) -> tuple[gs.Array, gs.Array, gs.Array]:
-        """Renvoie `(static_pool_gpu, meta_gpu, dyn_atlas_gpu)` prêts pour `shade_pbr` ou `render_2d`."""
+        """Returns `(static_pool_gpu, meta_gpu, dyn_atlas_gpu)` ready for `shade_pbr` or `render_2d`."""
         self._ensure_dummies(device)
         if not textures:
             assert self._dummy_pool_gpu is not None
@@ -351,7 +351,7 @@ class TexturePool:
             assert self._dummy_dyn_gpu is not None
             return self._dummy_pool_gpu, self._dummy_meta_gpu, self._dummy_dyn_gpu
 
-        # 1. Séparer textures statiques (CPU) et dynamiques (déjà résidentes en VRAM)
+        # 1. Separate static textures (CPU) from dynamic ones (already resident in VRAM)
         static_items: list[tuple[int, Texture]] = []
         dyn_items: list[tuple[int, Texture]] = []
         for idx, tex in enumerate(textures):
@@ -362,7 +362,7 @@ class TexturePool:
 
         meta = np.zeros((len(textures), 4), dtype=np.int32)
 
-        # 2. Pool statique (mis en cache tant que les textures/versions statiques ne changent pas)
+        # 2. Static pool (cached as long as the static textures / versions do not change)
         static_sig = tuple((id(t), t._version) for _, t in static_items)
         offset = 0
         for tid, tex in static_items:
@@ -382,7 +382,7 @@ class TexturePool:
             self._static_sig = static_sig
             self._static_dev = device
 
-        # 3. Atlas dynamique 100 % GPU (0-copie si 1 seule texture dynamique, blit GPU côte à côte si N > 1)
+        # 3. Dynamic atlas, 100 % GPU (zero-copy with a single dynamic texture, GPU side-by-side blit if N > 1)
         if not dyn_items:
             dyn_atlas_gpu = self._dummy_dyn_gpu
         elif len(dyn_items) == 1:

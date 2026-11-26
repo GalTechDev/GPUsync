@@ -1,5 +1,5 @@
-//! Interface commune des backends à files et événements (OpenCL, CUDA) : le moteur de transferts
-//! (modes Résident et par blocs, §9) est écrit une fois, pour les deux.
+//! Common interface of queue-and-event backends (OpenCL, CUDA): the transfer engine
+//! (Resident and chunked modes, §9) is written once, for both.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use gpusync_runtime::{BackendError, DeviceInfo};
 
 use crate::exec::Storage;
 
-/// Argument de lancement, dans l'ordre des paramètres du kernel.
+/// Launch argument, in kernel parameter order.
 pub(crate) enum GArg<'a, B> {
     Buf(&'a B),
     I32(i32),
@@ -22,7 +22,7 @@ pub(crate) enum GArg<'a, B> {
 
 type Res<T> = Result<T, BackendError>;
 
-/// Périphérique avec une file de calcul et une file de transferts, chaînées par événements.
+/// Device with a compute queue and a transfer queue, chained by events.
 pub(crate) trait Gpu {
     type Buf;
     type Ev;
@@ -34,10 +34,10 @@ pub(crate) trait Gpu {
     fn pinned(&self, bytes: usize) -> Res<Self::Pin>;
     fn pin_ptr(p: &Self::Pin) -> *mut u8;
     fn recycle(&self, p: Self::Pin);
-    /// Rend un tampon épinglé que l'envoi `e` lit encore : il resservira une fois `e` terminé.
+    /// Returns a pinned buffer that upload `e` still reads: it will be reused once `e` is done.
     fn recycle_after(&self, p: Self::Pin, e: &Self::Ev) -> Res<()>;
     /// # Safety
-    /// `src` doit rester valide jusqu'à la fin de l'événement renvoyé.
+    /// `src` must stay valid until the returned event completes.
     unsafe fn write_at(
         &self,
         dst: &Self::Buf,
@@ -47,7 +47,7 @@ pub(crate) trait Gpu {
         wait: &[&Self::Ev],
     ) -> Res<Self::Ev>;
     /// # Safety
-    /// `dst` doit rester valide jusqu'à la fin de l'événement renvoyé.
+    /// `dst` must stay valid until the returned event completes.
     unsafe fn read_at(
         &self,
         src: &Self::Buf,
@@ -75,9 +75,9 @@ pub(crate) trait Gpu {
     fn flush(&self) -> Res<()>;
     fn wait(e: &Self::Ev) -> Res<()>;
     fn finish(&self) -> Res<()>;
-    /// Résultat resté sur le périphérique.
+    /// Result kept on the device.
     fn storage(buf: Self::Buf, done: Arc<Self::Ev>) -> Storage;
-    /// Buffer et événement de fin d'un résultat resté sur ce type de périphérique.
+    /// Buffer and completion event of a result kept on this kind of device.
     fn resident(s: &Storage) -> Option<(&Self::Buf, &Self::Ev)>;
 }
 
@@ -172,7 +172,7 @@ impl Gpu for ClDevice {
     fn resident(s: &Storage) -> Option<(&ClBuffer, &ClEvent)> {
         match s {
             Storage::Cl { buf, done } => Some((buf, done)),
-            // Résultat Direct d'un seul bloc (vérifié par l'appelant) : son buffer resert tel quel.
+            // Direct result in a single chunk (checked by the caller): its buffer is reused as is.
             Storage::ClDirect {
                 bufs,
                 done: Some(done),

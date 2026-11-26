@@ -1,10 +1,10 @@
-//! Cœur Rust de GPUsync (sans Python) : frontend + génération de code + exécution sur un backend.
+//! Rust core of GPUsync (no Python): frontend + code generation + execution on a backend.
 //!
-//! - [`parse`] : AST Python (JSON) → IR typée ;
-//! - [`Device`] : périphérique ouvert (`cuda:0`, `opencl:0`, `metal:0`, `vulkan:1`, `dx12:0`, `cpu:0`) ;
-//! - [`compile`] : vérifie les capacités, génère et compile le code (avec cache) ;
-//! - [`launch`] : exécute sur `n` éléments, en blocs, selon le mode choisi (moteur de transferts,
-//!   ARCHITECTURE.md §9) et renvoie un [`DeviceArray`].
+//! - [`parse`]: Python AST (JSON) → typed IR;
+//! - [`Device`]: open device (`cuda:0`, `opencl:0`, `metal:0`, `vulkan:1`, `dx12:0`, `cpu:0`);
+//! - [`compile`]: checks capabilities, generates and compiles the code (with a cache);
+//! - [`launch`]: runs over `n` elements, in chunks, in the chosen mode (transfer engine,
+//!   ARCHITECTURE.md §9) and returns a [`DeviceArray`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use gpusync_runtime::{DeviceInfo, DeviceKind};
 
 pub use gpusync_frontend::{ErrorKind as FrontendErrorKind, FrontendError};
 
-/// Erreurs, chacune associée à une exception Python (§4.10).
+/// Errors, each one tied to a Python exception (§4.10).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoreError {
     Syntax(String),
@@ -46,7 +46,7 @@ fn dev_err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Device(e.to_string())
 }
 
-/// AST Python (JSON, voir gpusync-frontend) → IR typée.
+/// Python AST (JSON, see gpusync-frontend) → typed IR.
 pub fn parse(spec_json: &str) -> R<Arc<Kernel>> {
     gpusync_frontend::lower_json(spec_json)
         .map(Arc::new)
@@ -56,7 +56,7 @@ pub fn parse(spec_json: &str) -> R<Arc<Kernel>> {
         })
 }
 
-/// Code généré pour une cible : "cuda", "opencl", "wgsl" ou "ir".
+/// Generated code for a target: "cuda", "opencl", "wgsl" or "ir".
 pub fn source(k: &Kernel, target: &str) -> R<String> {
     match target {
         "cuda" => gpusync_codegen::emit_cuda(k)
@@ -73,15 +73,15 @@ pub fn source(k: &Kernel, target: &str) -> R<String> {
             .map_err(|e| CoreError::Unsupported(e.0)),
         "ir" => Ok(format!("{k:#?}")),
         t => Err(CoreError::Type(format!(
-            "cible inconnue « {t} » (cuda, opencl, wgsl ou ir)"
+            "unknown target \"{t}\" (cuda, opencl, wgsl or ir)"
         ))),
     }
 }
 
-/// Description de l'interpréteur, exposé comme le périphérique `cpu:0`.
+/// Description of the interpreter, exposed as the `cpu:0` device.
 pub fn cpu_info() -> DeviceInfo {
     DeviceInfo {
-        name: "Interpréteur GPUsync (CPU, lent)".into(),
+        name: "GPUsync interpreter (CPU, slow)".into(),
         backend: "cpu",
         index: 0,
         kind: DeviceKind::Cpu,
@@ -93,13 +93,13 @@ pub fn cpu_info() -> DeviceInfo {
         unified_memory: true,
         memory_bytes: None,
         max_buffer_bytes: None,
-        // Un thread système par position du groupe ; mémoire partagée en RAM.
+        // One system thread per position in the group; shared memory in RAM.
         max_group: 1024,
         shared_bytes: 1 << 30,
     }
 }
 
-/// Un périphérique ouvert.
+/// An open device.
 #[derive(Clone)]
 pub enum Device {
     Cu(Arc<CuDevice>),
@@ -109,11 +109,11 @@ pub enum Device {
 }
 
 impl Device {
-    /// Ouvre `cuda:<i>`, `opencl:<i>`, `metal:<i>`, `vulkan:<i>`, `dx12:<i>` ou `cpu:0`.
+    /// Opens `cuda:<i>`, `opencl:<i>`, `metal:<i>`, `vulkan:<i>`, `dx12:<i>` or `cpu:0`.
     pub fn open(id: &str) -> R<Device> {
         let (backend, index) = id.split_once(':').unwrap_or((id, "0"));
         let index: usize = index.parse().map_err(|_| {
-            CoreError::Device(format!("identifiant de périphérique invalide : {id}"))
+            CoreError::Device(format!("invalid device identifier: {id}"))
         })?;
         match backend {
             "cuda" => CuDevice::open(index).map(Device::Cu).map_err(dev_err),
@@ -122,12 +122,12 @@ impl Device {
                 .map(Device::Wg)
                 .map_err(dev_err),
             "cpu" if index == 0 => Ok(Device::Cpu),
-            _ => Err(CoreError::Device(format!("périphérique inconnu : {id}"))),
+            _ => Err(CoreError::Device(format!("unknown device: {id}"))),
         }
     }
 
-    /// Même périphérique ouvert (pas seulement le même identifiant : un périphérique perdu par le
-    /// driver est rouvert sous le même identifiant).
+    /// Same open device (not just the same identifier: a device lost by the
+    /// driver is reopened under the same identifier).
     pub fn same(&self, other: &Device) -> bool {
         match (self, other) {
             (Device::Cu(a), Device::Cu(b)) => Arc::ptr_eq(a, b),
@@ -151,7 +151,7 @@ impl Device {
         self.info().id()
     }
 
-    /// Entrées et sortie en mémoire de l'hôte, sans copie ?
+    /// Inputs and output in host memory, without copy?
     pub fn zero_copy(&self) -> bool {
         match self {
             Device::Cu(_) => false,
@@ -161,7 +161,7 @@ impl Device {
         }
     }
 
-    /// Attend la fin de tous les calculs en file.
+    /// Waits for all queued work.
     pub fn finish(&self) -> R<()> {
         match self {
             Device::Cu(d) => d.finish().map_err(dev_err),
@@ -171,14 +171,14 @@ impl Device {
         }
     }
 
-    /// Ouvre un lot de commandes (wgpu : regroupe plusieurs kernels en une seule soumission GPU).
+    /// Opens a command batch (wgpu: groups several kernels into a single GPU submission).
     pub fn begin_batch(&self) {
         if let Device::Wg(d) = self {
             d.begin_batch();
         }
     }
 
-    /// Ferme le lot de commandes courant et soumet le travail accumulé.
+    /// Closes the current command batch and submits the accumulated work.
     pub fn end_batch(&self) -> R<()> {
         if let Device::Wg(d) = self {
             d.end_batch().map_err(dev_err)?;
@@ -187,25 +187,25 @@ impl Device {
     }
 }
 
-/// Kernel prêt à lancer sur un périphérique donné.
+/// Kernel ready to launch on a given device.
 #[derive(Clone)]
 pub struct Compiled {
     pub kernel: Arc<Kernel>,
     pub(crate) imp: Imp,
-    /// Variantes compilées à la demande : indices 64 bits (tableau de plus de 2³¹ − 1 éléments) et
-    /// tailles connues à l'appel remplacées par des constantes (§5.4).
+    /// Variants compiled on demand: 64-bit indices (array of more than 2³¹ − 1 elements) and
+    /// sizes known at call time replaced by constants (§5.4).
     pub(crate) variants: Arc<std::sync::Mutex<HashMap<VariantKey, Imp>>>,
 }
 
-/// (indices 64 bits, paramètres spécialisés).
+/// (64-bit indices, specialized parameters).
 pub(crate) type VariantKey = (bool, Vec<(usize, i64)>);
 
-/// Variantes spécialisées gardées au plus par kernel et par périphérique ; au-delà (tailles qui
-/// changent à chaque appel), la version générique sert, sans recompiler.
+/// Most specialized variants kept per kernel and per device; beyond that (sizes that
+/// change at every call), the generic version is used, without recompiling.
 const MAX_SPECIALIZED: usize = 8;
 
 impl Compiled {
-    /// Implémentation à utiliser pour cet appel.
+    /// Implementation to use for this call.
     pub(crate) fn variant(&self, dev: &Device, wide: bool, spec: Vec<(usize, i64)>) -> R<Imp> {
         if !wide && spec.is_empty() {
             return Ok(self.imp.clone());
@@ -222,7 +222,7 @@ impl Compiled {
                 .count()
                 >= MAX_SPECIALIZED
         {
-            (wide, Vec::new()) // trop de tailles différentes : version générique
+            (wide, Vec::new()) // too many different sizes: generic version
         } else {
             key
         };
@@ -246,12 +246,12 @@ pub(crate) enum Imp {
     Cpu,
 }
 
-/// Raison pour laquelle `info` ne peut pas exécuter `k` (§6.2), ou `None` s'il le peut.
+/// Reason why `info` cannot run `k` (§6.2), or `None` if it can.
 pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     let req = k.requirements();
     if req.f64 && !info.f64 {
         return Some(format!(
-            "le kernel '{}' utilise f64, non supporté par '{}' ({})",
+            "kernel '{}' uses f64, not supported by '{}' ({})",
             k.name,
             info.name,
             info.id()
@@ -259,7 +259,7 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     }
     if req.int64 && !info.int64 {
         return Some(format!(
-            "le kernel '{}' utilise des entiers 64 bits (i64, u64), non supportés par '{}' ({})",
+            "kernel '{}' uses 64-bit integers (i64, u64), not supported by '{}' ({})",
             k.name,
             info.name,
             info.id()
@@ -267,8 +267,8 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     }
     if let Some(g) = k.group.filter(|g| *g > info.max_group) {
         return Some(format!(
-            "le kernel '{}' demande des groupes de {g} threads (group={g}), '{}' ({}) en accepte au plus {} : \
-             réduisez group= ou choisissez un autre périphérique",
+            "kernel '{}' asks for groups of {g} threads (group={g}), '{}' ({}) accepts at most {}: \
+             lower group= or choose another device",
             k.name,
             info.name,
             info.id(),
@@ -278,8 +278,8 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     let shared = k.shared_bytes() as u64;
     if shared > info.shared_bytes {
         return Some(format!(
-            "le kernel '{}' utilise {shared} octets de gs.shared par groupe, '{}' ({}) en offre {} : \
-             réduisez les tableaux partagés",
+            "kernel '{}' uses {shared} bytes of gs.shared per group, '{}' ({}) offers {}: \
+             shrink the shared arrays",
             k.name,
             info.name,
             info.id(),
@@ -288,8 +288,8 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     }
     if let Some(op) = req.f64_math_op.filter(|_| !info.f64_math) {
         return Some(format!(
-            "le kernel '{}' utilise {op} en f64, non disponible sur '{}' ({}) : seuls OpenCL, CUDA et cpu:0 \
-             fournissent les fonctions mathématiques en double précision",
+            "kernel '{}' uses {op} in f64, not available on '{}' ({}): only OpenCL, CUDA and cpu:0 \
+             provide double-precision math functions",
             k.name,
             info.name,
             info.id()
@@ -298,8 +298,8 @@ pub fn unsupported(info: &DeviceInfo, k: &Kernel) -> Option<String> {
     None
 }
 
-/// Débogage : avec `GPUSYNC_DUMP_DIR`, chaque code compilé est écrit dans ce dossier
-/// (`<kernel>.<variante>.<cl|cu|wgsl>`).
+/// Debugging: with `GPUSYNC_DUMP_DIR`, every compiled code is written to that folder
+/// (`<kernel>.<variant>.<cl|cu|wgsl>`).
 fn dump(k: &Kernel, wide: bool, spec: &[(usize, i64)], ext: &str, code: &str) {
     if let Some(dir) = std::env::var_os("GPUSYNC_DUMP_DIR") {
         let tag: Vec<String> = spec
@@ -321,7 +321,7 @@ fn dump(k: &Kernel, wide: bool, spec: &[(usize, i64)], ext: &str, code: &str) {
     }
 }
 
-/// Génère et compile une variante de `k` pour `dev`.
+/// Generates and compiles a variant of `k` for `dev`.
 fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> {
     let gen_err = |e: gpusync_codegen::CodegenError| CoreError::Unsupported(e.0);
     Ok(match dev {
@@ -335,12 +335,12 @@ fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> 
             dump(k, wide, spec, "cl", &src.code);
             Imp::Cl(d.compile(&src.code, &src.entry, k.group).map_err(dev_err)?)
         }
-        // Un buffer wgpu ne dépasse pas quelques Gio : un tableau de plus de 2³¹ éléments ne peut pas
-        // y être lié entier ; et WGSL n'a pas d'entiers 64 bits.
+        // A wgpu buffer does not exceed a few GiB: an array of more than 2³¹ elements cannot
+        // be bound whole; and WGSL has no 64-bit integers.
         Device::Wg(d) if wide => {
             return Err(CoreError::Unsupported(format!(
-                "'{}' : un tableau de plus de 2³¹ − 1 éléments demande des indices 64 bits, \
-                 absents de WGSL ({}) ; utilisez CUDA, OpenCL ou cpu:0",
+                "'{}': an array of more than 2³¹ − 1 elements needs 64-bit indices, \
+                 which WGSL lacks ({}); use CUDA, OpenCL or cpu:0",
                 k.name, d.info.name
             )));
         }
@@ -366,7 +366,7 @@ fn build(dev: &Device, k: &Kernel, wide: bool, spec: &[(usize, i64)]) -> R<Imp> 
     })
 }
 
-/// Vérifie les capacités du périphérique (§6.2), génère le code et le compile.
+/// Checks the device capabilities (§6.2), generates the code and compiles it.
 pub fn compile(dev: &Device, k: &Arc<Kernel>) -> R<Compiled> {
     let info = dev.info();
     if let Some(msg) = unsupported(&info, k) {

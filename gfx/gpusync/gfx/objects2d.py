@@ -1,4 +1,4 @@
-"""Objets de la couche 2D pure (`Rect2D`, `Circle2D`, `Line2D`, `Sprite2D`, `Particles2D`)."""
+"""Objects of the pure 2D layer (`Rect2D`, `Circle2D`, `Line2D`, `Sprite2D`, `Particles2D`)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ SHAPE_SPRITE = 3
 
 @dataclass
 class Object2D:
-    """Classe de base des primitives 2D (triées par `z`, affichées via `Camera2D`)."""
+    """Base class of the 2D primitives (sorted by `z`, shown through `Camera2D`)."""
 
     x: float = 0.0
     y: float = 0.0
@@ -35,7 +35,7 @@ class Object2D:
 
 @dataclass
 class Rect2D(Object2D):
-    """Rectangle 2D plein ou encadré, avec rotation optionnelle (radians)."""
+    """Filled or outlined 2D rectangle, with optional rotation (radians)."""
 
     w: float = 100.0
     h: float = 60.0
@@ -55,7 +55,7 @@ class Rect2D(Object2D):
 
 @dataclass
 class Circle2D(Object2D):
-    """Disque 2D anti-aliasé avec bordure optionnelle."""
+    """Anti-aliased 2D disc with an optional border."""
 
     radius: float = 32.0
     color: tuple[int, int, int, int] = (240, 120, 75, 255)
@@ -70,7 +70,7 @@ class Circle2D(Object2D):
 
 @dataclass
 class Line2D(Object2D):
-    """Segment 2D anti-aliasé entre `(x, y)` et `(x2, y2)`."""
+    """Anti-aliased 2D segment between `(x, y)` and `(x2, y2)`."""
 
     x2: float = 100.0
     y2: float = 100.0
@@ -85,7 +85,7 @@ class Line2D(Object2D):
 
 @dataclass
 class Sprite2D(Object2D):
-    """Sprite 2D texturé (supporte `Texture` statique, `RenderTarget` ou texture GPU `@gs.kernel`)."""
+    """Textured 2D sprite (supports a static `Texture`, a `RenderTarget` or a GPU `@gs.kernel` texture)."""
 
     w: float = 128.0
     h: float = 128.0
@@ -104,10 +104,10 @@ class Sprite2D(Object2D):
 
 @dataclass
 class Particles2D:
-    """Nuage de particules 100 % GPU (positions et couleurs `gs.Array` ou NumPy, zéro copie CPU).
+    """Particle cloud, 100 % GPU (positions and colours as `gs.Array` or NumPy, no CPU copy).
 
-    Les tableaux `px`, `py` (`float32[N]`) et `colors` (`uint32[N]` RGBA8) peuvent être mis à jour
-    chaque frame par un `@gs.kernel` utilisateur et rendus directement sans jamais repasser par la RAM !
+    The `px`, `py` (`float32[N]`) and `colors` (`uint32[N]` RGBA8) arrays can be updated
+    every frame by a user `@gs.kernel` and rendered directly without ever going back through RAM!
     """
 
     px: np.ndarray | gs.Array

@@ -1,8 +1,8 @@
-"""Physique modulaire `gpusync.gfx` :
-- Étage 1 : `PhysicsWorld` léger branché sur les `Object3D` (`SphereCollider`, `BoxCollider`,
-  `PlaneCollider`, impulsions, rebonds, triggers, `raycast`).
-- Étage 2 : `GpuSpherePhysics` — solveur de collisions de sphères 3D 100 % GPU (`@gs.kernel`)
-  écrivant directement dans `InstancedMesh3D.gpu_trs` sans aucune copie CPU.
+"""Modular physics of `gpusync.gfx`:
+- Stage 1: lightweight `PhysicsWorld` attached to `Object3D`s (`SphereCollider`, `BoxCollider`,
+  `PlaneCollider`, impulses, bounces, triggers, `raycast`).
+- Stage 2: `GpuSpherePhysics` — 3D sphere collision solver, 100 % GPU (`@gs.kernel`),
+  writing directly into `InstancedMesh3D.gpu_trs` without any CPU copy.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class RayHit:
 
 @dataclass
 class RigidBody:
-    """Corps rigide léger attaché à un `Node` / `Object3D`."""
+    """Lightweight rigid body attached to a `Node` / `Object3D`."""
 
     node: Node
     collider: Collider
@@ -73,7 +73,7 @@ class RigidBody:
 
 
 class PhysicsWorld:
-    """Monde physique 3D léger (gravité, collisions sphère/boîte/plan, triggers, raycasts)."""
+    """Lightweight 3D physics world (gravity, sphere/box/plane collisions, triggers, raycasts)."""
 
     def __init__(self, gravity: tuple[float, float, float] = (0.0, -9.81, 0.0)) -> None:
         self.gravity = np.asarray(gravity, dtype=np.float32)
@@ -98,7 +98,7 @@ class PhysicsWorld:
             self._step_once(sub_dt)
 
     def _step_once(self, dt: float) -> None:
-        # 1. Intégration semi-implicite d'Euler
+        # 1. Semi-implicit Euler integration
         for b in self.bodies:
             if b.static:
                 continue
@@ -106,7 +106,7 @@ class PhysicsWorld:
             p = np.asarray(b.node.pos, dtype=np.float32) + b.vel * dt
             b.node.pos = (float(p[0]), float(p[1]), float(p[2]))
 
-        # 2. Résolution des paires
+        # 2. Resolving the pairs
         n = len(self.bodies)
         for i in range(n):
             a = self.bodies[i]
@@ -137,7 +137,7 @@ class PhysicsWorld:
         if not b.static:
             pb = np.asarray(b.node.pos, dtype=np.float32) + corr * b.inv_mass
             b.node.pos = (float(pb[0]), float(pb[1]), float(pb[2]))
-        # Impulsion de vitesse le long de la normale (de A vers B)
+        # Velocity impulse along the normal (from A to B)
         rv = b.vel - a.vel
         vn = float(np.dot(rv, normal))
         if vn < 0.0:
@@ -216,7 +216,7 @@ class PhysicsWorld:
         direction: tuple[float, float, float] | np.ndarray,
         max_dist: float = 100.0,
     ) -> RayHit | None:
-        """Lancer de rayon analytique contre tous les colliders du monde physique."""
+        """Analytical ray cast against every collider of the physics world."""
         ro = np.asarray(origin, dtype=np.float32)
         rd = normalize(direction)
         best: RayHit | None = None
@@ -278,7 +278,7 @@ class PhysicsWorld:
         return best
 
 
-# ───────────────────────── Étage 2 : Solveur de sphères 100 % GPU ─────────────────────────
+# ───────────────────────── Stage 2: sphere solver, 100 % GPU ─────────────────────────
 
 
 @gs.kernel
@@ -291,7 +291,7 @@ def _step_gpu_spheres_k(
     floor_y: gs.f32,
     restitution: gs.f32,
 ) -> (gs.f32["n", "c4"], gs.f32["n", "c4"]):
-    """Simule N sphères en collision élastique 100 % GPU (reste en VRAM)."""
+    """Simulates N spheres in elastic collision, 100 % GPU (stays in VRAM)."""
     i, c = gs.index()
     n = pos.shape[0]
 
@@ -305,7 +305,7 @@ def _step_gpu_spheres_k(
     vz = vel[i, 2]
     spin = vel[i, 3]
 
-    # Interactions sphère-sphère (répulsion élastique douce + amortissement)
+    # Sphere-sphere interactions (soft elastic repulsion + damping)
     for j in range(n):
         if j != i:
             dx = px - pos[j, 0]
@@ -331,7 +331,7 @@ def _step_gpu_spheres_k(
                     vy += ny * imp
                     vz += nz * imp
 
-    # Intégration + rebonds sur le sol et les parois de l'arène
+    # Integration + bounces on the ground and the arena walls
     px += vx * dt
     py += vy * dt
     pz += vz * dt
@@ -376,7 +376,7 @@ def _step_gpu_spheres_k(
 
 @gs.kernel
 def _pos_to_trs_k(pos: gs.f32["n", "c4"], trs_tpl: gs.f32["n", "c8"], t: gs.f32) -> gs.f32["n", "c8"]:
-    """Convertit `pos[n, 4]` (`x, y, z, radius`) en `trs[n, 8]` directement en VRAM pour `InstancedMesh3D`."""
+    """Converts `pos[n, 4]` (`x, y, z, radius`) into `trs[n, 8]` directly in VRAM for `InstancedMesh3D`."""
     i, c = gs.index()
     val = pos[i, 0] + trs_tpl[i, c] * 0.0
     if c == 1:
@@ -397,7 +397,7 @@ def _pos_to_trs_k(pos: gs.f32["n", "c4"], trs_tpl: gs.f32["n", "c8"], t: gs.f32)
 
 
 class GpuSpherePhysics:
-    """Solveur de collisions 3D 100 % GPU (zéro copie CPU) connecté à `InstancedMesh3D.gpu_trs`."""
+    """3D collision solver, 100 % GPU (no CPU copy), connected to `InstancedMesh3D.gpu_trs`."""
 
     def __init__(
         self,
@@ -431,7 +431,7 @@ class GpuSpherePhysics:
         self.trs_gpu = _pos_to_trs_k(self.pos_gpu, self._trs_tpl, 0.0, device=device)
 
     def step(self, dt: float, *, substeps: int = 2) -> gs.Array:
-        """Avance la simulation sur GPU et renvoie le `gs.Array` `trs` `(N, 8)` prêt pour `InstancedMesh3D`."""
+        """Advances the simulation on the GPU and returns the `trs` `gs.Array` `(N, 8)` ready for `InstancedMesh3D`."""
         sub_dt = min(float(dt), 0.04) / max(1, substeps)
         with gs.batch(self.device):
             for _ in range(max(1, substeps)):

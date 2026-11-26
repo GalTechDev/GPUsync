@@ -1,4 +1,4 @@
-"""Atmosphère humide : comparée à des solutions exactes (repos, ondes, saturation, conservation)."""
+"""Moist atmosphere: compared with exact solutions (rest, waves, saturation, conservation)."""
 
 import math
 
@@ -16,7 +16,7 @@ def _dry(**kw):
 
 
 def _totals(a):
-    """Eau totale (pluie au sol comprise, kg/m²) et énergie statique intégrée."""
+    """Total water (rain on the ground included, kg/m²) and integrated static energy."""
     col = a.rho0[:, None, None] * a.config.dz / (a.config.nx * a.config.ny)
     rain = float(a.surface_rain.numpy().astype(np.float64).mean())
 
@@ -44,7 +44,7 @@ def test_uniform_wind_is_preserved():
 
 @pytest.mark.parametrize("shape", [(16, 12, 20), (24, 1, 33), (9, 7, 5)])
 def test_projection_removes_divergence(shape):
-    """Solveur direct : flux de masse sans divergence, pour des tailles quelconques."""
+    """Direct solver: divergence-free mass flux, for arbitrary sizes."""
     nx, ny, nz = shape
     a = gfx.Atmosphere(_dry(nx=nx, ny=ny, nz=nz))
     rng = np.random.default_rng(0)
@@ -55,7 +55,7 @@ def test_projection_removes_divergence(shape):
 
 
 def test_gravity_wave_frequency():
-    """Onde stationnaire : fréquence de la relation de dispersion anélastique."""
+    """Standing wave: frequency from the anelastic dispersion relation."""
     n2, length, height = 1e-4, 1e4, 1e4
     cfg = gfx.AtmosphereConfig(
         nx=32, ny=1, nz=32, dx=length / 32, dy=length / 32, dz=height / 32, smagorinsky=0.0, rain=False,
@@ -80,7 +80,7 @@ def test_gravity_wave_frequency():
 
 
 def test_saturation_adjustment_matches_the_exact_solution():
-    """Noyau f32 contre résolution f64, de l'air sec à l'air très nuageux."""
+    """f32 kernel against an f64 solution, from dry air to very cloudy air."""
     qt = np.linspace(0.0, 0.020, 24)
     cfg = _dry(nx=24, ny=1, nz=24, dz=300.0, theta_l=lambda z: 298.0 + 0.004 * z, qt=lambda z: 0.0 * z + 0.004)
     a = gfx.Atmosphere(cfg)
@@ -95,7 +95,7 @@ def test_saturation_adjustment_matches_the_exact_solution():
 
 
 def _sounding(z):
-    """Couche mélangée de 800 m, puis air stable et de plus en plus sec."""
+    """800 m mixed layer, then stable air, drier and drier."""
     th = np.where(z < 800.0, 300.0, 300.0 + 0.0035 * (z - 800.0))
     return th, np.where(z < 800.0, 0.0135, np.maximum(0.0120 * np.exp(-(z - 800.0) / 1700.0), 5e-4))
 
@@ -124,9 +124,9 @@ def test_thermal_condenses_at_the_lcl_and_conserves_water_and_energy():
         if qc.max() > 1e-5:
             lowest.append(a.z[np.where((qc > 1e-5).any((1, 2)))[0].min()])
             k = np.unravel_index(qc.argmax(), qc.shape)[0]
-            # Jamais plus d'eau que l'ascendance adiabatique de l'air le plus froid de la couche mélangée
+            # Never more water than the adiabatic ascent of the coldest air of the mixed layer
             assert qc.max() <= 1.03 * float(atm.saturation_adjust(300.0, 0.0135, a.p0[k])[1]) + 5e-5
-    assert lowest, "aucun nuage"
+    assert lowest, "no cloud"
     assert lcl - 50.0 <= min(lowest) <= lcl + 200.0
     w2, e2 = _totals(a)
     assert abs(w2 / water - 1.0) < 1e-5
@@ -160,11 +160,11 @@ def test_surface_flux_warms_the_domain():
     assert abs((w2 - water) / (1e-4 * rho_s * 300.0) - 1.0) < 0.02
 
 
-# ───────────────────────── Rendu ─────────────────────────
+# ───────────────────────── Rendering ─────────────────────────
 
 
 def test_path_traced_slab_matches_direct_transmission_and_energy():
-    """Sol blanc, ciel noir : sans nuage, la luminance du sol vaut E·albédo·sin(h)/π ; un nuage la réduit."""
+    """White ground, black sky: without cloud, the ground radiance equals E·albedo·sin(h)/π; a cloud reduces it."""
     a = _thermal()
     r = gfx.SkyRenderer(a, sun_elevation=60.0, ground_albedo=(0.5, 0.5, 0.5), aerosol=0.0)
     r._sky = r.atmosphere._up(np.zeros(r._sky.shape))
@@ -179,7 +179,7 @@ def test_path_traced_slab_matches_direct_transmission_and_energy():
     a.qc = a._up(qc)
     r.update()
     r.render(64, 48, **{**view, "samples": 64})
-    # Couche homogène épaisse (tau réduit ~ 35) : assombrie mais pas noire (diffusion multiple)
+    # Thick homogeneous layer (reduced tau ~ 35): darkened but not black (multiple scattering)
     ratio = r.radiance.mean() / expected.mean()
     assert 0.05 < ratio < 0.6
     assert np.isfinite(r.radiance).all()
@@ -196,7 +196,7 @@ def test_sky_is_blue_and_sun_reddens_at_the_horizon():
 
 @pytest.mark.parametrize("shape", [(160, 96, 100), (15, 8, 70), (7, 1, 12)])
 def test_pressure_solver_inverts_the_discrete_operator(shape):
-    """Transformée en deux passes et colonnes : div(rho grad p) redonne le second membre, tailles quelconques."""
+    """Two-pass and column transform: div(rho grad p) gives back the right-hand side, arbitrary sizes."""
     nx, ny, nz = shape
     a = gfx.Atmosphere(_dry(nx=nx, ny=ny, nz=nz, dz=30.0))
     rng = np.random.default_rng(2)
@@ -205,13 +205,13 @@ def test_pressure_solver_inverts_the_discrete_operator(shape):
     p = a._project(u, v, w)
     after = np.abs(atm.atm_divergence(*p, a.ref, 0.01, 0.01, 1.0 / 30.0, device=a.device).numpy()).max()
     assert after < 1e-5 * before
-    # Projection idempotente : la seconde ne change plus rien
+    # Idempotent projection: the second one changes nothing more
     for f, g in zip(p, a._project(*p)):
         assert np.abs(f.numpy() - g.numpy()).max() < 1e-3
 
 
 def test_scalar_advection_is_sharp_bounded_and_conservative():
-    """Créneau transporté sur un tour complet : dépassement minime, aucune perte, et fronts de quelques mailles."""
+    """Square pulse carried around a full turn: minimal overshoot, no loss, and fronts of a few cells."""
     n = 64
     cfg = _dry(nx=n, ny=1, nz=4, dx=100.0, dy=100.0, dz=100.0, smagorinsky=0.0, rain=False, u=lambda z: 0 * z + 10.0)
     cfg.theta_l = lambda z: 0 * z + 300.0
@@ -225,13 +225,13 @@ def test_scalar_advection_is_sharp_bounded_and_conservative():
         a.u, a.v, a.w = a._up(np.full((4, 1, n), 10.0)), a._zero, a._zero
         a.b = a._zero
     q = a.qt.numpy()[2, 0]
-    assert q.min() > 0.98e-3 and q.max() < 2.02e-3  # 2 % de la marche : MP n'est strict qu'à petit pas de temps
+    assert q.min() > 0.98e-3 and q.max() < 2.02e-3  # 2 % of the step: MP is strict only at small time steps
     total = (a.qt.numpy().astype(np.float64).mean((1, 2)) * a.rho0).sum() / a.rho0.sum()
     assert abs(total / step.mean() - 1.0) < 1e-5
-    assert np.abs(q - step).mean() < 0.06e-3  # erreur moyenne sous 6 % de la marche
+    assert np.abs(q - step).mean() < 0.06e-3  # mean error below 6 % of the step
 
 
-# ───────────────────────── Grilles emboîtées ─────────────────────────
+# ───────────────────────── Nested grids ─────────────────────────
 
 
 def _pair(wind=0.0, **kw):
@@ -258,7 +258,7 @@ def test_cosine_transform_matches_definition_and_inverts(n):
 
 @pytest.mark.parametrize("wind", [0.0, 9.0])
 def test_nest_keeps_rest_and_uniform_wind(wind):
-    """L'air traverse les bords de la grille fine sans rien créer."""
+    """Air crosses the edges of the fine grid without creating anything."""
     _, n = _pair(wind)
     n.run(120.0)
     assert abs(n.time - 120.0) < 1e-6
@@ -274,11 +274,11 @@ def test_nest_projection_removes_divergence_with_fixed_boundary_flow():
     before = np.abs(atm.atm_divergence(*map(n._up, (u, v, w)), n.ref, 0.04, 0.04, 0.02).numpy()).max()
     n.u, n.v, n.w = n._project(*map(n._up, (u, v, w)))
     div = n.divergence()
-    # Le flux net à travers les bords, imposé ici au hasard, ne peut que se répartir uniformément
+    # The net flux through the edges, imposed here at random, can only spread out uniformly
     residual = div / n.rho0[:, None, None]
     assert np.abs(residual - residual.mean()).max() < 1e-5 * before
     h = gfx.nest.HALO
-    np.testing.assert_allclose(n.u.numpy()[:, :, : h + 1], u[:, :, : h + 1].astype(np.float32))  # bord imposé intact
+    np.testing.assert_allclose(n.u.numpy()[:, :, : h + 1], u[:, :, : h + 1].astype(np.float32))  # imposed edge intact
 
 
 def test_nest_follows_parent_and_moves():
@@ -290,7 +290,7 @@ def test_nest_follows_parent_and_moves():
     i0 = round((n.origin[0] + h * 50.0) / 100.0)
     coarse = parent.qt.numpy()[:, i0 : i0 + 24, i0 : i0 + 24].mean((1, 2))
     np.testing.assert_allclose(fine, np.interp(n.z, parent.z, coarse), atol=4e-4)
-    assert n.w.numpy().max() > 1.0  # le thermique est bien là
+    assert n.w.numpy().max() > 1.0  # the thermal is indeed there
     before, origin = n.s.numpy().copy(), n.origin
     cx = origin[0] + 0.5 * n.config.nx * 50.0
     assert n.move_to(cx + 200.0, cx - 100.0)
@@ -303,7 +303,7 @@ def test_nest_follows_parent_and_moves():
 
 
 def test_nested_rendering_is_consistent():
-    """Même nuage et même maille dans les deux grilles : le rendu emboîté doit donner la même image."""
+    """Same cloud and same mesh in both grids: the nested rendering must give the same image."""
     a = _thermal()
     n = gfx.NestedAtmosphere(a, size=2400.0, dx=100.0, dz=100.0)
     view = dict(position=(2400.0, 600.0, 20.0), azimuth=0.0, elevation=25.0, fov=50.0, samples=200)
@@ -326,7 +326,7 @@ def test_nested_rendering_is_consistent():
     assert means[2].mean() > 1.05 * means[0].mean()
 
 
-# ───────────────────────── Rendu temps réel ─────────────────────────
+# ───────────────────────── Real-time rendering ─────────────────────────
 
 
 def _ball(grid, amount=0.6e-3, radius=600.0, center=(2400.0, 2400.0, 1500.0)):
@@ -335,14 +335,14 @@ def _ball(grid, amount=0.6e-3, radius=600.0, center=(2400.0, 2400.0, 1500.0)):
     x, y, z = (ox + (i + 0.5) * grid.config.dx, oy + (j + 0.5) * grid.config.dx, (k + 0.5) * grid.config.dz)
     r = np.sqrt((x - center[0]) ** 2 + (y - center[1]) ** 2 + (z - center[2]) ** 2)
     qc = np.maximum(amount * (1.0 - r / radius), 0.0)
-    # Déficit hors du nuage, pour que le bord s'interpole comme dans une vraie simulation
+    # Deficit outside the cloud, so that the edge interpolates as in a real simulation
     grid.qc, grid.qt = grid._up(qc), grid._up(qc + 0.002)
 
 
 @pytest.mark.parametrize("sun_azimuth", [180.0, 90.0, 10.0])
 def test_live_renderer_matches_path_tracing(sun_azimuth):
-    """Dos au soleil, de côté, contre-jour : sur les seuls pixels du nuage, la luminance de la référence à 10 % près
-    (8 % mesurés sur cette boule très dense) ; le ciel pur doit être le même."""
+    """Back to the sun, side-lit, backlit: on the cloud pixels only, the reference radiance within 10 %
+    (8 % measured on this very dense ball); the clear sky must be identical."""
     a = _thermal()
     _ball(a)
     view = ((2400.0, 600.0, 20.0), 0.0, 30.0, 50.0)
@@ -364,7 +364,7 @@ def test_live_renderer_matches_path_tracing(sun_azimuth):
 
 
 def test_sun_depth_skips_empty_blocks_without_losing_water():
-    """Couche homogène : épaisseur optique oblique exacte, et nulle au-dessus."""
+    """Homogeneous layer: exact oblique optical depth, and zero above."""
     a = _thermal()
     qc = np.zeros((50, 48, 48))
     qc[20:30] = 4e-4
@@ -380,7 +380,7 @@ def test_sun_depth_skips_empty_blocks_without_losing_water():
 
 
 def test_light_cache_follows_the_clouds():
-    """Tuiles dans les seuls blocs nuageux ; un pas qui ne change rien garde les chemins, un nuage nouveau part de zéro."""
+    """Tiles only in the cloud blocks; a step that changes nothing keeps the paths, a new cloud starts from zero."""
     a = _thermal()
     _ball(a)
     r = gfx.CloudRenderer(a)

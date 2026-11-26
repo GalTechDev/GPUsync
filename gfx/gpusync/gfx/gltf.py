@@ -1,11 +1,11 @@
-"""Chargeur glTF 2.0 / `.glb` pur Python (zéro dépendance externe, Pillow optionnel pour textures).
+"""Pure-Python glTF 2.0 / `.glb` loader (no external dependency, Pillow optional for textures).
 
-Supporte :
-- fichiers binaires `.glb` (magic `glTF` v2) et JSON `.gltf` (buffers externes `.bin` ou `data:...;base64,...`),
-- attributs `POSITION`, `NORMAL` (calculées si absentes), `TEXCOORD_0`, indices `u8`/`u16`/`u32`,
-- matériaux `pbrMetallicRoughness` (`baseColorFactor`, `metallicFactor`, `roughnessFactor`, `emissiveFactor`,
-  `baseColorTexture` embarquée),
-- hiérarchie de nœuds (`translation`, `rotation` quaternion, `scale`, `matrix`, `children`).
+Supports:
+- binary `.glb` files (magic `glTF` v2) and JSON `.gltf` (external `.bin` buffers or `data:...;base64,...`),
+- `POSITION`, `NORMAL` (computed if missing), `TEXCOORD_0` attributes, `u8`/`u16`/`u32` indices,
+- `pbrMetallicRoughness` materials (`baseColorFactor`, `metallicFactor`, `roughnessFactor`, `emissiveFactor`,
+  embedded `baseColorTexture`),
+- node hierarchy (`translation`, quaternion `rotation`, `scale`, `matrix`, `children`).
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def _parse_gltf_container(path: Path) -> tuple[dict[str, Any], list[bytes]]:
     if len(raw) >= 12 and raw[:4] == b"glTF":
         _, version, _ = struct.unpack_from("<III", raw, 0)
         if version != 2:
-            raise ValueError(f"Version glTF non supportée : {version} (seule v2 est supportée)")
+            raise ValueError(f"Unsupported glTF version: {version} (only v2 is supported)")
         pos = 12
         gltf_json: dict[str, Any] | None = None
         bin_chunk: bytes = b""
@@ -64,7 +64,7 @@ def _parse_gltf_container(path: Path) -> tuple[dict[str, Any], list[bytes]]:
             elif chunk_type == 0x004E4942:  # BIN
                 bin_chunk = data
         if gltf_json is None:
-            raise ValueError(f"Fichier GLB invalide (bloc JSON absent) : {path}")
+            raise ValueError(f"Invalid GLB file (JSON chunk missing): {path}")
         buffers = [bin_chunk]
         for bi, bdesc in enumerate(gltf_json.get("buffers", [])):
             if bi == 0 and "uri" not in bdesc:
@@ -100,7 +100,7 @@ def _read_accessor(gltf: dict[str, Any], buffers: list[bytes], acc_idx: int) -> 
         arr = arr.reshape((count, ncomp)) if ncomp > 1 else arr.reshape((count,))
         return np.array(arr, copy=True)
 
-    # Accès avec stride personnalisé
+    # Access with a custom stride
     out = np.empty((count, ncomp) if ncomp > 1 else (count,), dtype=dtype)
     for i in range(count):
         v = np.frombuffer(buf, dtype=dtype, count=ncomp, offset=offset + i * stride)
@@ -154,12 +154,12 @@ def _compute_normals(positions: np.ndarray, indices: np.ndarray) -> np.ndarray:
 
 
 def _quat_to_euler_yxz(q: list[float]) -> tuple[float, float, float]:
-    """Convertit un quaternion glTF `[x, y, z, w]` en angles `(rx, ry, rz)` compatibles `Ry @ Rx @ Rz`."""
+    """Converts a glTF quaternion `[x, y, z, w]` into angles `(rx, ry, rz)` compatible with `Ry @ Rx @ Rz`."""
     qx, qy, qz, qw = float(q[0]), float(q[1]), float(q[2]), float(q[3])
     n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
     if n > 1e-8:
         qx, qy, qz, qw = qx / n, qy / n, qz / n, qw / n
-    # Matrice de rotation 3×3
+    # 3×3 rotation matrix
     r00 = 1.0 - 2.0 * (qy * qy + qz * qz)
     r01 = 2.0 * (qx * qy - qz * qw)
     r02 = 2.0 * (qx * qz + qy * qw)
@@ -169,7 +169,7 @@ def _quat_to_euler_yxz(q: list[float]) -> tuple[float, float, float]:
     r20 = 2.0 * (qx * qz - qy * qw)
     r22 = 1.0 - 2.0 * (qx * qx + qy * qy)
 
-    # Décomposition Ry @ Rx @ Rz : r12 = -sin(rx), r02 = sin(ry)cos(rx), r22 = cos(ry)cos(rx)
+    # Ry @ Rx @ Rz decomposition: r12 = -sin(rx), r02 = sin(ry)cos(rx), r22 = cos(ry)cos(rx)
     sin_x = max(-1.0, min(1.0, -r12))
     rx = math.asin(sin_x)
     if abs(math.cos(rx)) > 1e-5:
@@ -198,7 +198,7 @@ def _extract_primitive(gltf: dict[str, Any], buffers: list[bytes], prim: dict[st
 
     if "TEXCOORD_0" in attrs:
         uvs = _read_accessor(gltf, buffers, attrs["TEXCOORD_0"]).astype(np.float32, copy=False)
-        # glTF utilise v=0 en haut, notre moteur utilise v=0 en bas → inverser V
+        # glTF uses v=0 at the top, our engine uses v=0 at the bottom → flip V
         uvs = np.ascontiguousarray(np.stack([uvs[:, 0], 1.0 - uvs[:, 1]], axis=-1), dtype=np.float32)
     else:
         uvs = np.zeros((len(positions), 2), dtype=np.float32)
@@ -244,7 +244,7 @@ def _extract_material(
 
 
 def load_gltf_mesh(path: str | Path, *, normalize_size: float | None = None) -> Mesh:
-    """Charge tous les triangles d'un fichier `.glb` / `.gltf` en un seul `Mesh` fusionné."""
+    """Loads every triangle of a `.glb` / `.gltf` file into a single merged `Mesh`."""
     p = Path(path)
     gltf, buffers = _parse_gltf_container(p)
     pos_l, norm_l, uv_l, idx_l = [], [], [], []
@@ -260,7 +260,7 @@ def load_gltf_mesh(path: str | Path, *, normalize_size: float | None = None) -> 
             idx_l.append(m.indices + v_off)
             v_off += m.num_vertices
     if not pos_l:
-        raise ValueError(f"Aucun maillage triangulaire trouvé dans {p}")
+        raise ValueError(f"No triangle mesh found in {p}")
 
     positions = np.ascontiguousarray(np.concatenate(pos_l, axis=0), dtype=np.float32)
     normals = np.ascontiguousarray(np.concatenate(norm_l, axis=0), dtype=np.float32)
@@ -281,7 +281,7 @@ def load_gltf_mesh(path: str | Path, *, normalize_size: float | None = None) -> 
 
 
 def load_gltf_nodes(path: str | Path) -> list[Node]:
-    """Importe la hiérarchie complète (`Node` / `Object3D` + matériaux PBR + textures) d'un `.glb`/`.gltf`."""
+    """Imports the full hierarchy (`Node` / `Object3D` + PBR materials + textures) of a `.glb`/`.gltf`."""
     p = Path(path)
     gltf, buffers = _parse_gltf_container(p)
     tex_cache: dict[int, Texture | None] = {}
@@ -327,7 +327,7 @@ def load_gltf_nodes(path: str | Path) -> list[Node]:
 
 
 def write_glb_from_mesh(path: str | Path, mesh: Mesh, material: Material | None = None) -> Path:
-    """Écrit un `Mesh` (+ `Material` PBR) au format binaire standard `.glb` v2 (utile pour export & tests)."""
+    """Writes a `Mesh` (+ PBR `Material`) in the standard binary `.glb` v2 format (useful for export & tests)."""
     p = Path(path)
     pos_b = np.ascontiguousarray(mesh.positions, dtype=np.float32).tobytes()
     norm_b = np.ascontiguousarray(mesh.normals, dtype=np.float32).tobytes()

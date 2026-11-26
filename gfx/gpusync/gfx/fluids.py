@@ -1,10 +1,10 @@
-"""Moteurs fluides 100 % GPU et entièrement paramétrables pour `gpusync.gfx` :
-- `WaterSurfaceConfig` + `GpuWaterSurface` : surface d'eau interactive 3D (équation des ondes 2D,
-  normales lisses réalistes OU facettes nettes low-poly, bords réfléchissants/absorbants, houle ambiante).
-- `FluidSPHConfig` + `GpuFluidSPH3D` : fluide particulaire 3D SPH complet (densité, pression, viscosité,
-  cohésion, gravité orientable, préréglages eau / low-poly / miel / lave / mercure → `InstancedMesh3D.gpu_trs`).
-- `Fluid2DConfig` + `GpuFluid2D` : fluide eulérien 2D Navier-Stokes / Stable Fluids (advection, confinement
-  de vorticité, projection Jacobi, flottabilité, rendu lisse ou cel-shaded / pixel-art → `Texture` 0-copie).
+"""100 % GPU, fully configurable fluid engines for `gpusync.gfx`:
+- `WaterSurfaceConfig` + `GpuWaterSurface`: interactive 3D water surface (2D wave equation,
+  realistic smooth normals OR sharp low-poly facets, reflecting / absorbing edges, ambient swell).
+- `FluidSPHConfig` + `GpuFluidSPH3D`: complete 3D SPH particle fluid (density, pressure, viscosity,
+  cohesion, orientable gravity, water / low-poly / honey / lava / mercury presets → `InstancedMesh3D.gpu_trs`).
+- `Fluid2DConfig` + `GpuFluid2D`: 2D Eulerian Navier-Stokes / Stable Fluids (advection, vorticity
+  confinement, Jacobi projection, buoyancy, smooth or cel-shaded / pixel-art rendering → zero-copy `Texture`).
 """
 
 from __future__ import annotations
@@ -87,19 +87,19 @@ from .mesh import Mesh
 from .texture import Texture
 
 
-# ───────────────────────── 1. Surface d'Eau 3D (`GpuWaterSurface`) ─────────────────────────
+# ───────────────────────── 1. 3D water surface (`GpuWaterSurface`) ────────────────
 
 
-# Lissage des ondes de la taille d'une cellule (fraction par sous-pas, stable sous 0,05)
+# Smoothing of waves the size of one cell (fraction per sub-step, stable below 0.05)
 WAVE_SMOOTHING = 0.01
 
-# Volume de rendu : échelle de densité, et valeur obtenue au cœur de l'eau au repos
+# Render volume: density scale, and the value reached in the core of water at rest
 DENSITY_SCALE = 0.68
 VOLUME_CORE = 0.68
 
 
 def _make_flat_plane_mesh(size: float, subdivisions: int) -> Mesh:
-    """Construit un plan horizontal non-indexé (3 sommets dédiés par triangle) pour le flat-shading low-poly."""
+    """Builds a non-indexed horizontal plane (3 dedicated vertices per triangle) for low-poly flat shading."""
     n = max(1, int(subdivisions))
     half = size * 0.5
     xs = np.linspace(-half, half, n + 1, dtype=np.float32)
@@ -117,7 +117,7 @@ def _make_flat_plane_mesh(size: float, subdivisions: int) -> Mesh:
         for ix in range(n):
             x0, x1 = float(xs[ix]), float(xs[ix + 1])
             u0, u1 = ix / n, (ix + 1) / n
-            # Triangle 1 (CCW vu de +Y : (x0,z0) → (x0,z1) → (x1,z1))
+            # Triangle 1 (CCW seen from +Y: (x0,z0) → (x0,z1) → (x1,z1))
             b = t * 3
             pos[b] = (x0, 0.0, z0)
             pos[b + 1] = (x0, 0.0, z1)
@@ -143,38 +143,38 @@ def _make_flat_plane_mesh(size: float, subdivisions: int) -> Mesh:
 
 @dataclass
 class WaterSurfaceConfig:
-    """Configuration complète d'une surface d'eau 3D (du réaliste miroir au low-poly facetté)."""
+    """Complete configuration of a 3D water surface (from realistic mirror to faceted low-poly)."""
 
     size: float = 12.0
     subdivisions: int = 56
     flat_shading: bool = False  # True = facettes triangulaires nettes (style low-poly / cristal)
-    wave_speed: float = 4.8  # vitesse des ondes en m/s, indépendante du maillage (sous-pas automatiques)
-    damping: float = 0.985  # vitesse verticale conservée par 1/60 s
+    wave_speed: float = 4.8  # wave speed in m/s, independent of the mesh (automatic sub-steps)
+    damping: float = 0.985  # vertical velocity kept per 1/60 s
     height_scale: float = 0.72
-    ambient_waves: float = 0.0  # houle de fond procédurale (0 = bassin calme, >0 = océan)
+    ambient_waves: float = 0.0  # procedural ground swell (0 = calm basin, >0 = ocean)
     ambient_freq: float = 0.72
     ambient_speed: float = 1.25
-    boundary: str = "reflect"  # "reflect" (bassin fermé) ou "absorb" (océan ouvert)
+    boundary: str = "reflect"  # "reflect" (closed basin) or "absorb" (open ocean)
     substeps: int = 1
-    fixed_dt: float = 1.0 / 60.0  # pas de temps fixe : même physique à 60 Hz, 120 Hz ou 500 FPS
+    fixed_dt: float = 1.0 / 60.0  # fixed time step: same physics at 60 Hz, 120 Hz or 500 FPS
     albedo: tuple[float, float, float] = (0.04, 0.34, 0.56)
     metallic: float = 0.72
     roughness: float = 0.06
     emissive: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    # Optique (eau transparente) ; False : surface opaque, rendue avec `albedo`, `metallic`…
+    # Optics (transparent water); False: opaque surface, rendered with `albedo`, `metallic`…
     optics: bool = False
-    depth: float = 1.6  # profondeur du bassin (m), sous le niveau de l'objet
+    depth: float = 1.6  # depth of the basin (m), below the object's level
     ior: float = 1.333
-    absorption: tuple[float, float, float] = (0.42, 0.11, 0.06)  # par mètre (R, G, B)
-    tint: tuple[float, float, float] = (0.03, 0.34, 0.48)  # lumière diffusée par l'eau
+    absorption: tuple[float, float, float] = (0.42, 0.11, 0.06)  # per metre (R, G, B)
+    tint: tuple[float, float, float] = (0.03, 0.34, 0.48)  # light scattered by the water
     caustics: float = 0.9
     floor_colors: tuple[tuple[float, float, float], tuple[float, float, float]] = ((0.52, 0.64, 0.68), (0.30, 0.46, 0.55))
-    walls: bool = True  # murs carrelés (bassin) ; False : le fond continue au-delà (mer)
-    tile: float = 0.75  # côté des carreaux du bassin (m)
+    walls: bool = True  # tiled walls (basin); False: the bottom continues beyond (sea)
+    tile: float = 0.75  # side of the basin tiles (m)
 
     @classmethod
     def realistic(cls, size: float = 12.0, subdivisions: int = 56) -> WaterSurfaceConfig:
-        """Eau de bassin / lac réaliste lisse, calme et très réfléchissante (idéale avec `cam.ssr = True`)."""
+        """Realistic pool / lake water, smooth, calm and very reflective (ideal with `cam.ssr = True`)."""
         return cls(
             size=size,
             subdivisions=subdivisions,
@@ -191,7 +191,7 @@ class WaterSurfaceConfig:
 
     @classmethod
     def low_poly(cls, size: float = 12.0, subdivisions: int = 16) -> WaterSurfaceConfig:
-        """Eau low-poly stylisée à facettes nettes et reflets cristallins."""
+        """Stylized low-poly water with sharp facets and crystalline reflections."""
         return cls(
             size=size,
             subdivisions=subdivisions,
@@ -209,7 +209,7 @@ class WaterSurfaceConfig:
 
     @classmethod
     def ocean(cls, size: float = 18.0, subdivisions: int = 64) -> WaterSurfaceConfig:
-        """Océan ouvert avec houle continue et bords absorbants."""
+        """Open ocean with continuous swell and absorbing edges."""
         return cls(
             size=size,
             subdivisions=subdivisions,
@@ -235,7 +235,7 @@ class WaterSurfaceConfig:
 
     @classmethod
     def lava(cls, size: float = 12.0, subdivisions: int = 36) -> WaterSurfaceConfig:
-        """Lave visqueuse et incandescente (amortissement fort, émissif chaud)."""
+        """Viscous glowing lava (strong damping, hot emissive)."""
         return cls(
             size=size,
             subdivisions=subdivisions,
@@ -253,7 +253,7 @@ class WaterSurfaceConfig:
 
     @classmethod
     def mercury(cls, size: float = 12.0, subdivisions: int = 56) -> WaterSurfaceConfig:
-        """Métal liquide / mercure chromé ultra-brillant."""
+        """Ultra-shiny chromed liquid metal / mercury."""
         return cls(
             size=size,
             subdivisions=subdivisions,
@@ -277,16 +277,16 @@ class WaterSurfaceConfig:
 
 @dataclass
 class FloatingBody:
-    """Corps flottant couplé en double sens avec `GpuWaterSurface` (Archimède + surf sur la pente des vagues + sillage)."""
+    """Floating body coupled both ways with `GpuWaterSurface` (Archimedes + surfing on the wave slope + wake)."""
 
     node: object
     radius: float = 0.48
     buoyancy: float = 24.0
     gravity: float = 9.81
-    wave_push: float = 8.5  # force horizontale exercée par la pente des vagues
+    wave_push: float = 8.5  # horizontal force exerted by the wave slope
     drag: float = 0.94  # frottement fluide horizontal
-    vertical_drag: float = 0.88  # amortissement du tangage vertical
-    wake_strength: float = 0.10  # intensité du sillage laissé dans l'eau
+    vertical_drag: float = 0.88  # damping of the vertical pitching
+    wake_strength: float = 0.10  # strength of the wake left in the water
     vel: np.ndarray | None = None
 
     def __post_init__(self) -> None:
@@ -297,7 +297,7 @@ class FloatingBody:
 
 
 class GpuWaterSurface:
-    """Simulation de surface d'eau 3D 100 % GPU (0 copie CPU → `Object3D.gpu_positions/gpu_normals`)."""
+    """3D water surface simulation, 100 % GPU (no CPU copy → `Object3D.gpu_positions/gpu_normals`)."""
 
     def __init__(self, config: WaterSurfaceConfig | None = None, *, device: str | None = None) -> None:
         self.config = config or WaterSurfaceConfig.realistic()
@@ -321,7 +321,7 @@ class GpuWaterSurface:
         zeros = np.zeros((self.grid_n, self.grid_n), dtype=np.float32)
         self.h_curr = upload_f32(zeros, device=device)
         self.h_prev = upload_f32(zeros, device=device)
-        # Caustiques : deux photons exactement par case et par axe (la grille de photons couvre 1,5 fois le bassin)
+        # Caustics: exactly two photons per cell and per axis (the photon grid covers 1.5 times the basin)
         m = min(256, 3 * self.grid_n)
         self._map_tpl = upload_f32(np.zeros((m, m), dtype=np.float32), device=device)
         self._photon_tpl = upload_f32(np.zeros((3 * m, 3 * m), dtype=np.float32), device=device)
@@ -355,25 +355,25 @@ class GpuWaterSurface:
         )
 
     def splash(self, world_x: float, world_z: float, *, strength: float = -0.55, radius: float = 0.65) -> None:
-        """Crée une onde/goutte centrée aux coordonnées monde `(world_x, world_z)`."""
+        """Creates a wave / drop centred at world coordinates `(world_x, world_z)`."""
         half = self.config.size * 0.5
         u = (world_x + half) / max(self.config.size, 1e-4)
         v = (world_z + half) / max(self.config.size, 1e-4)
         self.splash_uv(u, v, strength=strength, radius=radius / max(self.config.size, 1e-4))
 
     def splash_uv(self, u: float, v: float, *, strength: float = -0.55, radius: float = 0.055) -> None:
-        """Crée une onde aux coordonnées normalisées `(u, v) ∈ [0, 1]²`."""
+        """Creates a wave at normalized coordinates `(u, v) ∈ [0, 1]²`."""
         cx = float(np.clip(u, 0.02, 0.98)) * (self.grid_n - 1)
         cy = float(np.clip(v, 0.02, 0.98)) * (self.grid_n - 1)
         r_cells = max(1.0, float(radius) * (self.grid_n - 1))
         inv_r2 = 1.0 / (r_cells * r_cells)
-        # Couronne dosée pour que la somme soit nulle sur la grille, même près d'un bord (somme séparable en x et y)
+        # Ring sized so that the sum is zero over the grid, even near an edge (separable sum in x and y)
         axis = np.arange(self.grid_n, dtype=np.float64)
         core, wide = (
             float(np.exp(-((axis - cx) ** 2) * k).sum() * np.exp(-((axis - cy) ** 2) * k).sum()) for k in (inv_r2, 0.3 * inv_r2)
         )
         ring = core / wide
-        # Les deux instants reçoivent la même forme : la hauteur change, sans vitesse parasite
+        # Both instants get the same shape: the height changes, without spurious velocity
         self.h_curr, self.h_prev = (
             water_add_splash(h, cx, cy, inv_r2, float(strength), ring, device=self.device) for h in (self.h_curr, self.h_prev)
         )
@@ -385,7 +385,7 @@ class GpuWaterSurface:
         self.gpu_positions, self.gpu_normals = self._rebuild_mesh()
 
     def step(self, dt: float) -> tuple[gs.Array, gs.Array]:
-        """Avance la simulation d'ondes à pas fixe sur GPU (indépendant des FPS) et renvoie `(gpu_positions, gpu_normals)`."""
+        """Advances the wave simulation with a fixed step on the GPU (independent of FPS) and returns `(gpu_positions, gpu_normals)`."""
         cfg = self.config
         damp = min(max(float(cfg.damping), 0.85), 1.0)
         absorb = 1 if cfg.boundary == "absorb" else 0
@@ -394,11 +394,11 @@ class GpuWaterSurface:
         n_ticks = int(self._accum / fixed_dt + 1e-6)
         if n_ticks > 0:
             self._accum -= n_ticks * fixed_dt
-        # Stable si vitesse · dt / cellule < 0,7 ; le lissage en prend une part
+        # Stable if speed · dt / cell < 0.7; the smoothing takes part of it
         courant = max(float(cfg.wave_speed), 0.0) * fixed_dt / self._cell_size
         sub = max(1, int(cfg.substeps), math.ceil(courant / 0.6))
         c2 = (courant / sub) ** 2
-        # Dans le schéma, une vitesse est une différence entre deux pas : tout se règle par la durée du pas
+        # In the scheme, a velocity is a difference between two steps: everything is set by the step duration
         if sub != self._sub:
             self._rescale_velocity(self._sub / sub)
             self._sub = sub
@@ -414,17 +414,17 @@ class GpuWaterSurface:
         return self.gpu_positions, self.gpu_normals
 
     def _rescale_velocity(self, ratio: float) -> None:
-        """Le nombre de sous-pas a changé : la même vitesse correspond à un autre écart entre les deux instants."""
+        """The number of sub-steps changed: the same velocity corresponds to another difference between the two instants."""
         self.h_prev = water_rescale_prev(self.h_curr, self.h_prev, float(ratio), device=self.device)
 
     def apply_to(self, obj: object) -> None:
-        """Branche directement les buffers VRAM sur un `Object3D` (0 copie CPU)."""
+        """Plugs the VRAM buffers directly into an `Object3D` (no CPU copy)."""
         obj.gpu_positions = self.gpu_positions  # type: ignore[attr-defined]
         obj.gpu_normals = self.gpu_normals  # type: ignore[attr-defined]
         obj.water = self if self.config.optics else None  # type: ignore[attr-defined]
 
     def caustic_map(self, sun_dir) -> gs.Array:
-        """Éclairement du fond du bassin par le soleil réfracté (1 = eau plate) ; recalculé si l'eau a changé."""
+        """Irradiance of the basin bottom by the refracted sun (1 = flat water); recomputed if the water changed."""
         cfg = self.config
         sun = (float(sun_dir[0]), float(sun_dir[1]), float(sun_dir[2]))
         key = (self.t, sun, float(cfg.depth), float(cfg.ior))
@@ -450,7 +450,7 @@ class GpuWaterSurface:
         return out
 
     def sample_height_slope(self, world_x: float, world_z: float) -> tuple[float, float, float]:
-        """Renvoie `(hauteur_y, dh_dx, dh_dz)` à la position monde `(world_x, world_z)` pour les objets flottants."""
+        """Returns `(height_y, dh_dx, dh_dz)` at world position `(world_x, world_z)` for floating objects."""
         if self._h_cpu is None or self._h_cpu_t != self.t:
             self._h_cpu = self.h_curr.numpy()
             self._h_cpu_t = self.t
@@ -481,7 +481,7 @@ class GpuWaterSurface:
         return y, dhdx, dhdz
 
     def step_floating(self, bodies: list[FloatingBody], dt: float) -> None:
-        """Simule la flottaison (Archimède + poussée par les vagues + roulement + sillage) des `FloatingBody`."""
+        """Simulates the flotation (Archimedes + push from the waves + rolling + wake) of the `FloatingBody`s."""
         dt_c = min(max(float(dt), 0.0), 0.033)
         if dt_c <= 0.0 or not bodies:
             return
@@ -493,10 +493,10 @@ class GpuWaterSurface:
             wz = float(node.z)  # type: ignore[attr-defined]
             water_y, dhdx, dhdz = self.sample_height_slope(wx, wz)
 
-            # Fraction immergée (0 hors de l'eau, 1 totalement sous l'eau)
+            # Submerged fraction (0 out of the water, 1 fully under water)
             sub = float(np.clip((water_y - (wy - fb.radius)) / max(2.0 * fb.radius, 1e-4), 0.0, 1.0))
             fy = fb.buoyancy * sub - fb.gravity
-            # Les vagues poussent horizontalement dans le sens de leur pente (-∇h)
+            # Waves push horizontally along their slope (-∇h)
             fx = -dhdx * fb.wave_push * sub
             fz = -dhdz * fb.wave_push * sub
 
@@ -510,7 +510,7 @@ class GpuWaterSurface:
             ny = wy + float(vel[1]) * dt_c
             nz = wz + float(vel[2]) * dt_c
 
-            # Rebond doux sur les margelles du bassin
+            # Soft bounce on the basin coping
             max_p = max(0.5, limit - fb.radius)
             if nx < -max_p:
                 nx = -max_p
@@ -526,7 +526,7 @@ class GpuWaterSurface:
                 vel[2] = -abs(vel[2]) * 0.65
 
             node.pos = (nx, ny, nz)  # type: ignore[attr-defined]
-            # Roulement + inclinaison naturels avec les vagues
+            # Natural rolling + tilting with the waves
             rot = np.asarray(node.rot, dtype=np.float32)  # type: ignore[attr-defined]
             node.rot = (  # type: ignore[attr-defined]
                 float(rot[0]) + float(vel[2]) * dt_c / max(fb.radius, 0.1),
@@ -534,16 +534,16 @@ class GpuWaterSurface:
                 float(rot[2]) - float(vel[0]) * dt_c / max(fb.radius, 0.1),
             )
 
-            # Couplage retour (sillage subtil si le corps plonge ou glisse vite)
+            # Back-coupling (subtle wake if the body dives or slides fast)
             if fb.wake_strength > 0.0 and sub > 0.05:
                 horiz_sp = math.hypot(float(vel[0]), float(vel[2]))
                 vert_imp = -float(vel[1]) if vel[1] < -0.35 else 0.0
-                # Sillage par 1/60 s : même trace dans l'eau quel que soit le nombre d'images par seconde
+                # Wake per 1/60 s: the same trail in the water whatever the frame rate
                 imp = (vert_imp * 0.12 + horiz_sp * 0.025) * fb.wake_strength
                 if imp > 0.004:
                     self.splash(nx, nz, strength=-min(imp, 0.18) * dt_c * 60.0, radius=fb.radius * 1.15)
 
-        # Collisions élastiques douces entre bouées flottantes
+        # Soft elastic collisions between floating buoys
         for i in range(len(bodies)):
             a = bodies[i]
             for j in range(i + 1, len(bodies)):
@@ -569,15 +569,15 @@ class GpuWaterSurface:
 
 
 class GpuFloaters:
-    """Flotteurs simulés entièrement sur GPU : leurs objets sont dessinés là où le calcul les place.
+    """Floaters simulated entirely on the GPU: their objects are drawn where the computation puts them.
 
-    Même physique que `GpuWaterSurface.step_floating`, sans aucune lecture vers le CPU. En contrepartie,
-    `node.pos` n'est plus à jour : appelez `read()` quand le programme a vraiment besoin des positions
-    (cet appel attend le GPU)."""
+    Same physics as `GpuWaterSurface.step_floating`, without any read back to the CPU. In return,
+    `node.pos` is no longer up to date: call `read()` when the program really needs the positions
+    (this call waits for the GPU)."""
 
     def __init__(self, water: GpuWaterSurface, bodies: list[FloatingBody]) -> None:
         if not bodies:
-            raise ValueError("GpuFloaters : au moins un flotteur attendu")
+            raise ValueError("GpuFloaters: at least one floater expected")
         self.water = water
         self.bodies = list(bodies)
         m = len(self.bodies)
@@ -608,7 +608,7 @@ class GpuFloaters:
         return self._params
 
     def set_velocity(self, body: FloatingBody | int, *, x: float | None = None, y: float | None = None, z: float | None = None) -> None:
-        """Impose une ou plusieurs composantes de vitesse (m/s) au prochain pas, sans lire l'état."""
+        """Imposes one or more velocity components (m/s) at the next step, without reading the state."""
         k = body if isinstance(body, int) else self.bodies.index(body)
         for axis, value in enumerate((x, y, z)):
             if value is not None:
@@ -616,12 +616,12 @@ class GpuFloaters:
                 self._kicks[k, 4 + axis] = 0.0
 
     def add_velocity(self, body: FloatingBody | int, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0) -> None:
-        """Ajoute une vitesse (m/s) au prochain pas, sans lire l'état."""
+        """Adds a velocity (m/s) at the next step, without reading the state."""
         k = body if isinstance(body, int) else self.bodies.index(body)
         self._kicks[k, 0:3] += (dx, dy, dz)
 
     def step(self, dt: float) -> None:
-        """Avance les flotteurs et leur sillage (après `water.step`)."""
+        """Advances the floaters and their wake (after `water.step`)."""
         dt_c = min(max(float(dt), 0.0), 0.033)
         if dt_c <= 0.0:
             return
@@ -654,7 +654,7 @@ class GpuFloaters:
         self._bind()
 
     def read(self) -> np.ndarray:
-        """Rapatrie l'état `(N, 16)` et met à jour `node.pos`, `node.rot` et `vel` (attend le GPU)."""
+        """Copies back the `(N, 16)` state and updates `node.pos`, `node.rot` and `vel` (waits for the GPU)."""
         state = np.array(self.state.numpy())
         for k, fb in enumerate(self.bodies):
             fb.node.pos = tuple(float(v) for v in state[k, 0:3])  # type: ignore[attr-defined]
@@ -668,19 +668,19 @@ class GpuFloaters:
 
 @dataclass
 class FluidSPHConfig:
-    """Configuration complète du fluide volumétrique 3D (MAC FLIP Blender + Raytracing 3D 2-rebonds + Whitewater)."""
+    """Complete configuration of the volumetric 3D fluid (Blender MAC FLIP + two-bounce 3D ray tracing + whitewater)."""
 
     count: int = 20000
-    solver: str = "mac_flip"  # "mac_flip" (grille MAC décalée Blender), "flip" (colocalisé), "sph" (grille triée)
-    grid_res: tuple[int, int, int] = (38, 26, 22)  # résolution grille physique MAC 3D
-    vol_res: tuple[int, int, int] = (88, 56, 48)  # résolution volume 3D haute finesse pour raytracing
-    vol_blur_iters: int = 2  # passes de flou gaussien 3D séparable (nappes fines et lisses)
-    whitewater_count: int = 6000  # micro-particules GPU d'embruns (spray), écume (foam) et bulles
-    pressure_iters: int = 26  # itérations Jacobi 3D MAC d'incompressibilité (faites par deux)
-    flip_ratio: float = 0.93  # 0.93 = éclaboussures vives (eau), 0.25 = visqueux (miel/lave)
-    density_push: float = 1.55  # force de maintien de volume 3D
-    volume_iters: int = 4  # itérations Jacobi du maintien de volume (faites par deux)
-    shift: float = 0.03  # redistribution des particules au cœur de l'eau (évite les poches creuses)
+    solver: str = "mac_flip"  # "mac_flip" (Blender staggered MAC grid), "flip" (collocated), "sph" (sorted grid)
+    grid_res: tuple[int, int, int] = (38, 26, 22)  # resolution of the physical 3D MAC grid
+    vol_res: tuple[int, int, int] = (88, 56, 48)  # resolution of the fine 3D volume for ray tracing
+    vol_blur_iters: int = 2  # passes of separable 3D Gaussian blur (thin, smooth sheets)
+    whitewater_count: int = 6000  # GPU micro-particles of spray, foam and bubbles
+    pressure_iters: int = 26  # 3D MAC Jacobi iterations for incompressibility (done in pairs)
+    flip_ratio: float = 0.93  # 0.93 = lively splashes (water), 0.25 = viscous (honey / lava)
+    density_push: float = 1.55  # 3D volume preservation strength
+    volume_iters: int = 4  # Jacobi iterations of volume preservation (done in pairs)
+    shift: float = 0.03  # redistribution of the particles in the core of the water (avoids hollow pockets)
     bounds: tuple[float, float, float] = (3.4, 4.2, 2.2)  # (half_x, height_y, half_z)
     floor_y: float = 0.0
     floor_colors: tuple[tuple[float, float, float], tuple[float, float, float]] = (
@@ -688,9 +688,9 @@ class FluidSPHConfig:
         (0.48, 0.54, 0.62),
     )
     gravity: tuple[float, float, float] = (0.0, -9.81, 0.0)
-    # Solveur "sph" (grille triée) ; l'espacement au repos vaut la moitié du rayon
-    smoothing_radius: float = 0.0  # 0 : choisi pour que l'eau remplisse 28 % du bassin
-    sound_speed: float = 0.0  # vitesse du son numérique ; 0 : trois fois la vitesse de chute dans le bassin
+    # "sph" solver (sorted grid); the rest spacing is half the radius
+    smoothing_radius: float = 0.0  # 0: chosen so that the water fills 28 % of the basin
+    sound_speed: float = 0.0  # numerical speed of sound; 0: three times the falling speed in the basin
     viscosity: float = 0.24
     cohesion: float = 0.07
     damping: float = 0.998
@@ -700,21 +700,21 @@ class FluidSPHConfig:
     velocity_stretch: float = 0.015
     spin_rate: float = 0.0
     substeps: int = 1
-    # Mode de rendu : "raymarch" (raytracing 3D 2-rebonds Snell+TIR), "surface" (SSFR), "particles" (low-poly)
+    # Rendering mode: "raymarch" (two-bounce Snell+TIR 3D ray tracing), "surface" (SSFR), "particles" (low-poly)
     render_mode: str = "raymarch"
-    iso_level: float = 0.34  # seuil d'isosurface dans le volume 3D continu
-    ior: float = 1.333  # indice de réfraction physique (1.333 eau, 1.49 miel, 1.52 verre)
-    caustics: float = 0.85  # intensité des caustiques animées projetées sur le fond
-    surface_scale: float = 2.15  # utilisé en mode "surface" (SSFR)
+    iso_level: float = 0.34  # isosurface threshold in the continuous 3D volume
+    ior: float = 1.333  # physical refractive index (1.333 water, 1.49 honey, 1.52 glass)
+    caustics: float = 0.85  # strength of the animated caustics cast on the bottom
+    surface_scale: float = 2.15  # used in "surface" mode (SSFR)
     smooth_iters: int = 10
     smooth_radius: float = 4.2
     smooth_depth_sigma: float = 0.48
-    absorption: tuple[float, float, float] = (0.42, 0.11, 0.04)  # absorption Beer-Lambert par mètre (R, G, B)
+    absorption: tuple[float, float, float] = (0.42, 0.11, 0.04)  # Beer-Lambert absorption per metre (R, G, B)
     refraction: float = 14.0
-    foam_rate: float = 30.0  # particules diffuses par seconde et par particule d'eau très agitée
-    foam: float = 0.78  # intensité visuelle des micro-particules whitewater (spray/écume/bulles)
-    fixed_dt: float = 1.0 / 60.0  # pas de temps fixe : même physique à 60 Hz, 120 Hz ou 300 FPS
-    mesh_style: str = "sphere"  # utilisé en mode "particles" : "sphere", "crystal", "cube"
+    foam_rate: float = 30.0  # diffuse particles per second and per highly agitated water particle
+    foam: float = 0.78  # visual strength of the whitewater micro-particles (spray / foam / bubbles)
+    fixed_dt: float = 1.0 / 60.0  # fixed time step: same physics at 60 Hz, 120 Hz or 300 FPS
+    mesh_style: str = "sphere"  # used in "particles" mode: "sphere", "crystal", "cube"
     albedo: tuple[float, float, float] = (0.02, 0.22, 0.44)
     metallic: float = 0.0
     roughness: float = 0.02
@@ -722,7 +722,7 @@ class FluidSPHConfig:
 
     @classmethod
     def water(cls, count: int = 20000) -> FluidSPHConfig:
-        """Eau volumétrique réaliste : 20 000 particules MAC FLIP 3D + Raytracing 2-rebonds Snell/TIR + 6 000 whitewater."""
+        """Realistic volumetric water: 20,000 3D MAC FLIP particles + two-bounce Snell / TIR ray tracing + 6,000 whitewater."""
         grid_res = (38, 26, 22) if count >= 14000 else ((30, 20, 18) if count >= 8000 else (18, 12, 12))
         vol_res = (88, 56, 48) if count >= 14000 else ((64, 42, 36) if count >= 8000 else (40, 26, 22))
         ww_n = 6000 if count >= 10000 else 1500
@@ -748,12 +748,12 @@ class FluidSPHConfig:
 
     @classmethod
     def water_sph(cls, count: int = 20000) -> FluidSPHConfig:
-        """Eau simulée en SPH sur grille triée (sans grille de pression), même rendu que `water`."""
+        """Water simulated with SPH on a sorted grid (no pressure grid), same rendering as `water`."""
         return replace(cls.water(count), solver="sph")
 
     @classmethod
     def low_poly(cls, count: int = 360, *, mesh_style: str = "cube") -> FluidSPHConfig:
-        """Fluide 3D low-poly / stylisé (cubes ou cristaux facettés qui tournent dans le courant)."""
+        """Low-poly / stylized 3D fluid (cubes or faceted crystals spinning in the current)."""
         return cls(
             count=count,
             solver="sph",
@@ -770,7 +770,7 @@ class FluidSPHConfig:
 
     @classmethod
     def honey(cls, count: int = 10000) -> FluidSPHConfig:
-        """Miel / sirop doré volumétrique épais et translucide (IOR 1.49)."""
+        """Thick, translucent volumetric golden honey / syrup (IOR 1.49)."""
         return cls(
             count=count,
             solver="mac_flip",
@@ -792,7 +792,7 @@ class FluidSPHConfig:
 
     @classmethod
     def lava(cls, count: int = 10000) -> FluidSPHConfig:
-        """Magma volumétrique incandescent (haute viscosité, croûte sombre + cœur brûlant)."""
+        """Glowing volumetric magma (high viscosity, dark crust + burning core)."""
         return cls(
             count=count,
             solver="mac_flip",
@@ -816,7 +816,7 @@ class FluidSPHConfig:
 
     @classmethod
     def mercury(cls, count: int = 12000) -> FluidSPHConfig:
-        """Mercure liquide volumétrique chromé (métal liquide miroir 100 % réfléchissant)."""
+        """Chromed volumetric liquid mercury (100 % reflective mirror liquid metal)."""
         return cls(
             count=count,
             solver="mac_flip",
@@ -875,7 +875,7 @@ class GpuFluidSPH3D:
         self._grid_tpl = upload_f32(np.zeros((self._ncells,), dtype=np.float32), device=device)
         self._p_grid = upload_f32(np.zeros((self._ncells,), dtype=np.float32), device=device)
         self._q_grid = upload_f32(np.zeros((self._ncells,), dtype=np.float32), device=device)
-        # Templates pour la grille MAC décalée (faces U, V, W) et le volume 3D de raymarching
+        # Templates for the staggered MAC grid (U, V, W faces) and the 3D ray-marching volume
         self._u_tpl = upload_f32(np.zeros(((gx_n + 1) * gy_n * gz_n,), dtype=np.float32), device=device)
         self._v_tpl = upload_f32(np.zeros((gx_n * (gy_n + 1) * gz_n,), dtype=np.float32), device=device)
         self._w_tpl = upload_f32(np.zeros((gx_n * gy_n * (gz_n + 1),), dtype=np.float32), device=device)
@@ -897,12 +897,12 @@ class GpuFluidSPH3D:
         self.reset(layout=layout)
 
     def _init_sph(self) -> None:
-        """Grandeurs fixes du solveur SPH : espacement, vitesse du son, grille et taille du tri."""
+        """Fixed quantities of the SPH solver: spacing, speed of sound, grid and sort size."""
         cfg = self.config
         n = int(cfg.count)
         bx, by, bz = cfg.bounds
         if n > 1 << 18:
-            raise ValueError(f'solver="sph" : 262 144 particules au plus, reçu {n}')
+            raise ValueError(f'solver="sph": 262,144 particles at most, got {n}')
         if cfg.smoothing_radius > 0.0:
             self._sph_h = float(cfg.smoothing_radius)
         else:
@@ -910,7 +910,7 @@ class GpuFluidSPH3D:
         self._sph_spacing = 0.5 * self._sph_h
         grav = math.sqrt(sum(g * g for g in cfg.gravity))
         self._sph_sound = float(cfg.sound_speed) or max(3.0 * math.sqrt(2.0 * grav * by * 0.72), 1.0)
-        # Cellules un peu plus larges que h : au plus 16 384, la clé de tri ne prévoit pas plus
+        # Cells slightly wider than h: at most 16,384, the sort key does not allow more
         cell = self._sph_h * 1.001
         while True:
             dims = tuple(max(1, math.ceil(d / cell)) for d in (2.0 * bx, by, 2.0 * bz))
@@ -923,12 +923,12 @@ class GpuFluidSPH3D:
         self._sph_cell_tpl = upload_f32(np.zeros((dims[0] * dims[1] * dims[2],), dtype=np.float32), device=self.device)
 
     def _sph_substeps(self, tick: float) -> int:
-        """Sous-pas d'un pas de simulation : condition CFL sur la vitesse du son."""
+        """Sub-steps of a simulation step: CFL condition on the speed of sound."""
         limit = 0.4 * self._sph_h / self._sph_sound
         return max(1, int(self.config.substeps), math.ceil(tick / limit))
 
     def _sph_lattice(self, layout: str) -> np.ndarray:
-        """Positions de départ sur un réseau régulier : un tirage au hasard superposerait des particules."""
+        """Starting positions on a regular lattice: random drawing would overlap particles."""
         cfg = self.config
         n = int(cfg.count)
         bx, by, bz = cfg.bounds
@@ -936,7 +936,7 @@ class GpuFluidSPH3D:
         rng = np.random.default_rng(1337)
         kz = max(1, int(2.0 * bz / d))
         if layout == "column":
-            # Deux fois plus haute que large, dans la limite du bassin
+            # Twice as high as wide, within the basin
             side = max(2, round((n / 2.0) ** (1.0 / 3.0)), math.ceil(math.sqrt(n / max(1, int(by * 0.9 / d)))))
             kx, kz = min(side, int(2.0 * bx / d)), min(side, kz)
         else:
@@ -954,7 +954,7 @@ class GpuFluidSPH3D:
         return p + rng.uniform(-0.02 * d, 0.02 * d, p.shape).astype(np.float32)
 
     def reset(self, *, layout: str = "dam_break") -> gs.Array:
-        """Réinitialise les particules (`"dam_break"`, `"column"`, `"rain"`, `"dual_wave"`)."""
+        """Resets the particles (`"dam_break"`, `"column"`, `"rain"`, `"dual_wave"`)."""
         cfg = self.config
         n = int(cfg.count)
         bx, by, bz = cfg.bounds
@@ -965,7 +965,7 @@ class GpuFluidSPH3D:
         rad = cfg.particle_scale
 
         if layout == "column":
-            # Colonne d'eau qui s'effondre au centre
+            # Water column collapsing in the centre
             side = max(2, int(round(n ** (1.0 / 3.0))))
             spacing = rad * 1.45
             idx = 0
@@ -992,7 +992,7 @@ class GpuFluidSPH3D:
             v4[:half_n, 0] = 2.8
             v4[half_n:, 0] = -2.8
         else:
-            # Dam-break classique : grand bloc d'eau dense sur le côté gauche qui déferle vers la droite
+            # Classic dam break: a large dense block of water on the left side rushing to the right
             vol_x = bx * 0.92
             vol_z = bz * 1.80
             vol_y = by * 0.72
@@ -1028,7 +1028,7 @@ class GpuFluidSPH3D:
         return self.trs_gpu
 
     def _sph_step(self, dt: float, accel: tuple[float, float, float]) -> None:
-        """Un sous-pas SPH : tri par cellule, densités, forces et intégration."""
+        """One SPH sub-step: sort by cell, densities, forces and integration."""
         cfg = self.config
         dev = self.device
         bx, by, bz = (float(b) for b in cfg.bounds)
@@ -1064,17 +1064,17 @@ class GpuFluidSPH3D:
             bz,
             fy,
             float(cfg.wall_restitution),
-            float(cfg.damping) ** (dt * 60.0),  # `damping` vaut pour 1/60 s
+            float(cfg.damping) ** (dt * 60.0),  # `damping` is per 1/60 s
             float(cfg.max_speed),
             device=dev,
         )
 
     def _rebuild_volume_in_batch(self) -> None:
-        """Construit et lisse le volume 3D continu (densité) directement en VRAM."""
+        """Builds and smooths the continuous 3D (density) volume directly in VRAM."""
         cfg = self.config
         dx_v, dy_v, dz_v = cfg.vol_res
         bx, by, bz = cfg.bounds
-        # Normalise la densité pour que le cœur liquide atteigne ~1.0 quel que soit `count`
+        # Normalizes the density so that the liquid core reaches ~1.0 whatever `count`
         expected_per_vox = max(0.05, float(cfg.count) / max(float(dx_v * dy_v * dz_v) * 0.25, 1.0))
         dens_scale = DENSITY_SCALE / expected_per_vox
         du = vol_splat_density(
@@ -1094,11 +1094,11 @@ class GpuFluidSPH3D:
             d_f = vol_blur_axis(d_f, int(dx_v), int(dy_v), int(dz_v), 0, device=self.device)
             d_f = vol_blur_axis(d_f, int(dx_v), int(dy_v), int(dz_v), 1, device=self.device)
             d_f = vol_blur_axis(d_f, int(dx_v), int(dy_v), int(dz_v), 2, device=self.device)
-        self._raw_dens_gpu = d_f  # sans la retouche des parois, pour `mac_shift`
+        self._raw_dens_gpu = d_f  # without the wall touch-up, for `mac_shift`
         self.vol_dens_gpu = vol_wet_walls(d_f, int(dx_v), int(dy_v), int(dz_v), device=self.device)
 
     def caustic_map(self, sun_dir) -> gs.Array:
-        """Éclairement du fond par le soleil réfracté (1 = eau plate) ; recalculé si l'eau ou le soleil a changé."""
+        """Irradiance of the bottom by the refracted sun (1 = flat water); recomputed if the water or the sun changed."""
         sun = (float(sun_dir[0]), float(sun_dir[1]), float(sun_dir[2]))
         dens = self.vol_dens_gpu
         if self._caustics is not None and self._caustics[0] is dens and self._caustics[1] == sun:
@@ -1123,14 +1123,14 @@ class GpuFluidSPH3D:
             float(cfg.ior),
             device=dev,
         )
-        # Photons par case pour une surface plate : la grille couvre 1,5 × 1,5 fois le bassin
-        expected = (6 / 1.5 / 3) ** 2  # grille ×6, carte ×3
+        # Photons per cell for a flat surface: the grid covers 1.5 × 1.5 times the basin
+        expected = (6 / 1.5 / 3) ** 2  # grid ×6, map ×3
         out = caustic_resolve(photons, float(expected), device=dev)
         self._caustics = (dens, sun, out)
         return out
 
     def extract_surface_mesh(self, *, iso_level: float | None = None) -> Mesh:
-        """Extrait un maillage 3D facetté (style Blender / Low-Poly) depuis le volume de densité 3D."""
+        """Extracts a faceted 3D mesh (Blender / low-poly style) from the 3D density volume."""
         if self.vol_dens_gpu is None:
             with gs.batch(self.device):
                 self._rebuild_volume_in_batch()
@@ -1139,7 +1139,7 @@ class GpuFluidSPH3D:
         bx, by, bz = self.config.bounds
         iso = float(self.config.iso_level if iso_level is None else iso_level)
         vol = self.vol_dens_gpu.numpy().reshape(dz_v, dy_v, dx_v)
-        # Extraction rapide des faces frontières (Surface Nets / Voxel-Mesh propre, 0 dépendance)
+        # Fast extraction of the boundary faces (Surface Nets / clean voxel mesh, no dependency)
         occ = vol >= iso
         sx = (2.0 * bx) / max(dx_v - 1, 1)
         sy = by / max(dy_v - 1, 1)
@@ -1182,12 +1182,12 @@ class GpuFluidSPH3D:
         return Mesh(positions=pos_arr, normals=nrm_arr, uvs=uv_arr, indices=idx_arr)
 
     def push_wave(self, force_x: float = 28.0, force_z: float = 0.0) -> None:
-        """Envoie une impulsion de vague latérale au prochain `step()`."""
+        """Sends a lateral wave impulse at the next `step()`."""
         self._pulse[0] += float(force_x)
         self._pulse[1] += float(force_z)
 
     def step(self, dt: float) -> gs.Array:
-        """Exécute la simulation 3D à pas fixe 100 % GPU (`flip` O(N) ou `sph`) et renvoie `trs_gpu` `(N, 8)`."""
+        """Runs the fixed-step 3D simulation, 100 % GPU (`flip` O(N) or `sph`), and returns `trs_gpu` `(N, 8)`."""
         cfg = self.config
         fixed_dt = max(float(cfg.fixed_dt), 1.0 / 240.0)
         self._accum = min(self._accum + max(float(dt), 0.0), fixed_dt * 2.0)
@@ -1302,7 +1302,7 @@ class GpuFluidSPH3D:
                         float(cfg.max_speed),
                         device=self.device,
                     )
-                    # Volume : corrigé par les positions, sans toucher aux vitesses
+                    # Volume: corrected through the positions, without touching the velocities
                     src = mac_volume_source(fill, int(gx_n), int(gy_n), int(gz_n), float(cfg.density_push), device=self.device)
                     q = self._q_grid
                     for _ in range(max(1, (int(cfg.volume_iters) + 1) // 2)):
@@ -1323,7 +1323,7 @@ class GpuFluidSPH3D:
                     )
             elif cfg.solver == "flip":
                 gx_n, gy_n, gz_n = cfg.grid_res
-                # Masse au repos calibrée sur le volume occupé (~1/3 de la grille)
+                # Rest mass calibrated on the occupied volume (~1/3 of the grid)
                 rest_mass = max(1.5, float(cfg.count) / max(float(gx_n * gy_n * gz_n) * 0.28, 1.0))
                 for s in range(steps):
                     gm_u, gvx_u, gvy_u, gvz_u = flip_p2g(
@@ -1405,7 +1405,7 @@ class GpuFluidSPH3D:
             else:
                 n_sub = n_ticks * self._sph_substeps(fixed_dt)
                 for s in range(n_sub):
-                    # L'impulsion des vagues vaut une accélération pendant un pas entier
+                    # The wave impulse equals an acceleration over a whole step
                     pulse = s < n_sub // n_ticks
                     self._sph_step(
                         fixed_dt * n_ticks / n_sub,
@@ -1478,39 +1478,39 @@ class GpuFluidSPH3D:
         return self.trs_gpu
 
 
-# Alias ergonomiques pour l'API fluide 3D nouvelle génération
+# Convenient aliases for the next-generation 3D fluid API
 Fluid3DConfig = FluidSPHConfig
 GpuFluid3D = GpuFluidSPH3D
 
 
-# ───────────────────────── 3. Fluide 2D Eulérien Navier-Stokes (`GpuFluid2D`) ─────────────────────────
+# ───────────────────────── 3. 2D Eulerian Navier-Stokes fluid (`GpuFluid2D`) ─────────────────────────
 
 
 @dataclass
 class Fluid2DConfig:
-    """Configuration complète du fluide 2D Navier-Stokes (du soyeux réaliste au pixel-art / cel-shaded)."""
+    """Complete configuration of the 2D Navier-Stokes fluid (from silky realistic to pixel-art / cel-shaded)."""
 
     width: int = 192
     height: int = 128
-    velocity_dissipation: float = 0.992  # vitesse conservée par 1/60 s
-    dye_dissipation: float = 0.991  # encre conservée par 1/60 s
+    velocity_dissipation: float = 0.992  # velocity kept per 1/60 s
+    dye_dissipation: float = 0.991  # ink kept per 1/60 s
     pressure_iters: int = 16
-    curl_strength: float = 3.2  # confinement de vorticité (0 = laminaire, 3-6 = tourbillons riches)
-    buoyancy: float = 0.0  # > 0 pour fumée / feu qui monte
+    curl_strength: float = 3.2  # vorticity confinement (0 = laminar, 3-6 = rich swirls)
+    buoyancy: float = 0.0  # > 0 for rising smoke / fire
     bg_color: tuple[float, float, float] = (0.02, 0.025, 0.05)
     exposure: float = 1.25
-    posterize_levels: int = 0  # 0 = dégradé lisse réaliste ; 4..6 = bandes cel-shaded / low-poly
-    bilinear: bool = True  # False = rendu pixel-art net
-    fixed_dt: float = 1.0 / 60.0  # pas de temps fixe : même résultat à 30, 60 ou 240 FPS
+    posterize_levels: int = 0  # 0 = smooth realistic gradient; 4..6 = cel-shaded / low-poly bands
+    bilinear: bool = True  # False = sharp pixel-art rendering
+    fixed_dt: float = 1.0 / 60.0  # fixed time step: same result at 30, 60 or 240 FPS
 
     @classmethod
     def ink(cls, width: int = 192, height: int = 128) -> Fluid2DConfig:
-        """Encre / plasma fluide réaliste aux tourbillons fins et soyeux."""
+        """Realistic fluid ink / plasma with fine, silky swirls."""
         return cls(width=width, height=height, curl_strength=3.6, dye_dissipation=0.993, bilinear=True)
 
     @classmethod
     def smoke_fire(cls, width: int = 160, height: int = 128) -> Fluid2DConfig:
-        """Fumée / flammes montantes avec flottabilité thermique."""
+        """Rising smoke / flames with thermal buoyancy."""
         return cls(
             width=width,
             height=height,
@@ -1524,7 +1524,7 @@ class Fluid2DConfig:
 
     @classmethod
     def low_poly_pixel(cls, width: int = 64, height: int = 44) -> Fluid2DConfig:
-        """Fluide stylisé low-poly / pixel-art cel-shaded (basse résolution + quantification de teintes)."""
+        """Stylized low-poly / pixel-art cel-shaded fluid (low resolution + hue quantization)."""
         return cls(
             width=width,
             height=height,
@@ -1539,7 +1539,7 @@ class Fluid2DConfig:
 
 
 class GpuFluid2D:
-    """Solveur Navier-Stokes 2D (Stable Fluids) 100 % GPU avec `Texture` 0-copie (2D pur ou écran 3D)."""
+    """2D Navier-Stokes solver (Stable Fluids), 100 % GPU, with a zero-copy `Texture` (pure 2D or a 3D screen)."""
 
     def __init__(self, config: Fluid2DConfig | None = None, *, device: str | None = None) -> None:
         self.config = config or Fluid2DConfig.ink()
@@ -1596,7 +1596,7 @@ class GpuFluid2D:
         radius: float = 0.05,
         force: float = 120.0,
     ) -> None:
-        """Injecte un jet d'encre + vitesse aux coordonnées normalisées `(u, v) ∈ [0, 1]²`."""
+        """Injects a jet of ink + velocity at normalized coordinates `(u, v) ∈ [0, 1]²`."""
         w = float(self.config.width)
         h = float(self.config.height)
         cx = float(np.clip(u, 0.02, 0.98)) * (w - 1.0)
@@ -1621,10 +1621,10 @@ class GpuFluid2D:
             )
 
     def step(self, dt: float) -> gs.Array:
-        """Avance Navier-Stokes 2D sur GPU (advection → vorticité → Jacobi → teinture) et met à jour `self.texture`."""
+        """Advances 2D Navier-Stokes on the GPU (advection → vorticity → Jacobi → dye) and updates `self.texture`."""
         cfg = self.config
         dt_phys = max(float(cfg.fixed_dt), 1.0 / 240.0)
-        dt_s = dt_phys * 60.0  # vitesses en cellules par 1/60 s
+        dt_s = dt_phys * 60.0  # velocities in cells per 1/60 s
         self._accum = min(self._accum + max(float(dt), 0.0), dt_phys * 3.0)
         n_ticks = int(self._accum / dt_phys + 1e-6)
         self._accum -= n_ticks * dt_phys
@@ -1638,7 +1638,7 @@ class GpuFluid2D:
         return self.frame_gpu
 
     def _tick(self, dt_phys: float, dt_s: float) -> None:
-        """Un pas fixe : advection, tourbillons, pression, teinture."""
+        """One fixed step: advection, swirls, pressure, dye."""
         cfg = self.config
         self.vx, self.vy = fluid2d_advect_vel(
             self.vx,

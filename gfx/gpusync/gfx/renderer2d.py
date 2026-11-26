@@ -1,4 +1,4 @@
-"""Moteur de rendu 2D pur 100 % GPUsync (`Renderer2D`) : zéro surcoût 3D, sprites, formes, particules GPU."""
+"""Pure 2D renderer, 100 % GPUsync (`Renderer2D`): no 3D overhead, sprites, shapes, GPU particles."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _pack_rgba_u32(color: tuple[int, int, int, int]) -> int:
 
 
 class Renderer2D:
-    """Rend une liste d'`Object2D` et `Particles2D` via une `Camera2D` (seul ou sur un framebuffer 3D)."""
+    """Renders a list of `Object2D` and `Particles2D` through a `Camera2D` (alone or over a 3D framebuffer)."""
 
     def __init__(self) -> None:
         self._tex_pool = TexturePool()
@@ -53,10 +53,10 @@ class Renderer2D:
         device: str | None = None,
         out: np.ndarray | None = None,
     ) -> gs.Array:
-        """Exécute la couche 2D sur GPU.
+        """Runs the 2D layer on the GPU.
 
-        Si `base is None`, part de `clear_color` (scène 2D pure ou `RenderTarget`).
-        Sinon, compose directement par-dessus `base`.
+        If `base is None`, starts from `clear_color` (pure 2D scene or `RenderTarget`).
+        Otherwise, composites directly over `base`.
         """
         cam = camera or Camera2D()
         do_clear = 1 if base is None else 0

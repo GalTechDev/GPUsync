@@ -1,5 +1,5 @@
-//! Fenêtre native GPU (`gs.Window`) : affiche un `DeviceArray` directement depuis le GPU
-//! (zéro copie CPU quand il réside sur le même périphérique wgpu) ou depuis des octets hôte.
+//! Native GPU window (`gs.Window`): shows a `DeviceArray` straight from the GPU
+//! (no CPU copy when it lives on the same wgpu device) or from host bytes.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use gpusync_backend_wgpu::{WgDevice, WgWindow};
 
 use crate::{CoreError, Device, DeviceArray, R, Storage, dev_err};
 
-/// Fenêtre native (thread principal uniquement).
+/// Native window (main thread only).
 pub struct Window {
     inner: WgWindow,
     scratch: Vec<u8>,
@@ -30,8 +30,8 @@ impl Window {
                 Device::Wg(d) => Some(d),
                 _ => {
                     return Err(CoreError::Unsupported(format!(
-                        "gs.Window s'affiche via wgpu (metal / vulkan / dx12), pas « {id} » — \
-                         laissez device=None : les résultats de {id} restent affichables automatiquement"
+                        "gs.Window displays through wgpu (metal / vulkan / dx12), not \"{id}\" — \
+                         leave device=None: results from {id} can still be displayed automatically"
                     )));
                 }
             },
@@ -93,13 +93,13 @@ impl Window {
         self.inner.poll()
     }
 
-    /// Affiche un `DeviceArray` (RGBA8 empaqueté en `u32`, `width × height`).
-    /// Renvoie `true` si le buffer GPU a été affiché directement sans passage par la RAM CPU.
+    /// Shows a `DeviceArray` (RGBA8 packed in `u32`, `width × height`).
+    /// Returns `true` if the GPU buffer was shown directly, without going through CPU RAM.
     pub fn present_array(&mut self, arr: &DeviceArray, width: u32, height: u32) -> R<bool> {
         let need = (width as usize) * (height as usize) * 4;
         if arr.bytes() < need {
             return Err(CoreError::Shape(format!(
-                "gs.Window.present : tableau de {} octets pour {width}×{height} u32 ({need} attendus)",
+                "gs.Window.present: array of {} bytes for {width}×{height} u32 ({need} expected)",
                 arr.bytes()
             )));
         }
@@ -116,7 +116,7 @@ impl Window {
                 return Ok(true);
             }
         }
-        // Autre backend (OpenCL, CUDA, CPU) : lecture hôte dans un tampon réutilisé puis envoi GPU.
+        // Other backend (OpenCL, CUDA, CPU): host read into a reused buffer, then GPU upload.
         if self.scratch.len() < arr.bytes() {
             self.scratch.resize(arr.bytes(), 0);
         }
@@ -128,7 +128,7 @@ impl Window {
         Ok(false)
     }
 
-    /// Affiche des octets RGBA8 depuis la mémoire hôte (tableau NumPy…).
+    /// Shows RGBA8 bytes from host memory (NumPy array…).
     pub fn present_bytes(&mut self, rgba: &[u8], width: u32, height: u32) -> R<()> {
         self.inner
             .present_bytes(rgba, width, height)

@@ -1,4 +1,4 @@
-"""Sonde : mémoire unifiée (mode Direct), sortie neuve à chaque appel contre sortie réutilisée (out=)."""
+"""Probe: unified memory (Direct mode), fresh output at each call against a reused output (out=)."""
 import sys, time
 import numpy as np
 import gpusync as gs
@@ -29,5 +29,5 @@ for dev in sys.argv[1].split(","):
     for _ in range(K):
         a = np.empty(N, np.uint32); a[::1024] = 1
     page_faults = (time.perf_counter() - t) / K
-    print(f"{dev:9} mode {z.mode} : sortie neuve {fresh*1e3:.3f} ms, out= réutilisé {reused*1e3:.3f} ms ; "
-          f"np.empty + toucher les pages {page_faults*1e3:.3f} ms", flush=True)
+    print(f"{dev:9} mode {z.mode}: fresh output {fresh*1e3:.3f} ms, reused out= {reused*1e3:.3f} ms; "
+          f"np.empty + touching the pages {page_faults*1e3:.3f} ms", flush=True)

@@ -1,244 +1,242 @@
-# gs-remote — exécution distante sur les machines de test
+# gs-remote — remote execution on the test machines
 
-Outil interne pour développer GPUsync en vérifiant chaque étape sur du vrai matériel.
+Internal tool used to develop GPUsync while checking every step on real hardware.
 
 ```
                  ┌───────────── Mac (dev) ─────────────┐
                  │  CLI ──(localhost)──► HUB :8765      │
                  └──────────────────────▲──────▲───────┘
-                     connexion sortante │      │ connexion sortante
+                   outgoing connection │      │ outgoing connection
                 ┌───────────────────────┴┐   ┌─┴──────────────────────┐
-                │ agent « mac »          │   │ agent « win »           │
-                │ Apple M5 Pro           │   │ NVIDIA + GPU intégré    │
-                │ (même Mac, localhost)  │   │ (PC Windows)            │
+                │ agent "mac"            │   │ agent "win"             │
+                │ Apple M5 Pro           │   │ NVIDIA + integrated GPU │
+                │ (same Mac, localhost)  │   │ (Windows PC)            │
                 └────────────────────────┘   └─────────────────────────┘
 ```
 
-- Le **hub** tourne sur le Mac. C'est le seul programme qui écoute un port.
-- Les **agents** tournent sur les machines de test. **Ils n'écoutent aucun port** : ils se connectent au hub,
-  attendent leurs tâches, et se reconnectent tout seuls si le hub redémarre ou si le réseau coupe.
-- La **CLI** (sur le Mac) envoie les tâches au hub, affiche la sortie en direct et renvoie le code de retour.
+- The **hub** runs on the Mac. It is the only program that listens on a port.
+- The **agents** run on the test machines. **They listen on no port**: they connect to the hub, wait for their
+  tasks, and reconnect by themselves if the hub restarts or the network drops.
+- The **CLI** (on the Mac) sends tasks to the hub, shows their output live and returns the exit code.
 
-Tout est dans un seul fichier, `gs_remote.py`, qui n'utilise que la bibliothèque standard de Python (≥ 3.9).
+Everything is in a single file, `gs_remote.py`, which only uses the Python standard library (≥ 3.9).
 
 ---
 
-## 1. Mise en place
+## 1. Setup
 
-### Sur le Mac : le hub
+### On the Mac: the hub
 
 ```bash
 caffeinate -i python3 tools/remote/gs_remote.py hub
 ```
 
-À laisser tourner dans un terminal. `caffeinate -i` empêche la mise en veille. Au premier lancement,
-macOS demande d'autoriser les connexions entrantes pour Python : accepte (c'est ce qui permet au PC de joindre le hub).
+Leave it running in a terminal. `caffeinate -i` prevents sleep. On the first launch, macOS asks to allow incoming
+connections for Python: accept (this is what lets the PC reach the hub).
 
-### Sur le Mac : enregistrer les agents
+### On the Mac: register the agents
 
-Dans un autre terminal, une fois par machine de test :
+In another terminal, once per test machine:
 
 ```bash
 python3 tools/remote/gs_remote.py agents add mac
 python3 tools/remote/gs_remote.py agents add win
 ```
 
-Chaque commande crée un jeton secret propre à l'agent et affiche la commande exacte à lancer sur la machine de test.
+Each command creates a secret token for the agent and prints the exact command to run on the test machine.
 
-### Sur le Mac : l'agent local
+### On the Mac: the local agent
 
-Avec la commande affichée par `agents add mac`, en remplaçant l'IP par `127.0.0.1` :
+With the command printed by `agents add mac`, replacing the IP with `127.0.0.1`:
 
 ```bash
-python3 tools/remote/gs_remote.py agent --hub http://127.0.0.1:8765 --name mac --token <jeton>
+python3 tools/remote/gs_remote.py agent --hub http://127.0.0.1:8765 --name mac --token <token>
 ```
 
-### Sur le PC Windows : l'agent
+### On the Windows PC: the agent
 
-1. Installe Python depuis python.org, avec la case « Add python.exe to PATH » cochée
-   (pas l'alias du Microsoft Store).
-2. Copie `gs_remote.py` sur le PC (clé USB, partage réseau…).
-3. Lance la commande affichée par `agents add win` :
+1. Install Python from python.org, with the "Add python.exe to PATH" box ticked (not the Microsoft Store alias).
+2. Copy `gs_remote.py` to the PC (USB key, network share…).
+3. Run the command printed by `agents add win`:
 
    ```powershell
-   py gs_remote.py agent --hub http://192.168.1.113:8765 --name win --token <jeton>
+   py gs_remote.py agent --hub http://192.168.1.113:8765 --name win --token <token>
    ```
 
-**Aucune règle de pare-feu à créer sur le PC** : l'agent ne fait que des connexions sortantes.
+**No firewall rule to create on the PC**: the agent only makes outgoing connections.
 
-#### Via Tailscale
+#### Through Tailscale
 
-Si les machines sont reliées par Tailscale, utilise l'adresse Tailscale du Mac (`100.x.y.z`) dans `--hub`, et autorise
-l'adresse Tailscale du PC sur le hub (par défaut, seules les IP privées du réseau local sont acceptées) :
+If the machines are linked by Tailscale, use the Mac's Tailscale address (`100.x.y.z`) in `--hub`, and allow the PC's
+Tailscale address on the hub (by default, only private local-network IPs are accepted):
 
 ```bash
 caffeinate -i python3 tools/remote/gs_remote.py hub --allow 100.90.141.102/32
 ```
 
-Avantage : Tailscale chiffre tout le trafic entre les machines (WireGuard), ce qui lève la limite « trafic non chiffré »
-de la section Sécurité. Si le hub refuse une connexion, son journal affiche la commande `--allow` à utiliser.
+Benefit: Tailscale encrypts all traffic between the machines (WireGuard), which lifts the "unencrypted traffic"
+limit of the Security section. If the hub rejects a connection, its log prints the `--allow` command to use.
 
-Les fois suivantes, `py gs_remote.py agent` suffit : l'URL du hub, le nom et le jeton sont mémorisés
-dans `%USERPROFILE%\.gpusync-remote\agent.json`.
+Afterwards, `py gs_remote.py agent` is enough: the hub URL, the name and the token are remembered in
+`%USERPROFILE%\.gpusync-remote\agent.json`.
 
-Pour la suite du projet, le PC aura aussi besoin de : `rustup` et Visual Studio Build Tools (charge de travail C++),
-le driver NVIDIA (qui fournit CUDA et OpenCL), le driver Intel du GPU intégré (qui fournit OpenCL),
-et plus tard le CUDA Toolkit. `gs_remote.py info` montre ce qui est déjà installé.
+To build GPUsync, the PC also needs `rustup` and Visual Studio Build Tools (C++ workload), the NVIDIA driver (which
+provides CUDA and OpenCL) and the Intel driver of the integrated GPU (which provides OpenCL). `gs_remote.py info`
+shows what is already installed.
 
 ---
 
-## 2. Utilisation (sur le Mac)
+## 2. Usage (on the Mac)
 
 ```bash
 R="python3 tools/remote/gs_remote.py"
 
-$R info                                       # agents en ligne, OS, Python, Rust, GPU
+$R info                                       # online agents, OS, Python, Rust, GPUs
 $R run all -- @python -c "import platform; print(platform.platform())"
 $R run win --timeout 1800 -- cargo test       # 30 min max
 $R run all --cwd GPUsync-python -- @python -m pytest tests -q
 $R run win --env RUST_LOG=debug -- cargo run --example bench
 $R run win --shell -- "nvidia-smi && where python"
-$R get win bench/results.json                 # récupérer un fichier produit à distance
-$R sync all                                   # synchroniser sans exécuter
-$R reset win                                  # effacer le workspace distant
-$R update all                                 # installer cette version de l'outil sur les agents
-$R jobs                                       # tâches en attente ou en cours
-$R kill win                                   # arrêter les tâches de win (ou un id de tâche, ou all)
-$R agents list                                # agents enregistrés
-$R agents rm win                              # révoquer un agent (son jeton n'est plus accepté)
+$R get win bench/results.json                 # fetch a file produced remotely
+$R sync all                                   # synchronize without running anything
+$R reset win                                  # remove the remote workspace
+$R update all                                 # install this version of the tool on the agents
+$R jobs                                       # queued or running tasks
+$R kill win                                   # stop win's tasks (or a task id, or all)
+$R agents list                                # registered agents
+$R agents rm win                              # revoke an agent (its token is no longer accepted)
 ```
 
-- **Cible** : un nom, une liste (`mac,win`) ou `all`. Avec plusieurs cibles, les commandes tournent
-  en parallèle, chaque ligne est préfixée par `[nom]`, et un récapitulatif affiche statut, code et durée.
-  Avec `all`, les agents hors ligne sont signalés et ignorés.
-- **`--`** sépare les options de la commande distante, qui est passée telle quelle.
-- **`@python`** est remplacé par l'interpréteur Python de l'agent (évite les différences `python` / `py` / `python3`).
-- **Code de retour** : celui de la commande distante (1 si une machine a échoué en multi-cibles).
-  `Ctrl+C` arrête les tâches distantes.
-- Les sorties de Python distant sont forcées en UTF-8 et non bufferisées.
-- Sous Windows, le `PATH` est relu dans le registre avant chaque tâche, comme le ferait un nouveau terminal :
-  un outil installé après le lancement de l'agent (Rust, CUDA…) est utilisable sans le relancer.
+- **Target**: a name, a list (`mac,win`) or `all`. With several targets, the commands run in parallel, each line is
+  prefixed with `[name]`, and a summary shows status, code and duration. With `all`, offline agents are reported
+  and skipped.
+- **`--`** separates the options from the remote command, which is passed as is.
+- **`@python`** is replaced with the agent's Python interpreter (avoids the `python` / `py` / `python3` differences).
+- **Exit code**: the one of the remote command (1 if a machine failed with several targets). `Ctrl+C` stops the
+  remote tasks.
+- Remote Python output is forced to UTF-8 and unbuffered.
+- On Windows, `PATH` is read again from the registry before each task, as a new terminal would: a tool installed
+  after the agent started (Rust, CUDA…) can be used without restarting it.
 
-### Chronométrage
+### Timing
 
-La durée de chaque commande est **mesurée sur la machine de test** (de son lancement à sa fin), puis renvoyée :
+The duration of each command is **measured on the test machine** (from its start to its end), then sent back:
 
 ```
-[win] exécution 1.521 s sur place · total 2.23 s
+[win] run 1.521 s on site · total 2.23 s
 ```
 
-- **exécution … sur place** : le temps réel de la commande, sans le réseau. C'est ce chiffre qui compte.
-- **total** : vu du hub, réseau compris. Le PC Windows étant à l'autre bout du monde (~340 ms par aller-retour),
-  l'écart peut atteindre une seconde.
+- **run … on site**: the real time of the command, without the network. This is the number that matters.
+- **total**: seen from the hub, network included. With the Windows PC on the other side of the world (~340 ms per
+  round trip), the difference can reach a second.
 
-Pour un benchmark, chronomètre aussi *dans* le script (`time.perf_counter()`, `std::time::Instant`) : ces mesures
-s'exécutent sur la machine de test et excluent le démarrage de Python et la compilation.
+For a benchmark, also time *inside* the script (`time.perf_counter()`, `std::time::Instant`): these measurements run
+on the test machine and exclude Python start-up and compilation.
 
-### Mettre à jour les agents
+### Updating the agents
 
-Après une modification de `gs_remote.py` sur le Mac :
+After changing `gs_remote.py` on the Mac:
 
-1. si la partie hub a changé, redémarre le hub (`Ctrl+C`, puis la même commande) ;
-2. `gs_remote.py update all` : chaque agent reçoit la nouvelle version (tâche signée comme les autres), vérifie son
-   hash et sa syntaxe, remplace son propre fichier et redémarre tout seul.
+1. if the hub part changed, restart the hub (`Ctrl+C`, then the same command);
+2. `gs_remote.py update all`: each agent receives the new version (a task signed like the others), checks its hash and
+   its syntax, replaces its own file and restarts by itself.
 
-`gs_remote.py info` signale les agents dont la version diffère de celle du hub. Cela repose sur un petit superviseur :
-`gs_remote.py agent` lance l'agent dans un sous-processus et le relance après une mise à jour ou un plantage.
+`gs_remote.py info` reports agents whose version differs from the hub's. This relies on a small supervisor:
+`gs_remote.py agent` runs the agent in a subprocess and restarts it after an update or a crash.
 
-### Arrêter un script bloqué
+### Stopping a stuck script
 
-| Situation | Ce qui se passe |
+| Situation | What happens |
 |---|---|
-| `Ctrl+C` ou `SIGTERM` sur la CLI | les tâches suivies sont arrêtées immédiatement |
-| `gs_remote.py kill <agent \| id \| all>` | arrêt forcé, depuis n'importe quel terminal du Mac |
-| la CLI est tuée brutalement ou le terminal fermé | le hub arrête toute tâche que plus aucune CLI ne suit depuis 60 s (`hub --orphan-timeout`) |
-| la commande dépasse `--timeout` (600 s par défaut) | arrêt forcé par l'agent |
+| `Ctrl+C` or `SIGTERM` on the CLI | the followed tasks are stopped immediately |
+| `gs_remote.py kill <agent \| id \| all>` | forced stop, from any terminal on the Mac |
+| the CLI is killed or its terminal closed | the hub stops any task no CLI has followed for 60 s (`hub --orphan-timeout`) |
+| the command exceeds `--timeout` (600 s by default) | forced stop by the agent |
 
-Un script bloqué qui n'affiche plus rien est quand même arrêté en 5 s au plus : pendant une tâche, l'agent contacte
-le hub toutes les 5 s et reçoit l'ordre d'arrêt à ce moment-là.
+A stuck script that prints nothing is still stopped within 5 s: during a task, the agent contacts the hub every 5 s
+and receives the stop order then.
 
-L'arrêt est forcé et touche **tous les sous-processus** : `SIGKILL` sur le groupe de processus (macOS, Linux),
-`taskkill /T /F` (Windows). Aucun script ne peut l'ignorer.
+The stop is forced and reaches **every subprocess**: `SIGKILL` on the process group (macOS, Linux),
+`taskkill /T /F` (Windows). No script can ignore it.
 
-Seule exception : un processus bloqué dans un appel au driver (GPU planté) peut ne pas mourir, même avec `SIGKILL`.
-Si le processus est encore vivant 15 s après l'arrêt forcé, l'agent l'abandonne avec le statut `unkillable`,
-affiche son PID et reste disponible pour les tâches suivantes. Le processus abandonné peut alors nécessiter
-un redémarrage de la machine.
+The only exception: a process stuck in a driver call (crashed GPU) may not die, even with `SIGKILL`. If the process
+is still alive 15 s after the forced stop, the agent gives up on it with the status `unkillable`, prints its PID and
+stays available for the next tasks. The abandoned process may then require restarting the machine.
 
-### Synchronisation
+### Synchronization
 
-Avant chaque `run` (sauf `--no-sync`), le dépôt est synchronisé vers un **workspace** du même nom sur l'agent :
+Before each `run` (unless `--no-sync`), the repository is synchronized to a **workspace** of the same name on the
+agent:
 
-- source : racine git du dossier courant (ou `--src`) ; workspace : nom du dossier (ou `--ws`) ;
-- seuls les fichiers modifiés sont transférés (comparaison SHA-256) ; les fichiers supprimés localement
-  le sont aussi à distance ;
-- **les fichiers créés à distance sont conservés** (`target/`, `.venv/`, résultats) : les compilations Rust
-  restent incrémentales d'un run à l'autre ;
-- exclusions par défaut : `.git`, `target`, `__pycache__`, `.venv`, `venv`, `node_modules`, `dist`, `build`… ;
-  ajoute les tiennes avec `--exclude MOTIF` ou dans un fichier `.gsremoteignore` à la racine (un motif par ligne).
+- source: git root of the current folder (or `--src`); workspace: name of the folder (or `--ws`);
+- only changed files are transferred (SHA-256 comparison); files deleted locally are deleted remotely too;
+- **files created remotely are kept** (`target/`, `.venv/`, results): Rust builds stay incremental from one run to the
+  next;
+- default exclusions: `.git`, `target`, `__pycache__`, `.venv`, `venv`, `node_modules`, `dist`, `build`…; add your
+  own with `--exclude PATTERN` or in a `.gsremoteignore` file at the root (one pattern per line).
 
 ---
 
-## 3. Sécurité
+## 3. Security
 
-| Risque | Protection |
+| Risk | Protection |
 |---|---|
-| Quelqu'un contacte une machine de test pour lui faire exécuter du code | **impossible** : les agents n'écoutent aucun port |
-| Un faux hub (IP usurpée sur le réseau) envoie une tâche à un agent | chaque réponse du hub est signée HMAC-SHA256 avec le jeton de l'agent : sans le jeton, l'agent refuse tout |
-| Une ancienne tâche, capturée, est renvoyée à un agent | chaque réponse est liée au nonce unique de la requête de l'agent : une réponse rejouée est refusée |
-| Quelqu'un envoie des tâches au hub | l'API de contrôle n'accepte que des requêtes **locales au Mac**, signées avec un jeton stocké dans `~/.gpusync-remote/hub.json` (droits 600) |
-| Un agent se fait passer pour un autre | un jeton par agent ; un agent n'accède qu'à ses propres tâches |
-| Un agent lit des fichiers du Mac | il ne peut demander que les fichiers listés dans sa tâche (le dépôt synchronisé) |
-| Une requête capturée est rejouée au hub | horodatage (± 5 min) + nonce à usage unique |
-| Une requête est modifiée en route | la signature couvre l'identité, la méthode, le chemin, l'horodatage et le hash du corps |
-| Accès au hub depuis Internet | seules les IP privées et locales sont acceptées (`--allow 192.168.1.0/24` pour restreindre encore) |
-| Un fichier reçu écrase quelque chose hors du workspace | chemins absolus, `..`, lettres de lecteur et liens symboliques sortants refusés |
-| Une commande ne s'arrête jamais | timeout (600 s par défaut), puis arrêt du processus **et de ses sous-processus** |
+| Someone contacts a test machine to make it run code | **impossible**: the agents listen on no port |
+| A fake hub (spoofed IP on the network) sends a task to an agent | every hub response is signed with HMAC-SHA256 and the agent's token: without the token, the agent refuses everything |
+| An old, captured task is sent again to an agent | every response is bound to the unique nonce of the agent's request: a replayed response is refused |
+| Someone sends tasks to the hub | the control API only accepts requests **local to the Mac**, signed with a token stored in `~/.gpusync-remote/hub.json` (mode 600) |
+| An agent pretends to be another one | one token per agent; an agent only reaches its own tasks |
+| An agent reads files on the Mac | it can only request the files listed in its task (the synchronized repository) |
+| A captured request is replayed to the hub | timestamp (± 5 min) + single-use nonce |
+| A request is modified on the way | the signature covers the identity, the method, the path, the timestamp and the body hash |
+| Access to the hub from the Internet | only private and local IPs are accepted (`--allow 192.168.1.0/24` to restrict further) |
+| A received file overwrites something outside the workspace | absolute paths, `..`, drive letters and outgoing symbolic links are refused |
+| A command never ends | timeout (600 s by default), then the process **and its subprocesses** are stopped |
 
-Testé : faux hub sans signature, signé avec un autre jeton, et signé avec le bon jeton mais rejoué → l'agent refuse
-dans les trois cas et n'exécute rien.
+Tested: fake hub without a signature, signed with another token, and signed with the right token but replayed → the
+agent refuses in all three cases and runs nothing.
 
-Limites à connaître :
+Limits to know:
 
-- le trafic **n'est pas chiffré** : le code envoyé et les sorties sont lisibles sur le réseau local.
-  À utiliser sur un réseau de confiance (chez toi), pas sur un Wi-Fi public ;
-- **un jeton d'agent permet de faire exécuter du code à cet agent** par quiconque le détient et peut joindre l'agent
-  en se faisant passer pour le hub. Garde-le secret ; en cas de doute, `agents rm` puis `agents add` ;
-- les horloges des machines doivent être à l'heure (± 5 min) ;
-- les commandes s'exécutent avec les droits de l'utilisateur qui a lancé l'agent : ne le lance pas en administrateur.
-  Arrête-le (`Ctrl+C`) quand tu ne t'en sers pas.
-
----
-
-## 4. Fichiers
-
-| Machine | Fichier | Contenu |
-|---|---|---|
-| Mac | `~/.gpusync-remote/hub.json` | jeton de contrôle, jetons des agents, port |
-| Mac | `~/.gpusync-remote/hub/jobs/` | sorties des tâches |
-| machine de test | `~/.gpusync-remote/agent.json` | URL du hub, nom, jeton |
-| machine de test | `~/.gpusync-remote/agent/workspaces/` | dépôts synchronisés et fichiers produits |
-
-`GS_REMOTE_HOME` permet de changer le dossier `~/.gpusync-remote`.
+- traffic **is not encrypted**: the code sent and the output can be read on the local network. Use it on a trusted
+  network (at home), not on public Wi-Fi;
+- **an agent token lets whoever holds it make that agent run code**, provided they can reach the agent while
+  pretending to be the hub. Keep it secret; when in doubt, `agents rm` then `agents add`;
+- the machines' clocks must be on time (± 5 min);
+- commands run with the rights of the user who started the agent: do not run it as administrator. Stop it
+  (`Ctrl+C`) when you are not using it.
 
 ---
 
-## 5. Protocole (pour référence)
+## 4. Files
 
-Requêtes : en-têtes `X-GS-Who` (nom d'agent, ou `@ctl` pour la CLI), `X-GS-Time`, `X-GS-Nonce`,
-`X-GS-Sig = HMAC(jeton, "req\nwho\nMÉTHODE\nchemin\nhorodatage\nnonce\nsha256(corps)")`.
-Réponses : `X-GS-Resp-Sig = HMAC(jeton, "resp\nnonce-de-la-requête\nstatut\nsha256(corps)")`.
-
-| Route | Appelant | Rôle |
+| Machine | File | Contents |
 |---|---|---|
-| `POST /a/hello` | agent | annonce et infos machine |
-| `POST /a/poll` | agent | attend une tâche (long-polling, 25 s max) |
-| `POST /a/files` | agent | fichiers d'une tâche de synchronisation (zip) |
-| `POST /a/output` | agent | envoie la sortie ; la réponse indique si la tâche doit être arrêtée |
-| `POST /a/upload?job=` | agent | fichier demandé par `get` |
-| `POST /a/done` | agent | fin de tâche (statut, code) |
-| `GET /c/agents` | CLI (locale) | état des agents |
-| `POST /c/jobs` | CLI (locale) | soumettre une tâche |
-| `GET /c/jobs/<id>?offset=` | CLI (locale) | statut + sortie à partir de l'octet N |
-| `POST /c/jobs/<id>/kill` | CLI (locale) | arrêter une tâche |
-| `GET /c/jobs/<id>/result` | CLI (locale) | fichier récupéré par `get` |
+| Mac | `~/.gpusync-remote/hub.json` | control token, agent tokens, port |
+| Mac | `~/.gpusync-remote/hub/jobs/` | task output |
+| test machine | `~/.gpusync-remote/agent.json` | hub URL, name, token |
+| test machine | `~/.gpusync-remote/agent/workspaces/` | synchronized repositories and produced files |
+
+`GS_REMOTE_HOME` changes the `~/.gpusync-remote` folder.
+
+---
+
+## 5. Protocol (for reference)
+
+Requests: headers `X-GS-Who` (agent name, or `@ctl` for the CLI), `X-GS-Time`, `X-GS-Nonce`,
+`X-GS-Sig = HMAC(token, "req\nwho\nMETHOD\npath\ntimestamp\nnonce\nsha256(body)")`.
+Responses: `X-GS-Resp-Sig = HMAC(token, "resp\nrequest-nonce\nstatus\nsha256(body)")`.
+
+| Route | Caller | Role |
+|---|---|---|
+| `POST /a/hello` | agent | announcement and machine info |
+| `POST /a/poll` | agent | waits for a task (long-polling, 25 s max) |
+| `POST /a/files` | agent | files of a synchronization task (zip) |
+| `POST /a/output` | agent | sends output; the response says whether the task must stop |
+| `POST /a/upload?job=` | agent | file requested by `get` |
+| `POST /a/done` | agent | end of task (status, code) |
+| `GET /c/agents` | CLI (local) | state of the agents |
+| `POST /c/jobs` | CLI (local) | submit a task |
+| `GET /c/jobs/<id>?offset=` | CLI (local) | status + output from byte N |
+| `POST /c/jobs/<id>/kill` | CLI (local) | stop a task |
+| `GET /c/jobs/<id>/result` | CLI (local) | file fetched by `get` |

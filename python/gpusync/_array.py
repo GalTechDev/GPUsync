@@ -1,13 +1,13 @@
-"""`gs.Array` : résultat d'un kernel, resté sur le périphérique jusqu'à sa lecture (§4.6).
+"""`gs.Array`: result of a kernel, kept on the device until it is read (§4.6).
 
-- passer un `gs.Array` à un autre kernel : aucune copie vers l'hôte ;
-- `np.asarray(y)`, `y.numpy()`, `y[i]`, `print(y)` : attendent la fin du calcul et rapatrient ;
-- sur mémoire unifiée (OpenCL), le tableau NumPy renvoyé *est* la mémoire du résultat (zéro-copie) ;
-- `await y` : attend la fin du calcul sans bloquer la boucle asyncio (attente sur un thread, GIL libéré) ;
-- `np.from_dlpack(y)`, `torch.from_dlpack(y)` : export DLPack (mémoire hôte, sans copie) ;
-- `y.save("r.npy")` : écrit le résultat dans un fichier .npy, par blocs depuis le GPU ;
-- `y + 1`, `y == 2`, `-y`, `np.add(y, 1)` : opérateurs et ufuncs de NumPy, calculés sur l'hôte après lecture,
-  rendent un tableau NumPy (pour rester sur le GPU, écrire un kernel).
+- passing a `gs.Array` to another kernel: no copy to the host;
+- `np.asarray(y)`, `y.numpy()`, `y[i]`, `print(y)`: wait for the computation and copy back;
+- on unified memory (OpenCL), the returned NumPy array *is* the result's memory (zero-copy);
+- `await y`: waits for the computation without blocking the asyncio loop (wait on a thread, GIL released);
+- `np.from_dlpack(y)`, `torch.from_dlpack(y)`: DLPack export (host memory, no copy);
+- `y.save("r.npy")`: writes the result to a .npy file, chunk by chunk from the GPU;
+- `y + 1`, `y == 2`, `-y`, `np.add(y, 1)`: NumPy operators and ufuncs, computed on the host after reading,
+  return a NumPy array (to stay on the GPU, write a kernel).
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
     __array_priority__ = 1000
 
     def __init__(self, handle, host: np.ndarray | None, device: str, *, shape=None, dtype=None) -> None:
-        self._handle = handle  # _core.DeviceArray, ou None si déjà en mémoire hôte
-        self._host = host  # destination finale (None tant qu'aucune lecture hôte n'est demandée)
+        self._handle = handle  # _core.DeviceArray, or None if already in host memory
+        self._host = host  # final destination (None until a host read is requested)
         if host is not None:
             self._shape = host.shape
             self._dtype = host.dtype
@@ -35,11 +35,11 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
             self._dtype = np.dtype(dtype)
             self._size = math.prod(self._shape)
         self._ready = handle is None
-        self._lock = threading.Lock()  # lecture possible depuis un thread (await) et le thread principal
-        self._check = None  # mode explicite : vérifie qu'aucune écriture n'a été refusée
+        self._lock = threading.Lock()  # read possible from a thread (await) and from the main thread
+        self._check = None  # explicit mode: checks that no write was rejected
         self.device = device
 
-    # ── forme et type : connus sans attendre le calcul ──
+    # ── shape and type: known without waiting for the computation ──
     @property
     def shape(self) -> tuple:
         return self._shape
@@ -62,18 +62,18 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
 
     @property
     def mode(self) -> str:
-        """Mode d'exécution (§9.1) : "direct" (zéro-copie), "resident" (resté sur le GPU), "flux" (par blocs,
-        déjà dans sa destination) ou "cpu"."""
+        """Execution mode (§9.1): "direct" (zero-copy), "resident" (kept on the GPU), "flux" (chunk by chunk,
+        already in its destination) or "cpu"."""
         return self._handle.mode if self._handle is not None else "host"
 
     @property
     def zero_copy(self) -> bool:
-        """Le résultat est-il calculé directement dans la mémoire du tableau NumPy (mode Direct) ?"""
+        """Is the result computed directly in the NumPy array's memory (Direct mode)?"""
         return self.mode == "direct"
 
-    # ── lecture ──
+    # ── reading ──
     def numpy(self) -> np.ndarray:
-        """Attend la fin du calcul et renvoie le résultat sous forme de tableau NumPy."""
+        """Waits for the computation and returns the result as a NumPy array."""
         if not self._ready:
             with self._lock:
                 if not self._ready:
@@ -87,11 +87,11 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
 
     @property
     def ready(self) -> bool:
-        """Le résultat a-t-il déjà été lu (aucune attente à prévoir) ?"""
+        """Has the result already been read (no wait to expect)?"""
         return self._ready
 
     def __await__(self):
-        """`await y` : attend la fin du calcul et la lecture sur un thread, puis rend `y` (prêt)."""
+        """`await y`: waits for the computation and the read on a thread, then returns `y` (ready)."""
         return self._wait().__await__()
 
     async def _wait(self):
@@ -99,11 +99,11 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
             await asyncio.get_running_loop().run_in_executor(None, self.numpy)
         return self
 
-    # ── opérateurs : ceux de NumPy, sur le résultat lu (§4.6) ──
-    __hash__ = object.__hash__  # `==` compare les valeurs, mais un gs.Array reste utilisable comme clé (identité)
+    # ── operators: NumPy's, on the read result (§4.6) ──
+    __hash__ = object.__hash__  # `==` compares values, but a gs.Array stays usable as a key (identity)
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        """`y + 1`, `y == 2`, `np.maximum(y, 0)`… : attend le calcul, lit le résultat et laisse NumPy faire."""
+        """`y + 1`, `y == 2`, `np.maximum(y, 0)`…: waits for the computation, reads the result and lets NumPy do it."""
         def host(v):
             return v.numpy() if isinstance(v, Array) else v
 
@@ -112,22 +112,22 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
             kwargs["out"] = tuple(host(v) for v in kwargs["out"])
         return getattr(ufunc, method)(*inputs, **kwargs)
 
-    # ── interopérabilité ──
+    # ── interoperability ──
     def __dlpack__(self, *, stream=None, max_version=None, dl_device=None, copy=None):
-        """Export DLPack du résultat en mémoire hôte (attend la fin du calcul, sans copie)."""
+        """DLPack export of the result in host memory (waits for the computation, no copy)."""
         host = self.numpy()
         kw = {k: v for k, v in (("max_version", max_version), ("dl_device", dl_device), ("copy", copy)) if v is not None}
         try:
             return host.__dlpack__(stream=stream, **kw)
-        except TypeError:  # NumPy < 2 : seul `stream` est accepté
+        except TypeError:  # NumPy < 2: only `stream` is accepted
             return host.__dlpack__(stream=stream)
 
     def __dlpack_device__(self):
         return self._host.__dlpack_device__() if self._host is not None else (1, 0)
 
     def save(self, path) -> None:
-        """Écrit le résultat dans un fichier .npy (np.load le relit). Un résultat resté sur le GPU est
-        rapatrié par blocs directement dans le fichier, sans copie complète en RAM."""
+        """Writes the result to a .npy file (np.load reads it back). A result kept on the GPU is
+        copied back chunk by chunk straight into the file, without a full copy in RAM."""
         mm = np.lib.format.open_memmap(path, mode="w+", dtype=self.dtype, shape=self.shape)
         if self._ready or mm.size == 0:
             mm[...] = self._host
@@ -159,7 +159,7 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
     def __iter__(self):
         return iter(self.numpy())
 
-    # ── réductions : calculées sur l'hôte par NumPy, après lecture (§4.6) ──
+    # ── reductions: computed on the host by NumPy, after reading (§4.6) ──
     def sum(self, axis=None, **kw):
         return self.numpy().sum(axis=axis, **kw)
 
@@ -184,7 +184,7 @@ class Array(np.lib.mixins.NDArrayOperatorsMixin):
 
 
 class Results(tuple):
-    """Sorties d'un kernel à plusieurs sorties : un tuple de gs.Array, attendable en une fois
+    """Outputs of a kernel with several outputs: a tuple of gs.Array, awaitable in one go
     (`mean, std = await stats(x)`)."""
 
     __slots__ = ()

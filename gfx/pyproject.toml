@@ -5,7 +5,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "gpusync-gfx"
 version = "0.1.0"
-description = "Moteur graphique et de simulation temps réel (2D, 3D, fluides, atmosphère, météo) écrit avec GPUsync."
+description = "Real-time graphics and simulation engine (2D, 3D, fluids, atmosphere, weather) written with GPUsync."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -21,7 +21,7 @@ dependencies = ["gpusync>=0.1,<0.2", "numpy>=1.22"]
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
-# Portion du paquet `gpusync` : installe `gpusync/gfx/` à côté de la bibliothèque, sans toucher à son __init__
+# Portion of the `gpusync` package: installs `gpusync/gfx/` next to the library, without touching its __init__
 [tool.flit.module]
 name = "gpusync.gfx"
 

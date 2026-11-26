@@ -1,4 +1,4 @@
-"""Jalon M4 : attente asynchrone, appels depuis plusieurs threads, DLPack, y.save()."""
+"""Milestone M4: asynchronous waiting, calls from several threads, DLPack, y.save()."""
 
 import asyncio
 import threading
@@ -30,7 +30,7 @@ def test_await(dev):
     async def main():
         z = await axpy(x, y, 2.0, device=dev)
         assert isinstance(z, gs.Array) and z.ready
-        w = await axpy(z, y, -1.0, device=dev)  # chaînage puis attente
+        w = await axpy(z, y, -1.0, device=dev)  # chaining, then waiting
         m, s, a = await moments(RNG.random((40, 7), dtype=np.float32), device=dev)
         assert m.ready and s.ready and a.ready
         return z, w
@@ -42,7 +42,7 @@ def test_await(dev):
 
 @pytest.mark.parametrize("dev", GPUS)
 def test_event_loop_free_while_waiting(dev):
-    """Pendant `await y`, la boucle asyncio continue de tourner (attente sur un thread)."""
+    """During `await y`, the asyncio loop keeps running (wait on a thread)."""
     x = RNG.random((1200, 48), dtype=np.float32)
 
     async def main():
@@ -67,14 +67,14 @@ def test_event_loop_free_while_waiting(dev):
         return y, ticks - before, waited
 
     y, ticks, waited = asyncio.run(main())
-    if waited > 0.03:  # le calcul n'était pas fini au retour de l'appel : la boucle a dû tourner
+    if waited > 0.03:  # the computation was not finished when the call returned: the loop must have run
         assert ticks >= 3, (ticks, waited)
     check(np.asarray(y)[:20, :20], dtw_ref(x[:20], 5).astype(np.float32), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_call_in_thread(dev):
-    """`asyncio.to_thread(kernel, …)` : l'appel entier (même par blocs) hors de la boucle, GIL libéré."""
+    """`asyncio.to_thread(kernel, …)`: the whole call (even chunked) out of the loop, GIL released."""
     x = RNG.random((300, 8), dtype=np.float32)
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
 
@@ -88,7 +88,7 @@ def test_call_in_thread(dev):
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_multiple_threads(dev):
-    """Le même kernel lancé et lu en parallèle depuis 8 threads, sur le même périphérique."""
+    """The same kernel launched and read in parallel from 8 threads, on the same device."""
     xs = [RNG.random(20_000, dtype=np.float32) for _ in range(8)]
     out = [None] * 8
     errors = []
@@ -97,7 +97,7 @@ def test_multiple_threads(dev):
         try:
             for _ in range(5):
                 out[i] = np.asarray(axpy(xs[i], xs[i], float(i), device=dev)).copy()
-        except Exception as e:  # pragma: no cover - remonté plus bas
+        except Exception as e:  # pragma: no cover - raised further down
             errors.append(e)
 
     threads = [threading.Thread(target=work, args=(i,)) for i in range(8)]
@@ -123,7 +123,7 @@ def test_concurrent_read_of_same_result():
 
 
 class Tensor:
-    """Objet tiers qui n'expose que le protocole DLPack (comme un tenseur PyTorch ou JAX sur CPU)."""
+    """Third-party object that only exposes the DLPack protocol (like a PyTorch or JAX tensor on the CPU)."""
 
     def __init__(self, a):
         self._a = a
@@ -139,7 +139,7 @@ class Tensor:
 def test_dlpack(dev):
     x = RNG.random(3000, dtype=np.float32)
     y = axpy(Tensor(x), Tensor(x), 3.0, device=dev)  # import DLPack
-    v = np.from_dlpack(y)  # export DLPack : la mémoire du résultat, sans copie
+    v = np.from_dlpack(y)  # DLPack export: the result's memory, without copy
     assert np.shares_memory(v, y.numpy())
     check(v, 4.0 * x)
 
@@ -164,4 +164,4 @@ def test_save(dev, budget, tmp_path):
         _set_transfer_limits()
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
     check(np.load(tmp_path / "d.npy"), ref)
-    check(y, ref)  # toujours lisible après l'écriture
+    check(y, ref)  # still readable after the write

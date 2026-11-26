@@ -12,7 +12,7 @@ pollster = "1.0.3"
 wgpu = { version = "30.0.2", default-features = false, features = ["std", "parking_lot", "metal", "vulkan", "dx12", "wgsl"] }
 winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 
-# Zéro-copie Metal (newBufferWithBytesNoCopy) via wgpu-hal : mêmes versions que wgpu-hal 30.
+# Metal zero copy (newBufferWithBytesNoCopy) through wgpu-hal: same versions as wgpu-hal 30.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = "0.6"
 objc2-metal = { version = "0.3", default-features = false, features = ["std", "block2", "MTLAllocation", "MTLBuffer", "MTLResource", "MTLDevice"] }

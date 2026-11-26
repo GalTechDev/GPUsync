@@ -1,5 +1,5 @@
-"""Réutilisation des buffers du périphérique (réserve par backend) : un buffer libéré resservant
-alors que des calculs en file le lisent encore ne doit jamais fausser un résultat."""
+"""Reuse of device buffers (a pool per backend): a released buffer reused while queued
+computations still read it must never corrupt a result."""
 
 import numpy as np
 import pytest
@@ -8,7 +8,7 @@ import gpusync as gs
 
 from test_index import check
 
-DEVICES = [d.id for d in gs.devices() if not d.id.startswith("cpu")]  # réserves des GPU
+DEVICES = [d.id for d in gs.devices() if not d.id.startswith("cpu")]  # GPU pools
 
 
 @gs.kernel
@@ -31,7 +31,7 @@ def fill(x: gs.f32[:], v: gs.f32) -> gs.f32[:]:
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_long_chain(dev):
-    """y = f(y) 300 fois sans lecture : les résultats intermédiaires sont libérés et réutilisés."""
+    """y = f(y) 300 times without reading: intermediate results are released and reused."""
     z = plus1(np.zeros(1 << 20, np.uint32), device=dev)
     for _ in range(299):
         z = plus1(z, device=dev)
@@ -40,16 +40,16 @@ def test_long_chain(dev):
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_input_released_during_compute(dev):
-    """L'entrée d'un calcul long est lâchée aussitôt ; ses buffers resservent à d'autres calculs
-    (qui les écrasent) pendant que le premier peut encore les lire."""
+    """The input of a long computation is dropped at once; its buffers serve other computations
+    (which overwrite them) while the first one may still read them."""
     n = 1 << 18
     ref = np.zeros(n, np.float32)
     for _ in range(2000):
         ref = ref * np.float32(0.5) + np.float32(1.0)
     for _ in range(3):
-        xin = fill(np.ones(n, np.float32), 0.0, device=dev)  # zéros, restés sur le périphérique
+        xin = fill(np.ones(n, np.float32), 0.0, device=dev)  # zeros, kept on the device
         y = slow(xin, device=dev)
-        del xin  # buffer rendu à la réserve pendant le calcul
+        del xin  # buffer returned to the pool during the computation
         others = [fill(np.zeros(n, np.float32), float(k + 7), device=dev) for k in range(8)]
         check(y, ref)
         for k, a in enumerate(others):

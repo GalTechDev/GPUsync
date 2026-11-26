@@ -1,4 +1,4 @@
-"""Rendu de référence du ciel et des nuages d'une `Atmosphere` : tracé de chemins dans l'eau liquide simulée."""
+"""Reference rendering of the sky and clouds of an `Atmosphere`: path tracing through the simulated liquid water."""
 
 from __future__ import annotations
 
@@ -27,15 +27,15 @@ from .kernels.ksky import (
 
 EARTH = 6.371e6
 TOP = 1.0e5
-RAYLEIGH = np.array([5.8e-6, 13.5e-6, 33.1e-6])  # 1/m au niveau de la mer (R, G, B)
+RAYLEIGH = np.array([5.8e-6, 13.5e-6, 33.1e-6])  # 1/m at sea level (R, G, B)
 H_RAYLEIGH, H_MIE = 8000.0, 1200.0
 OZONE = np.array([0.65e-6, 1.881e-6, 0.085e-6])
 
 
 def draine_parameters(diameter_um: float) -> tuple[float, float, float]:
-    """`(g, alpha, poids)` du lobe de Draine pour des gouttes de 5 à 50 µm (Jendersie & d'Eon, 2023).
+    """`(g, alpha, weight)` of the Draine lobe for 5 to 50 µm droplets (Jendersie & d'Eon, 2023).
 
-    Le reste du poids est le pic avant, traité comme non diffusé."""
+    The rest of the weight is the forward peak, treated as unscattered."""
     d = float(diameter_um)
     g = math.exp(-2.20679 / (d + 3.91029) - 0.428934)
     alpha = math.exp(3.62489 - 8.29288 / (d + 5.52825))
@@ -47,7 +47,7 @@ _GAUSS = np.polynomial.legendre.leggauss(200)
 
 
 def legendre_moments(g: float, alpha: float, count: int = 5) -> list[float]:
-    """Moments de Legendre de la phase de Draine (le premier vaut 1, le deuxième est le cosinus moyen)."""
+    """Legendre moments of the Draine phase (the first is 1, the second is the mean cosine)."""
     mu, w = _GAUSS
     p = (1.0 - g * g) / (1.0 + g * g - 2.0 * g * mu) ** 1.5 * (1.0 + alpha * mu * mu)
     p = p * w / (p * w).sum()
@@ -55,7 +55,7 @@ def legendre_moments(g: float, alpha: float, count: int = 5) -> list[float]:
 
 
 def peak_exponent(g: float, alpha: float, forward: float) -> float:
-    """`n` tel que la part `((1 + mu) / 2)^n` de la phase de Draine (son pic avant) pèse `forward`."""
+    """`n` such that the share `((1 + mu) / 2)^n` of the Draine phase (its forward peak) weighs `forward`."""
     mu, w = _GAUSS
     p = (1.0 - g * g) / (1.0 + g * g - 2.0 * g * mu) ** 1.5 * (1.0 + alpha * mu * mu) * w
     p /= p.sum()
@@ -74,7 +74,7 @@ def _densities(h, mie):
 
 
 def _optical_depth(pos, direction, mie, steps=40):
-    """Épaisseur optique RGB jusqu'au sommet de l'atmosphère (infinie derrière la Terre)."""
+    """RGB optical depth up to the top of the atmosphere (infinite behind the Earth)."""
     b = (pos * direction).sum(-1)
     r2 = (pos * pos).sum(-1)
     dist = -b + np.sqrt(np.maximum(b * b - r2 + (EARTH + TOP) ** 2, 0.0))
@@ -90,15 +90,15 @@ def _optical_depth(pos, direction, mie, steps=40):
 
 
 def sun_transmittance(sun, altitude, *, mie=4e-6):
-    """Fraction RGB du soleil qui arrive à `altitude` (m)."""
+    """RGB fraction of the sun that reaches `altitude` (m)."""
     pos = np.array([0.0, 0.0, EARTH + altitude])
     return np.exp(-_optical_depth(pos, np.asarray(sun, float), mie))
 
 
 def sky_table(sun, *, altitude=1500.0, width=96, height=48, mie=4e-6, mie_g=0.76, multiple=1.0):
-    """Luminance du ciel `(height, width, 3)` pour un soleil d'éclairement 1 : diffusion simple Rayleigh + aérosols + ozone.
+    """Sky radiance `(height, width, 3)` for a sun of unit irradiance: single scattering, Rayleigh + aerosols + ozone.
 
-    Lignes : `sin(élévation) = (ligne / (height - 1))²` ; colonnes : azimut."""
+    Rows: `sin(elevation) = (row / (height - 1))²`; columns: azimuth."""
     sun = np.asarray(sun, float)
     dz = np.maximum((np.arange(height) / (height - 1)) ** 2, 2e-3)
     az = (np.arange(width) / width - 0.5) * 2.0 * np.pi
@@ -123,7 +123,7 @@ def sky_table(sun, *, altitude=1500.0, width=96, height=48, mie=4e-6, mie_g=0.76
         ext = ray + aer * 1.1 + oz
         tau += 0.5 * ext * ds[..., None]
         t_sun = np.exp(-np.minimum(_optical_depth(p, np.broadcast_to(sun, p.shape), mie, 24), 60.0))
-        # Diffusions suivantes : terme isotrope proportionnel (albédo du ciel), réglé par `multiple`
+        # Higher-order scattering: proportional isotropic term (sky albedo), set by `multiple`
         src = ray * (p_ray[..., None] + multiple * 0.02) + aer * (p_mie[..., None] + multiple * 0.02)
         out += np.exp(-tau) * t_sun * src * ds[..., None]
         tau += 0.5 * ext * ds[..., None]
@@ -131,7 +131,7 @@ def sky_table(sun, *, altitude=1500.0, width=96, height=48, mie=4e-6, mie_g=0.76
 
 
 class SkyRenderer:
-    """Image de référence des nuages d'une `Atmosphere` (axes du modèle : x est, y nord, z haut)."""
+    """Reference image of the clouds of an `Atmosphere` (model axes: x east, y north, z up)."""
 
     def __init__(
         self,
@@ -156,16 +156,16 @@ class SkyRenderer:
         self.update()
 
     def sun_data(self, elevation: float, azimuth: float) -> tuple:
-        """Tables du ciel pour un soleil donné (≈ 0,2 s de CPU, sans GPU : peut tourner dans un autre fil)."""
+        """Sky tables for a given sun (≈ 0.2 s of CPU, no GPU: can run in another thread)."""
         el, az = math.radians(min(max(elevation, 0.5), 90.0)), math.radians(azimuth)
         sun = np.array([math.cos(el) * math.sin(az), math.cos(el) * math.cos(az), math.sin(el)])
         e_cloud = self.irradiance * sun_transmittance(sun, 1500.0, mie=self.aerosol)
         return sun, e_cloud, (self.irradiance * sky_table(sun, mie=self.aerosol)).astype(np.float32)
 
     def set_sun(self, elevation: float = 45.0, azimuth: float = 180.0, *, update: bool = True, data: tuple | None = None) -> None:
-        """Place le soleil (degrés ; azimut météorologique : 0 = nord, 90 = est) et recalcule le ciel.
+        """Places the sun (degrees; meteorological azimuth: 0 = north, 90 = east) and recomputes the sky.
 
-        `data` : résultat de `sun_data`, déjà calculé."""
+        `data`: result of `sun_data`, already computed."""
         self.sun, e_cloud, table = self.sun_data(elevation, azimuth) if data is None else data
         self._sky = upload_f32(table, device=self.device)
         self._sun_gpu = upload_f32(np.array([*self.sun, 0.0, *e_cloud, 0.0], dtype=np.float32), device=self.device)
@@ -173,19 +173,19 @@ class SkyRenderer:
             self.update()
 
     def set_atmosphere(self, atmosphere: Atmosphere, nested: NestedAtmosphere | None = None) -> None:
-        """Change de simulation (grille affinée, grille fine ajoutée…) sans changer le reste du ciel."""
+        """Switches simulation (refined grid, added fine grid…) without changing the rest of the sky."""
         self.atmosphere, self.nested = atmosphere, nested
         self.update()
 
     def update(self) -> None:
-        """Recalcule extinction, majorants et ombres après un pas de l'atmosphère."""
+        """Recomputes extinction, majorants and shadows after a step of the atmosphere."""
         a, dev = self.atmosphere, self.device
         cfg = a.config
         grids = [a] if self.nested is None else [a, self.nested]
         number = 4.0 * math.pi * 1000.0 * 0.8 * self.droplets / 3.0
         unit_scale = 1.5e-3 * number ** (1.0 / 3.0)
         excess = [cloud_excess(g.qt, g.qc, g.t, g.ref, float(g.config.ice), unit_scale, device=dev) for g in grids]
-        # Majorants à l'échelle 1 (rho q)^(2/3), lus ici : petits, et ils donnent l'eau maximale et les blocs nuageux
+        # Majorants at scale 1 (rho q)^(2/3), read here: small, and they give the maximum water and the cloud blocks
         unit = [self._majorants(g, e) for g, e in zip(grids, excess)]
         self._blocks = [np.array(u.numpy()) for u in unit]
         rho_q = max(float(b.max()) for b in self._blocks) ** 1.5
@@ -196,7 +196,7 @@ class SkyRenderer:
         self._moments = legendre_moments(g, alpha)
         self._scale = unit_scale * weight
         if cfg.nx % BLOCK or cfg.ny % BLOCK:
-            raise ValueError("SkyRenderer : nx et ny multiples de 4")
+            raise ValueError("SkyRenderer: nx and ny must be multiples of 4")
         inv = (1.0 / cfg.dx, 1.0 / cfg.dy, 1.0 / cfg.dz)
         sun = tuple(float(v) for v in self.sun)
         major = [upload_f32(b * np.float32(self._scale), device=dev) for b in self._blocks]
@@ -218,7 +218,7 @@ class SkyRenderer:
                 fine, major[1], f.ref, self._sun_depth, box, float(self._scale), 1.0 / fc.dx, 1.0 / fc.dz, *inv, *sun, 0.5 * min(fc.dx, fc.dz), device=dev
             )
             self._fine = (fine, depth, major[1], f.ref)
-        # Couche nuageuse (m) : hors d'elle, les rayons vont d'un trait
+        # Cloud layer (m): outside it, rays travel in one go
         low, high = 1e9, 0.0
         for g, b in zip(grids, self._blocks):
             levels = np.flatnonzero(b.max(axis=(1, 2)) > 0.0)
@@ -236,7 +236,7 @@ class SkyRenderer:
 
     @staticmethod
     def camera(position, azimuth: float, elevation: float, fov: float = 60.0) -> np.ndarray:
-        """Paramètres de la caméra (angles en degrés, azimut météorologique)."""
+        """Camera parameters (angles in degrees, meteorological azimuth)."""
         az, el = math.radians(azimuth), math.radians(elevation)
         fwd = np.array([math.cos(el) * math.sin(az), math.cos(el) * math.cos(az), math.sin(el)])
         right = np.array([math.cos(az), -math.sin(az), 0.0])
@@ -246,12 +246,12 @@ class SkyRenderer:
         return cam
 
     def start(self, width: int, height: int) -> tuple:
-        """Accumulateur vide pour un rendu progressif."""
+        """Empty accumulator for progressive rendering."""
         zero = np.zeros((height, width), dtype=np.float32)
         return tuple(upload_f32(zero, device=self.device) for _ in range(3))
 
     def accumulate(self, acc: tuple, cam: np.ndarray, first: int, samples: int, *, max_events: int = 600, keep: float = 1.0) -> tuple:
-        """Ajoute `samples` échantillons par pixel (numérotés à partir de `first`) ; `keep` < 1 oublie les anciens."""
+        """Adds `samples` samples per pixel (numbered from `first`); `keep` < 1 forgets the old ones."""
         cfg, dev = self.atmosphere.config, self.device
         if keep < 1.0:
             acc = sky_decay(*acc, float(keep), device=dev)
@@ -264,7 +264,7 @@ class SkyRenderer:
         return acc
 
     def tonemap(self, acc: tuple, samples: float, exposure: float = 1.0) -> gs.Array:
-        """Image u32 RGBA à afficher."""
+        """u32 RGBA image to display."""
         return sky_tonemap(*acc, float(exposure / samples), device=self.device)
 
     def render(
@@ -280,7 +280,7 @@ class SkyRenderer:
         exposure: float = 1.0,
         max_events: int = 600,
     ) -> np.ndarray:
-        """Image RGBA `(height, width, 4)` uint8 ; `azimuth` météorologique (0 = nord), angles en degrés."""
+        """RGBA image `(height, width, 4)` uint8; meteorological `azimuth` (0 = north), angles in degrees."""
         cam = self.camera(position, azimuth, elevation, fov)
         acc = self.start(width, height)
         for first in range(0, samples, 4):
@@ -292,12 +292,12 @@ class SkyRenderer:
 
 
 class CloudRenderer(SkyRenderer):
-    """Rendu temps réel du même ciel : lancer de rayons et cache de diffusion multiple, calé sur `SkyRenderer`.
+    """Real-time rendering of the same sky: ray marching and a multiple-scattering cache, calibrated on `SkyRenderer`.
 
-    Le cache n'occupe que les blocs nuageux (`cells` : mailles du cache par maille de simulation, grille large puis fine).
-    `refresh_light` y ajoute un chemin par maille et oublie doucement les anciens (`memory`) ; `march` fait l'image.
-    La lumière diffuse est portée par ses moments d'ordre 0, 1 et 2 avec la mise à l'échelle δ-M (`forward`, par défaut
-    le troisième moment de la phase) ; le soleil direct garde sa fonction de phase exacte (correction TMS)."""
+    The cache only covers the cloud blocks (`cells`: cache cells per simulation cell, coarse grid then fine).
+    `refresh_light` adds one path per cell and slowly forgets the old ones (`memory`); `march` makes the image.
+    Diffuse light is carried by its moments of order 0, 1 and 2 with δ-M scaling (`forward`, by default
+    the third moment of the phase); direct sunlight keeps its exact phase function (TMS correction)."""
 
     def __init__(self, atmosphere: Atmosphere, *, memory: int = 200, forward: float | None = None, cells: tuple[int, int] = (2, 1), **kw) -> None:
         self._cache: gs.Array | None = None
@@ -309,10 +309,10 @@ class CloudRenderer(SkyRenderer):
         super().__init__(atmosphere, **kw)
 
     def set_sun(self, elevation: float = 45.0, azimuth: float = 180.0, *, update: bool = True, data: tuple | None = None, keep: bool = False) -> None:
-        """Comme `SkyRenderer.set_sun` ; `keep` garde la lumière diffuse déjà calculée (petit déplacement du soleil)."""
+        """Like `SkyRenderer.set_sun`; `keep` keeps the diffuse light already computed (small move of the sun)."""
         data = self.sun_data(elevation, azimuth) if data is None else data
         super().set_sun(update=update, data=data)
-        # Éclairement du ciel sur un sol horizontal, rapporté à la luminance du zénith (une moyenne par composante)
+        # Sky irradiance on horizontal ground, relative to the zenith radiance (one mean per component)
         _, e_cloud, table = data
         sh = table.shape[0]
         dz = (np.arange(sh) / (sh - 1)) ** 2
@@ -330,12 +330,12 @@ class CloudRenderer(SkyRenderer):
 
     def update(self) -> None:
         super().update()
-        # δ-M à l'ordre 2 : la part avant est le troisième moment de la phase
+        # Second-order δ-M: the forward share is the third moment of the phase
         self.forward = float(self._moments[3] if self._forward is None else self._forward)
         self._bricks()
 
     def _bricks(self) -> None:
-        """Place les tuiles du cache dans les blocs nuageux et retrouve celles de l'image précédente."""
+        """Places the cache tiles in the cloud blocks and finds those of the previous frame."""
         grids = [self.atmosphere] + ([self.nested] if self.nested is not None else [])
         layout, index, tiles, source = np.zeros(32, dtype=np.float32), [], [], []
         total, start, state = 0, 0, []
@@ -354,7 +354,7 @@ class CloudRenderer(SkyRenderer):
             old = np.full(len(flat), -1, dtype=np.int64)
             if self._state is not None and len(self._state) > g and self._state[g][0].size == idx.size:
                 old_idx, old_origin = self._state[g]
-                # La grille fine se déplace par mailles entières : on reprend le bloc le plus proche
+                # The fine grid moves by whole cells: take the nearest block
                 px = bx + round((origin[0] - old_origin[0]) / (4.0 * c.dx))
                 py = by + round((origin[1] - old_origin[1]) / (4.0 * c.dx))
                 ok = (px >= 0) & (px < nbx) & (py >= 0) & (py < nby)
@@ -379,16 +379,16 @@ class CloudRenderer(SkyRenderer):
             self._cache = upload_f32(np.zeros((1, 12, 64), dtype=np.float32), device=self.device)
 
     def _peak(self) -> float:
-        """Exposant `n` tel que la part `((1 + mu) / 2)^n` de la phase pèse `forward`."""
+        """Exponent `n` such that the share `((1 + mu) / 2)^n` of the phase weighs `forward`."""
         key = (*self._phase, self.forward)
         if self._peak_key != key:
             self._peak_key, self._peak_n = key, peak_exponent(*key)
         return self._peak_n
 
     def refresh_light(self, paths: int = 1, *, parts: int = 1, full: bool = False, max_events: int = 200) -> None:
-        """Ajoute `paths` chemins par maille du cache ; avec `parts` > 1, une fraction `1/parts` des mailles à chaque fois.
+        """Adds `paths` paths per cache cell; with `parts` > 1, a fraction `1/parts` of the cells each time.
 
-        Un chemin s'arrête à sa première diffusion et lit la suite dans le cache ; `full` : chemins complets (plus bruités)."""
+        A path stops at its first scattering and reads the rest from the cache; `full`: complete paths (noisier)."""
         cfg = self.atmosphere.config
         for _ in range(paths):
             self._seed += 1
@@ -401,11 +401,11 @@ class CloudRenderer(SkyRenderer):
             self._source = self._same
 
     def blend(self, new: tuple, old: tuple, keep: float) -> tuple:
-        """Moyenne glissante de l'image `new` avec la précédente."""
+        """Running average of the image `new` with the previous one."""
         return sky_blend(*new, *old, float(keep), device=self.device)
 
     def march(self, cam: np.ndarray, width: int, height: int, *, frame: int = 0, quality: float = 1.0) -> tuple:
-        """Luminance RGB de l'image (trois plans)."""
+        """RGB radiance of the image (three planes)."""
         if self._seed == 0:
             self.refresh_light(40)
         cfg = self.atmosphere.config

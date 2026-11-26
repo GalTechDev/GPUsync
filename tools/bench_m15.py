@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Essais à gros volume du jalon M1.5 (ARCHITECTURE.md §9.8) : aucune limite de taille, mémoire bornée.
+"""Large-volume trials of milestone M1.5 (ARCHITECTURE.md §9.8): no size limit, bounded memory.
 
-    python tools/bench_m15.py ram 4 opencl:0             # 4 Gio d'entrée en RAM
-    python tools/bench_m15.py memmap 40 metal:0 /chemin  # 40 Gio en fichiers (entrée et sortie memmap)
+    python tools/bench_m15.py ram 4 opencl:0             # 4 GiB of input in RAM
+    python tools/bench_m15.py memmap 40 metal:0 /path    # 40 GiB in files (memmap input and output)
 
-Kernel : y = x * 2 + 1 (f32). Le résultat est vérifié **en entier**, bloc par bloc.
-« mémoire en plus » = pic de mémoire physique du processus (résidente sur macOS et Linux, working set
-sous Windows), moins la mémoire au démarrage, moins l'entrée et la sortie quand elles sont en RAM.
-Précision : ± 0,2 Gio (temporaires de remplissage).
+Kernel: y = x * 2 + 1 (f32). The result is checked **in full**, chunk by chunk.
+"extra memory" = peak physical memory of the process (resident on macOS and Linux, working set
+on Windows), minus the memory at startup, minus the input and output when they are in RAM.
+Precision: ± 0.2 GiB (filling temporaries).
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import numpy as np
 import gpusync as gs
 from bench_m1 import peak_rss
 
-BLOCK = 1 << 24  # éléments par bloc de remplissage et de vérification (64 Mio : temporaires limités)
+BLOCK = 1 << 24  # elements per filling and checking chunk (64 MiB: limited temporaries)
 
 
 @gs.kernel
@@ -69,15 +69,15 @@ def run(kind: str, gib: float, dev: str, folder: str | None) -> None:
     if kind == "memmap":
         res.flush()
     dt = time.perf_counter() - t
-    float(res[::1024].sum())  # toucher chaque page du résultat : les pages écrites par le GPU comptent alors
+    float(res[::1024].sum())  # touch every page of the result: pages written by the GPU then count
     extra = peak_rss() - start
     if kind == "ram":
-        extra -= x.nbytes + res.nbytes  # entrée et sortie en RAM : les données elles-mêmes, pas un surcoût
+        extra -= x.nbytes + res.nbytes  # input and output in RAM: the data itself, not an overhead
     bad = verify(res)
     gbs = 2 * n * 4 / dt / 1e9
-    ok = "✓" if bad == 0 else f"✗ {bad} éléments faux"
+    ok = "✓" if bad == 0 else f"✗ {bad} wrong elements"
     print(f"  {dev:<9} {kind:<6} {gib:5.1f} Gio  mode {y.mode:<8} {dt:7.1f} s  {gbs:5.1f} Go/s  "
-          f"mémoire en plus {extra / 2**30:5.2f} Gio  résultat {ok}", flush=True)
+          f"extra memory {extra / 2**30:5.2f} GiB  result {ok}", flush=True)
     if kind == "memmap":
         del x, out, y, res
         for f in (xin, xout):

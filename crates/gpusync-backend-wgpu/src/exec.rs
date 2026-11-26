@@ -1,7 +1,7 @@
-//! Exécution wgpu : un `Device` par adaptateur, pipelines en cache, buffers de stockage.
+//! wgpu execution: one `Device` per adapter, cached pipelines, storage buffers.
 //!
-//! Disposition des bindings (voir gpusync-codegen) : tableaux d'entrée, sortie, puis `gs_params`
-//! (scalaires et `n`, un mot de 32 bits chacun). La grille est 2D pour dépasser 65 535 groupes.
+//! Binding layout (see gpusync-codegen): input arrays, output, then `gs_params`
+//! (scalars and `n`, one 32-bit word each). The grid is 2-D to go beyond 65,535 groups.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,26 +20,26 @@ pub struct WgDevice {
     kernels: Mutex<HashMap<String, Arc<WgKernel>>>,
     staging_pool: Mutex<HashMap<(usize, bool), Vec<Staging>>>,
     pool: Arc<BufPool>,
-    /// Regroupement de plusieurs dispatches dans un seul CommandEncoder (`gs.batch()`).
+    /// Grouping of several dispatches into a single CommandEncoder (`gs.batch()`).
     batch: Mutex<BatchState>,
-    /// Clé dans `OPEN` (ex. `vulkan:1`).
+    /// Key in `OPEN` (e.g. `vulkan:1`).
     key: String,
-    /// Raison de la perte du périphérique par le driver (TDR Windows, plantage…), si perdu.
+    /// Why the driver lost the device (Windows TDR, crash…), if lost.
     lost: Arc<Mutex<Option<String>>>,
-    /// Dernière erreur wgpu non capturée (validation / OOM hors portée explicite).
+    /// Last uncaptured wgpu error (validation / OOM outside an explicit scope).
     uncaptured: Arc<Mutex<Option<String>>>,
-    /// Lots refusés par wgpu à la soumission : lire ou réutiliser ce qu'ils devaient écrire est une
-    /// erreur (jamais un résultat faux silencieux, objectif O2).
+    /// Batches rejected by wgpu at submission: reading or reusing what they were meant to write is an
+    /// error (never a silently wrong result, goal O2).
     failed: Mutex<HashMap<u64, String>>,
     any_failed: AtomicBool,
 }
 
-/// Lot de commandes du périphérique, partagé par tous les threads. Son verrou couvre la soumission :
-/// dès qu'un thread l'obtient, tout lot retiré est déjà en file, dans l'ordre.
+/// Command batch of the device, shared by every thread. Its lock covers submission:
+/// as soon as a thread gets it, every withdrawn batch is already queued, in order.
 #[derive(Default)]
 struct BatchState {
     depth: usize,
-    /// Numéro du lot en cours (à partir de 1), changé à chaque nouvel encodeur.
+    /// Number of the current batch (from 1), changed at each new encoder.
     id: u64,
     encoder: Option<wgpu::CommandEncoder>,
     keep: Vec<WgBuffer>,
@@ -61,14 +61,14 @@ pub struct WgKernel {
     n_inputs: usize,
     n_outputs: usize,
     has_fparams: bool,
-    /// Entrées écrites par le kernel (gs.Out du mode explicite).
+    /// Inputs written by the kernel (explicit-mode gs.Out).
     writable: Vec<bool>,
-    /// Threads par groupe (`@workgroup_size` du module).
+    /// Threads per group (`@workgroup_size` of the module).
     workgroup: u32,
 }
 
-/// Lancement prêt à enregistrer : liaisons, grille, et tampons de paramètres à garder en vie jusqu'à
-/// la soumission.
+/// Launch ready to record: bindings, grid, and parameter buffers to keep alive until
+/// submission.
 struct Call {
     bind: wgpu::BindGroup,
     groups: (u32, u32),
@@ -87,9 +87,9 @@ impl Call {
 pub struct WgBuffer {
     pub(crate) buf: wgpu::Buffer,
     pub bytes: usize,
-    /// Réserve où rendre le buffer (alloués par `alloc`) ; `None` pour la mémoire hôte enveloppée.
+    /// Pool to return the buffer to (allocated by `alloc`); `None` for wrapped host memory.
     pool: Option<Arc<BufPool>>,
-    /// Dernier lot qui utilise ce buffer, et dernier lot qui l'écrit (0 : aucun).
+    /// Last batch that uses this buffer, and last batch that writes it (0: none).
     used_lot: AtomicU64,
     written_lot: AtomicU64,
 }
@@ -114,15 +114,15 @@ impl Drop for WgBuffer {
     }
 }
 
-/// Buffers libérés, réutilisés par les appels suivants : un buffer neuf est mis à zéro par wgpu
-/// à sa première utilisation (coûteux sur mémoire unifiée). La file unique de wgpu ordonne les
-/// soumissions et suit les usages : un buffer rendu peut resservir tout de suite. Taille arrondie
-/// à la puissance de deux jusqu'à 64 Mio, exacte au-delà ; 2 Gio en tout.
+/// Released buffers, reused by later calls: a fresh buffer is zero-filled by wgpu
+/// on first use (expensive on unified memory). wgpu's single queue orders
+/// submissions and tracks usage: a returned buffer can be reused right away. Size rounded up
+/// to a power of two up to 64 MiB, exact beyond; 2 GiB in all.
 #[derive(Default)]
 struct BufPool {
     free: Mutex<(HashMap<u64, Vec<wgpu::Buffer>>, u64)>,
-    /// Pendant un lot (`true`), les buffers rendus attendent la soumission : des commandes
-    /// enregistrées peuvent encore les utiliser.
+    /// During a batch (`true`), returned buffers wait for submission: recorded
+    /// commands may still use them.
     deferred: Mutex<(bool, Vec<wgpu::Buffer>)>,
 }
 
@@ -161,8 +161,8 @@ impl BufPool {
         self.push_free(buf);
     }
 
-    /// Remet en réserve les buffers en attente, puis continue (`on`) ou non à différer les suivants.
-    /// À appeler sous le verrou du lot, une fois ses commandes soumises.
+    /// Puts pending buffers back into the pool, then keeps (`on`) or stops deferring the next ones.
+    /// To be called under the batch lock, once its commands are submitted.
     fn drain_deferred(&self, on: bool) {
         let items = {
             let mut d = self.deferred.lock().unwrap_or_else(|e| e.into_inner());
@@ -188,14 +188,14 @@ fn err(what: &str, e: impl std::fmt::Display) -> BackendError {
     BackendError(format!("wgpu : {what} ({e})"))
 }
 
-/// Taille alignée sur 4 octets (contrainte des copies wgpu), jamais nulle.
+/// Size aligned to 4 bytes (a wgpu copy constraint), never zero.
 fn aligned(bytes: usize) -> u64 {
     (bytes.max(4) as u64).div_ceil(4) * 4
 }
 
 impl WgDevice {
-    /// Erreur claire si le driver a perdu le périphérique (il est alors oublié et sera rouvert
-    /// au prochain `open`), ou si une erreur wgpu non capturée a eu lieu.
+    /// Clear error if the driver lost the device (it is then forgotten and will be reopened
+    /// on the next `open`), or if an uncaptured wgpu error happened.
     fn check(&self) -> Result<(), BackendError> {
         let lost = self.lost.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(reason) = lost {
@@ -209,9 +209,9 @@ impl WgDevice {
                 }
             }
             return Err(BackendError(format!(
-                "wgpu : le driver a perdu le périphérique {} ({reason}). Sous Windows, un calcul de plus \
-                 de ~2 s sur un GPU est interrompu (TDR) : réduisez la taille de l'appel ou choisissez un GPU \
-                 plus rapide. Le périphérique sera rouvert au prochain appel.",
+                "wgpu: the driver lost the device {} ({reason}). On Windows, a computation longer \
+                 than ~2 s on a GPU is interrupted (TDR): reduce the size of the call or choose a faster \
+                 GPU. The device will be reopened on the next call.",
                 self.info.name
             )));
         }
@@ -222,14 +222,14 @@ impl WgDevice {
             .take()
         {
             return Err(BackendError(format!(
-                "wgpu : erreur sur {} ({msg})",
+                "wgpu: error on {} ({msg})",
                 self.info.name
             )));
         }
         Ok(())
     }
 
-    /// Buffer de stockage initialisé depuis le pool (zéro allocation GPU à chaud).
+    /// Storage buffer initialized from the pool (no GPU allocation once warm).
     fn storage_init(&self, contents: &[u8]) -> Result<WgBuffer, BackendError> {
         let buf = self.alloc(contents.len())?;
         if contents.len().is_multiple_of(4) {
@@ -248,8 +248,8 @@ impl WgDevice {
         self.batch.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Exécute `f` sous portées d'erreur wgpu (propres au thread, sans attente du GPU) : une erreur de
-    /// validation ou de mémoire devient l'erreur de cette opération.
+    /// Runs `f` under wgpu error scopes (per thread, without waiting for the GPU): a validation
+    /// or memory error becomes the error of this operation.
     fn guarded<T>(&self, what: &str, f: impl FnOnce() -> T) -> Result<T, BackendError> {
         let oom = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -261,14 +261,14 @@ impl WgDevice {
         if let Some(e) = errors.into_iter().flatten().next() {
             self.check()?;
             return Err(BackendError(format!(
-                "wgpu : {what} sur {} ({e})",
+                "wgpu: {what} on {} ({e})",
                 self.info.name
             )));
         }
         Ok(r)
     }
 
-    /// Erreur si `buf` devait être écrit par un lot refusé.
+    /// Error if `buf` was to be written by a rejected batch.
     pub(crate) fn check_buf(&self, buf: &WgBuffer) -> Result<(), BackendError> {
         if !self.any_failed.load(Ordering::Acquire) {
             return Ok(());
@@ -280,17 +280,17 @@ impl WgDevice {
             .unwrap_or_else(|e| e.into_inner())
             .get(&lot)
         {
-            Some(m) => Err(BackendError(format!("résultat non calculé : {m}"))),
+            Some(m) => Err(BackendError(format!("result not computed: {m}"))),
             None => Ok(()),
         }
     }
 
-    /// Soumet le lot en cours, sous son verrou : aucun autre thread ne peut enregistrer, lire ou
-    /// reprendre un buffer entre le retrait de l'encodeur et sa mise en file.
+    /// Submits the current batch, under its lock: no other thread can record, read or
+    /// take back a buffer between removing the encoder and queuing it.
     fn submit_lot(&self, b: &mut BatchState, keep_deferring: bool) -> Result<(), BackendError> {
         let mut r = Ok(());
         if let Some(enc) = b.encoder.take() {
-            r = self.guarded("lot de commandes refusé", || {
+            r = self.guarded("command batch rejected", || {
                 self.queue.submit([enc.finish()]);
             });
             if let Err(e) = &r {
@@ -306,23 +306,23 @@ impl WgDevice {
         r
     }
 
-    /// Ouvre un lot de commandes : les `launch` et `copy` suivants partagent un seul `CommandEncoder`.
+    /// Opens a command batch: the following `launch` and `copy` share a single `CommandEncoder`.
     pub fn begin_batch(&self) {
         let mut b = self.lock_batch();
         if b.depth == 0 {
-            self.pool.drain_deferred(true); // aucune commande en attente : diffère à partir d'ici
+            self.pool.drain_deferred(true); // no pending command: defer from here
         }
         b.depth += 1;
     }
 
-    /// Soumet immédiatement le `CommandEncoder` en cours (si un lot est actif), sans quitter le lot.
+    /// Submits the current `CommandEncoder` immediately (if a batch is active), without leaving the batch.
     pub fn flush_batch(&self) -> Result<(), BackendError> {
         let mut b = self.lock_batch();
         let deferring = b.depth > 0;
         self.submit_lot(&mut b, deferring)
     }
 
-    /// Ferme le lot de commandes courant et soumet le `CommandEncoder` lorsque la profondeur retombe à 0.
+    /// Closes the current command batch and submits the `CommandEncoder` when the depth drops back to 0.
     pub fn end_batch(&self) -> Result<(), BackendError> {
         {
             let mut b = self.lock_batch();
@@ -335,7 +335,7 @@ impl WgDevice {
         self.check()
     }
 
-    /// Ouvre (une fois par processus) le périphérique `<api>:<index>` (ex. `metal:0`, `vulkan:1`).
+    /// Opens (once per process) the device `<api>:<index>` (e.g. `metal:0`, `vulkan:1`).
     pub fn open(api: &str, index: usize) -> Result<Arc<WgDevice>, BackendError> {
         let key = format!("{api}:{index}");
         let mut open = OPEN
@@ -350,12 +350,12 @@ impl WgDevice {
             .devices
             .iter()
             .find(|(_, d)| d.backend == api && d.index == index)
-            .ok_or_else(|| BackendError(format!("périphérique {key} introuvable")))?;
+            .ok_or_else(|| BackendError(format!("device {key} not found")))?;
         let adapter = &st.adapters[*adapter_idx];
         let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gpusync"),
-            // f64 en WGSL (Vulkan) : extension native de wgpu, demandée seulement si disponible.
+            // f64 in WGSL (Vulkan): native wgpu extension, requested only when available.
             required_features: {
                 let mut f = wgpu::Features::empty();
                 if info.f64 {
@@ -369,8 +369,8 @@ impl WgDevice {
             required_limits: limits.clone(),
             ..Default::default()
         }))
-        .map_err(|e| err("ouverture du périphérique", e))?;
-        // Par défaut wgpu panique sur une erreur non capturée : on la capture pour la remonter en Python.
+        .map_err(|e| err("opening the device", e))?;
+        // By default wgpu panics on an uncaptured error: capture it to report it in Python.
         let uncaptured: Arc<Mutex<Option<String>>> = Arc::default();
         let uflag = uncaptured.clone();
         device.on_uncaptured_error(Arc::new(move |e| {
@@ -404,8 +404,8 @@ impl WgDevice {
         Ok(d)
     }
 
-    /// Compile (avec cache) un module WGSL dont le point d'entrée est `main`. `writable` : entrées
-    /// liées en lecture-écriture (sorties gs.Out du mode explicite).
+    /// Compiles (with a cache) a WGSL module whose entry point is `main`. `writable`: inputs
+    /// bound read-write (explicit-mode gs.Out outputs).
     pub fn compile(
         &self,
         code: &str,
@@ -430,7 +430,7 @@ impl WgDevice {
             },
             count: None,
         };
-        // Disposition explicite : un binding déclaré mais inutilisé reste valide.
+        // Explicit layout: a declared but unused binding stays valid.
         let mut entries: Vec<_> = (0..n_inputs as u32)
             .map(|b| storage(b, !writable.get(b as usize).copied().unwrap_or(false)))
             .collect();
@@ -471,7 +471,7 @@ impl WgDevice {
             });
         if let Some(e) = pollster::block_on(scope.pop()) {
             return Err(BackendError(format!(
-                "échec de compilation WGSL sur {} :\n{e}",
+                "WGSL compilation failed on {}:\n{e}",
                 self.info.name
             )));
         }
@@ -493,7 +493,7 @@ impl WgDevice {
         let size = capacity(bytes);
         let buf = match self.pool.take(size) {
             Some(buf) => buf,
-            None => self.guarded("allocation refusée", || {
+            None => self.guarded("allocation rejected", || {
                 self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
                     size,
@@ -507,22 +507,22 @@ impl WgDevice {
         Ok(WgBuffer::new(buf, bytes, Some(self.pool.clone())))
     }
 
-    /// Copie hôte → périphérique (les données sont copiées immédiatement par wgpu).
+    /// Host → device copy (the data is copied immediately by wgpu).
     pub fn write(&self, buf: &WgBuffer, data: &[u8]) -> Result<(), BackendError> {
         self.write_at(buf, 0, data)
     }
 
-    /// `queue.write_buffer` s'exécute avant toute commande soumise ensuite : si le lot en cours utilise
-    /// déjà `dst`, il est soumis d'abord (sinon ses calculs liraient les nouvelles données).
+    /// `queue.write_buffer` runs before any command submitted afterwards: if the current batch already
+    /// uses `dst`, it is submitted first (otherwise its computations would read the new data).
     fn write_at(&self, dst: &WgBuffer, off: usize, data: &[u8]) -> Result<(), BackendError> {
         {
             let mut b = self.lock_batch();
             if b.encoder.is_some() && dst.used_lot.load(Ordering::Acquire) == b.id {
                 let deferring = b.depth > 0;
-                let _ = self.submit_lot(&mut b, deferring); // l'échec reste attaché à ses résultats
+                let _ = self.submit_lot(&mut b, deferring); // the failure stays attached to its results
             }
         }
-        self.guarded("envoi refusé", || {
+        self.guarded("upload rejected", || {
             if data.len().is_multiple_of(4) {
                 self.queue.write_buffer(&dst.buf, off as u64, data);
             } else {
@@ -533,7 +533,7 @@ impl WgDevice {
         })
     }
 
-    /// Met le kernel en file sur `n` éléments (ou l'enregistre dans le lot `gs.batch()` actif).
+    /// Queues the kernel over `n` elements (or records it in the active `gs.batch()`).
     pub fn launch(
         &self,
         k: &WgKernel,
@@ -546,13 +546,13 @@ impl WgDevice {
         self.check()?;
         if inputs.len() != k.n_inputs || outs.len() != k.n_outputs {
             return Err(BackendError(
-                "nombre de tableaux d'entrée incohérent".into(),
+                "inconsistent number of input arrays".into(),
             ));
         }
         for b in inputs.iter().chain(outs) {
             self.check_buf(b)?;
         }
-        // Lot `gs.batch()` ouvert : encoder dedans (sous son verrou).
+        // `gs.batch()` open: encode into it (under its lock).
         {
             let mut b = self.lock_batch();
             if b.depth > 0 {
@@ -573,10 +573,10 @@ impl WgDevice {
                 return Ok(());
             }
         }
-        // Toute erreur de validation ou de mémoire devient une erreur Python (jamais un résultat
-        // faux silencieux, objectif O2).
+        // Any validation or memory error becomes a Python error (never a silently wrong
+        // result, goal O2).
         let call = self.prepare(k, inputs, outs, params, fparams, n)?;
-        self.guarded("lancement refusé", || {
+        self.guarded("launch rejected", || {
             let mut enc = self.device.create_command_encoder(&Default::default());
             call.record(&mut enc, k);
             self.queue.submit([enc.finish()]);
@@ -584,8 +584,8 @@ impl WgDevice {
         Ok(())
     }
 
-    /// Prépare le lancement de `k` sur `n` éléments (paramètres, liaisons), sans rien enregistrer : une
-    /// erreur ici ne touche pas le lot en cours.
+    /// Prepares the launch of `k` over `n` elements (parameters, bindings), without recording anything: an
+    /// error here does not affect the current batch.
     fn prepare(
         &self,
         k: &WgKernel,
@@ -633,11 +633,11 @@ impl WgDevice {
         let gy = groups.div_ceil(gx.max(1) as u64);
         if gy > self.max_groups_per_dim as u64 {
             return Err(BackendError(format!(
-                "{n} éléments : trop pour une seule grille sur {}",
+                "{n} elements: too many for a single grid on {}",
                 self.info.name
             )));
         }
-        let bind = self.guarded("liaison refusée", || {
+        let bind = self.guarded("binding rejected", || {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &k.layout,
@@ -651,7 +651,7 @@ impl WgDevice {
         })
     }
 
-    /// Copie périphérique → périphérique, mise en file (décalages et taille multiples de 4).
+    /// Device → device copy, queued (offsets and size multiples of 4).
     pub fn copy(
         &self,
         src: &WgBuffer,
@@ -681,17 +681,17 @@ impl WgDevice {
                 return Ok(());
             }
         }
-        self.guarded("copie refusée", || {
+        self.guarded("copy rejected", || {
             let mut enc = self.device.create_command_encoder(&Default::default());
             record(&mut enc);
             self.queue.submit([enc.finish()]);
         })
     }
 
-    /// Copie bloquante périphérique → hôte (attend la fin des calculs soumis).
+    /// Blocking device → host copy (waits for submitted work).
     pub fn read(&self, buf: &WgBuffer, out: &mut [u8]) -> Result<(), BackendError> {
         self.check()?;
-        let _ = self.flush_batch(); // un lot refusé ne concerne que ses propres résultats
+        let _ = self.flush_batch(); // a rejected batch only affects its own results
         self.check_buf(buf)?;
         let size = aligned(buf.bytes);
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -710,29 +710,29 @@ impl WgDevice {
         });
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| err("attente du GPU", e))?;
+            .map_err(|e| err("waiting for the GPU", e))?;
         match result.lock().unwrap().take() {
             Some(Ok(())) => {}
-            Some(Err(e)) => return Err(err("lecture du résultat", e)),
-            None => return Err(BackendError("wgpu : lecture non terminée".into())),
+            Some(Err(e)) => return Err(err("reading the result", e)),
+            None => return Err(BackendError("wgpu: read not finished".into())),
         }
         {
             let view = staging
                 .get_mapped_range(..)
-                .map_err(|e| err("accès au résultat", e))?;
+                .map_err(|e| err("accessing the result", e))?;
             out.copy_from_slice(&view[..out.len()]);
         }
         staging.unmap();
         self.check()
     }
 
-    /// Buffer Metal qui utilise directement la mémoire de l'hôte (zéro-copie, `newBufferWithBytesNoCopy`).
+    /// Metal buffer that uses host memory directly (zero-copy, `newBufferWithBytesNoCopy`).
     ///
-    /// Renvoie `Ok(None)` quand ce n'est pas possible (autre API que Metal, adresse non alignée sur une
-    /// page de 16 Kio, mémoire refusée par Metal) : l'appelant passe alors par les transferts.
+    /// Returns `Ok(None)` when that is not possible (an API other than Metal, address not aligned on a
+    /// 16 KiB page, memory refused by Metal): the caller then goes through transfers.
     ///
     /// # Safety
-    /// `ptr..ptr + bytes` arrondi à la page suivante doit rester valide tant que le buffer existe.
+    /// `ptr..ptr + bytes` rounded up to the next page must stay valid while the buffer exists.
     pub unsafe fn wrap_host(
         &self,
         ptr: *mut u8,
@@ -745,7 +745,7 @@ impl WgDevice {
             if self.info.backend != "metal" || !(ptr as usize).is_multiple_of(PAGE) || bytes == 0 {
                 return Ok(None);
             }
-            let len = bytes.div_ceil(PAGE) * PAGE; // la dernière page entière reste dans la même page mappée
+            let len = bytes.div_ceil(PAGE) * PAGE; // the last whole page stays within the same mapped page
             let Some(hal_dev) = (unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }) else {
                 return Ok(None);
             };
@@ -784,7 +784,7 @@ impl WgDevice {
         }
     }
 
-    // ───────────────────── transferts par blocs (ARCHITECTURE.md §9) ─────────────────────
+    // ───────────────────── chunked transfers (ARCHITECTURE.md §9) ─────────────────────
 
     fn staging(&self, bytes: usize, upload: bool) -> Staging {
         if let Some(st) = self
@@ -805,7 +805,7 @@ impl WgDevice {
             label: Some("gpusync-staging"),
             size: aligned(bytes),
             usage,
-            mapped_at_creation: upload, // un tampon d'envoi naît prêt à être rempli
+            mapped_at_creation: upload, // an upload buffer is born ready to be filled
         });
         Staging {
             buf,
@@ -823,7 +823,7 @@ impl WgDevice {
         }
     }
 
-    /// Attend que `st` soit mappé (sa dernière copie terminée), sans attendre les soumissions suivantes.
+    /// Waits until `st` is mapped (its last copy done), without waiting for later submissions.
     fn wait_mapped(&self, st: &Staging) -> Result<(), BackendError> {
         if st.mapped.load(Ordering::Acquire) {
             return Ok(());
@@ -858,11 +858,11 @@ impl WgDevice {
         });
     }
 
-    /// Envoie `bytes` octets de l'hôte vers `dst` (à partir de `dst_off`) par blocs de `chunk` octets,
-    /// à travers un anneau de 3 tampons : la mémoire hôte en plus reste bornée à 3 blocs.
+    /// Sends `bytes` bytes from the host to `dst` (starting at `dst_off`) in chunks of `chunk` bytes,
+    /// through a ring of 3 buffers: the extra host memory stays bounded to 3 chunks.
     ///
     /// # Safety
-    /// `src` doit pointer vers `bytes` octets lisibles.
+    /// `src` must point to `bytes` readable bytes.
     pub unsafe fn upload(
         &self,
         dst: &WgBuffer,
@@ -875,13 +875,13 @@ impl WgDevice {
         if bytes == 0 {
             return Ok(());
         }
-        // Chemin rapide pour les petits/moyens transferts (≤ 4 Mio) : `queue.write_buffer` évite
-        // la création de 3 tampons de staging, de CommandEncoder et de queue.submit dédiés.
+        // Fast path for small and medium transfers (≤ 4 MiB): `queue.write_buffer` avoids
+        // creating 3 staging buffers, a CommandEncoder and a dedicated queue.submit.
         if bytes <= FAST_UPLOAD_MAX && bytes <= chunk.max(FAST_UPLOAD_MAX) {
             let data = unsafe { std::slice::from_raw_parts(src, bytes) };
             return self.write_at(dst, dst_off, data);
         }
-        let _ = self.flush_batch(); // un lot refusé ne concerne que ses propres résultats
+        let _ = self.flush_batch(); // a rejected batch only affects its own results
         let chunk = chunk.min(bytes).max(4);
         let mut ring: Vec<Staging> = (0..3).map(|_| self.staging(chunk, true)).collect();
         let mut off = 0;
@@ -894,7 +894,7 @@ impl WgDevice {
                 let mut view = st
                     .buf
                     .get_mapped_range_mut(..len as u64)
-                    .map_err(|e| err("écriture d'un tampon", e))?;
+                    .map_err(|e| err("writing a buffer", e))?;
                 view.copy_from_slice(unsafe { std::slice::from_raw_parts(src.add(off), len) });
             }
             st.buf.unmap();
@@ -911,10 +911,10 @@ impl WgDevice {
         self.check()
     }
 
-    /// Rapatrie `bytes` octets de `src` (à partir de `src_off`) vers l'hôte, par blocs (anneau de 3).
+    /// Copies `bytes` bytes of `src` (starting at `src_off`) back to the host, in chunks (ring of 3).
     ///
     /// # Safety
-    /// `dst` doit pointer vers `bytes` octets accessibles en écriture.
+    /// `dst` must point to `bytes` writable bytes.
     pub unsafe fn download(
         &self,
         src: &WgBuffer,
@@ -924,7 +924,7 @@ impl WgDevice {
         chunk: usize,
     ) -> Result<(), BackendError> {
         self.check()?;
-        let _ = self.flush_batch(); // un lot refusé ne concerne que ses propres résultats
+        let _ = self.flush_batch(); // a rejected batch only affects its own results
         self.check_buf(src)?;
         if bytes == 0 {
             return Ok(());
@@ -935,7 +935,7 @@ impl WgDevice {
         let mut off = 0;
         let mut i = 0;
         loop {
-            // Termine le plus ancien bloc quand l'anneau est plein (ou à la fin).
+            // Finishes the oldest chunk when the ring is full (or at the end).
             if pending.len() == 3 || (off >= bytes && !pending.is_empty()) {
                 let (slot, o, len) = pending.pop_front().unwrap();
                 let st = &ring[slot];
@@ -944,7 +944,7 @@ impl WgDevice {
                     let view = st
                         .buf
                         .get_mapped_range(..len as u64)
-                        .map_err(|e| err("lecture d'un tampon", e))?;
+                        .map_err(|e| err("reading a buffer", e))?;
                     unsafe { std::ptr::copy_nonoverlapping(view.as_ptr(), dst.add(o), len) };
                 }
                 st.buf.unmap();
@@ -975,12 +975,12 @@ impl WgDevice {
         self.check()
     }
 
-    /// Exécute `k` en mode Flux : bloc par bloc, envoi du bloc k+1 et retour du bloc k−1 pendant le
-    /// calcul du bloc k ; chaque bloc de chaque sortie est écrit directement dans sa destination
-    /// (`outs` : (adresse hôte, octets par élément)).
+    /// Runs `k` in Flux mode: chunk by chunk, uploading chunk k+1 and reading back chunk k−1 during the
+    /// computation of chunk k; each chunk of each output is written straight to its destination
+    /// (`outs`: (host address, bytes per element)).
     ///
     /// # Safety
-    /// Les pointeurs hôte (entrées `Host`, destinations) doivent couvrir `n` éléments.
+    /// The host pointers (`Host` inputs, destinations) must cover `n` elements.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn flux(
         &self,
@@ -993,7 +993,7 @@ impl WgDevice {
         chunk_elems: usize,
     ) -> Result<(), BackendError> {
         self.check()?;
-        let _ = self.flush_batch(); // un lot refusé ne concerne que ses propres résultats
+        let _ = self.flush_batch(); // a rejected batch only affects its own results
         for i in inputs {
             if let FluxIn::Dev { buf, .. } = i {
                 self.check_buf(buf)?;
@@ -1011,7 +1011,7 @@ impl WgDevice {
         r?;
         if let Some(e) = errors.into_iter().flatten().next() {
             return Err(BackendError(format!(
-                "wgpu : traitement par blocs refusé sur {} ({e})",
+                "wgpu: chunked processing rejected on {} ({e})",
                 self.info.name
             )));
         }
@@ -1035,7 +1035,7 @@ impl WgDevice {
             ups: Vec<Option<Staging>>,
             outs: Vec<WgBuffer>,
             backs: Vec<Staging>,
-            busy: Option<(usize, usize)>, // (élément de départ, nombre d'éléments)
+            busy: Option<(usize, usize)>, // (first element, number of elements)
         }
         let chunk_elems = chunk_elems.max(1).min(n);
         let mut ring: Vec<Slot> = Vec::with_capacity(slots);
@@ -1070,7 +1070,7 @@ impl WgDevice {
                         let view = back
                             .buf
                             .get_mapped_range(..bytes as u64)
-                            .map_err(|e| err("lecture d'un tampon", e))?;
+                            .map_err(|e| err("reading a buffer", e))?;
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 view.as_ptr(),
@@ -1102,7 +1102,7 @@ impl WgDevice {
                             let mut view = st
                                 .buf
                                 .get_mapped_range_mut(..bytes as u64)
-                                .map_err(|e| err("écriture d'un tampon", e))?;
+                                .map_err(|e| err("writing a buffer", e))?;
                             view.copy_from_slice(unsafe {
                                 std::slice::from_raw_parts(ptr.add(start * elem), bytes)
                             });
@@ -1148,7 +1148,7 @@ impl WgDevice {
             start += len;
             i += 1;
         }
-        // Termine les blocs encore en vol, dans l'ordre.
+        // Finishes the chunks still in flight, in order.
         let used = ring.len();
         for j in 0..used {
             let slot = (i + j) % used;
@@ -1170,12 +1170,12 @@ impl WgDevice {
         self.flush_batch()?;
         let r = self.device.poll(wgpu::PollType::wait_indefinitely());
         self.check()?;
-        r.map_err(|e| err("attente du GPU", e))?;
+        r.map_err(|e| err("waiting for the GPU", e))?;
         Ok(())
     }
 }
 
-/// Tampon de transfert (mappable), avec son état de mappage.
+/// Transfer buffer (mappable), with its mapping state.
 struct Staging {
     buf: wgpu::Buffer,
     bytes: usize,
@@ -1183,11 +1183,11 @@ struct Staging {
     submission: Option<wgpu::SubmissionIndex>,
 }
 
-/// Entrée d'un traitement par blocs.
+/// Input of a chunked computation.
 pub enum FluxIn<'a> {
-    /// Tableau en mémoire de l'hôte (`elem` octets par élément).
+    /// Array in host memory (`elem` bytes per element).
     Host { ptr: *const u8, elem: usize },
-    /// Buffer déjà sur le périphérique (résultat d'un kernel précédent).
+    /// Buffer already on the device (result of a previous kernel).
     Dev { buf: &'a WgBuffer, elem: usize },
 }
 
@@ -1200,7 +1200,7 @@ impl FluxIn<'_> {
 }
 
 fn bytemuck_u32(words: &[u32]) -> &[u8] {
-    // u32 → octets (ordre natif), sans dépendance supplémentaire.
+    // u32 → bytes (native order), without an extra dependency.
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), std::mem::size_of_val(words)) }
 }
 
@@ -1218,7 +1218,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
     if (g.x < p[0]) { y[g.x] = x[g.x] + 1u; }
 }";
 
-    /// Périphérique, kernel y = x + 1 déjà lancé une fois (None : aucun GPU wgpu sur cette machine).
+    /// Device, kernel y = x + 1 already launched once (None: no wgpu GPU on this machine).
     fn warm() -> Option<(Arc<WgDevice>, Arc<WgKernel>)> {
         let info = crate::WgpuBackend.devices().ok()?.into_iter().next()?;
         let d = WgDevice::open(info.backend, info.index).unwrap();
@@ -1235,7 +1235,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
         b
     }
 
-    /// Buffer d'entrée détruit : toute soumission qui l'utilise est refusée par wgpu.
+    /// Input buffer destroyed: any submission that uses it is rejected by wgpu.
     fn destroyed(d: &WgDevice) -> WgBuffer {
         let buf = d.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -1258,7 +1258,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
             .collect())
     }
 
-    /// Ces tests partagent le périphérique (et son lot) : un à la fois.
+    /// These tests share the device (and its batch): one at a time.
     static ONE: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -1268,7 +1268,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
         let (bad, out) = (destroyed(&d), d.alloc(64).unwrap());
         bad.buf.destroy();
         assert!(d.launch(&k, &[&bad], &[&out], &[16], &[], 16).is_err());
-        // Le périphérique reste utilisable, sans erreur résiduelle.
+        // The device stays usable, with no leftover error.
         let (a, b) = (filled(&d, 4), d.alloc(64).unwrap());
         d.launch(&k, &[&a], &[&b], &[16], &[], 16).unwrap();
         assert_eq!(values(&d, &b).unwrap(), [5; 16]);
@@ -1288,7 +1288,7 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
         for _ in 0..2 {
             assert!(
                 values(&d, &out).is_err(),
-                "résultat jamais calculé, lu sans erreur"
+                "result never computed, read without error"
             );
             assert!(d.launch(&k, &[&out], &[&next], &[16], &[], 16).is_err());
         }

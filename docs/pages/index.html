@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GPUsync — kernels GPU en Python</title>
-<meta name="description" content="Écrire des kernels GPU en Python et les exécuter sur CUDA, Metal, Vulkan, DX12 et OpenCL.">
+<title>GPUsync — GPU kernels in Python</title>
+<meta name="description" content="Write GPU kernels in Python and run them on CUDA, Metal, Vulkan, DX12 and OpenCL.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
@@ -17,27 +17,27 @@
 <aside class="side" aria-label="Navigation">
 <a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
 <nav class="nav">
-<a href="index.html" aria-current="page"><span class="icon">home</span>Accueil</a>
+<a href="index.html" aria-current="page"><span class="icon">home</span>Home</a>
 <div class="nav-group">Guide</div>
 <a href="installation.html"><span class="icon">download</span>Installation</a>
-<a href="kernels.html"><span class="icon">code</span>Écrire un kernel</a>
-<a href="resultats.html"><span class="icon">database</span>Résultats et volumes</a>
-<a href="peripheriques.html"><span class="icon">developer_board</span>Périphériques</a>
-<a href="atomiques.html"><span class="icon">scatter_plot</span>Atomiques</a>
-<a href="groupes.html"><span class="icon">hub</span>Groupes de threads</a>
-<a href="fenetre.html"><span class="icon">desktop_windows</span>Fenêtre</a>
-<a href="erreurs.html"><span class="icon">bug_report</span>Erreurs et performances</a>
+<a href="kernels.html"><span class="icon">code</span>Writing a kernel</a>
+<a href="results.html"><span class="icon">database</span>Results and data</a>
+<a href="devices.html"><span class="icon">developer_board</span>Devices</a>
+<a href="atomics.html"><span class="icon">scatter_plot</span>Atomics</a>
+<a href="groups.html"><span class="icon">hub</span>Thread groups</a>
+<a href="window.html"><span class="icon">desktop_windows</span>Window</a>
+<a href="errors.html"><span class="icon">bug_report</span>Errors and performance</a>
 <div class="nav-group">API</div>
-<a href="reference.html"><span class="icon">menu_book</span>Référence</a>
+<a href="reference.html"><span class="icon">menu_book</span>Reference</a>
 </nav>
-<div class="side-foot">Licence MIT · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Code source</a></div>
+<div class="side-foot">MIT licence · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Source code</a></div>
 </aside>
 <div class="scrim"></div>
 <div class="page">
 <header class="top">
 <button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
-<h1 class="top-title">Présentation</h1>
-<button class="btn btn-plain theme-toggle" type="button" aria-label="Thème"><span class="icon">dark_mode</span></button>
+<h1 class="top-title">Overview</h1>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Theme"><span class="icon">dark_mode</span></button>
 <a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
 </header>
 <main class="content wide">
@@ -45,13 +45,13 @@
 <section class="hero">
 <div>
 <h2 class="hero-title">GPUsync</h2>
-<p class="hero-sub">Écrire des kernels GPU en Python, et les exécuter sur n'importe quel GPU.</p>
+<p class="hero-sub">Write GPU kernels in Python, and run them on any GPU.</p>
 <div class="hero-actions">
-<a class="btn btn-primary" href="installation.html"><span class="icon">download</span>Installer</a>
-<a class="btn" href="kernels.html"><span class="icon">code</span>Premier kernel</a>
+<a class="btn btn-primary" href="installation.html"><span class="icon">download</span>Install</a>
+<a class="btn" href="kernels.html"><span class="icon">code</span>First kernel</a>
 </div>
 </div>
-<div class="callout"><div class="code"><div class="code-head"><span>Python</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
+<div class="callout"><div class="code"><div class="code-head"><span>Python</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
 <span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
 
 <span class="tk-dec">@gs.kernel</span>
@@ -59,23 +59,23 @@
     <span class="tk-kw">return</span> (x - mean) / std
 
 x = np.random.rand(<span class="tk-num">1_000_000</span>).astype(np.float32)
-y = normalize(x, x.mean(), x.std())     <span class="tk-com"># calcul lancé sur le GPU</span>
-print(y[:<span class="tk-num">5</span>])                            <span class="tk-com"># attend la fin et rapatrie</span></code></pre></div></div>
+y = normalize(x, x.mean(), x.std())     <span class="tk-com"># runs on the GPU</span>
+print(y[:<span class="tk-num">5</span>])                            <span class="tk-com"># waits for the result and copies it back</span></code></pre></div></div>
 </section>
-<div class="stats"><div class="stat"><div class="stat-value">5</div><div class="stat-label">backends : CUDA, Metal, Vulkan, DX12, OpenCL</div></div><div class="stat"><div class="stat-value">× 45</div><div class="stat-label">plus rapide que NumPy : histogramme de 100 millions de valeurs (Apple M5 Pro)</div></div><div class="stat"><div class="stat-value">100 % portable</div><div class="stat-label">le même code sur chaque machine, sans SDK GPU à installer : les pilotes présents suffisent</div></div><div class="stat"><div class="stat-value">0 copie</div><div class="stat-label">sur les GPU à mémoire unifiée</div></div></div>
-<h2 class="section-title">Ce que fait GPUsync</h2>
-<p class="section-lead">Une bibliothèque Python, un cœur en Rust, aucune dépendance GPU à installer.</p>
-<div class="cards"><div class="card"><div class="card-head"><h3 class="card-title">Kernels en Python</h3><span class="badge badge-ok">Natif</span></div><div class="card-body"><p>On écrit le calcul d&#x27;une case du résultat, avec des types simples. GPUsync le traduit et l&#x27;exécute pour toutes les cases en parallèle.</p><div class="tags"><span class="tag">@gs.kernel</span><span class="tag">gs.index()</span><span class="tag">gs.f32</span><span class="tag">gs.i64</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Tous les GPU</h3><span class="badge badge-ok">Portable</span></div><div class="card-body"><p>Le même code sur une carte NVIDIA, un Mac ou un portable à GPU intégré. Le périphérique est choisi selon ce que le kernel demande.</p><div class="tags"><span class="tag">CUDA</span><span class="tag">METAL</span><span class="tag">VULKAN</span><span class="tag">DX12</span><span class="tag">OPENCL</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Sans limite de taille</h3><span class="badge badge-ok">Out-of-core</span></div><div class="card-body"><p>Entrées et sorties plus grandes que la mémoire du GPU, ou que la mémoire centrale : le calcul est découpé et les transferts recouverts.</p><div class="tags"><span class="tag">np.memmap</span><span class="tag">out=</span><span class="tag">.stream()</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Asynchrone et interop</h3><span class="badge badge-ok">Moderne</span></div><div class="card-body"><p>Les résultats restent sur le GPU jusqu&#x27;à leur lecture. await, Jupyter, plusieurs threads, échange sans copie par DLPack.</p><div class="tags"><span class="tag">ASYNCIO</span><span class="tag">DLPACK</span><span class="tag">PYTORCH</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Groupes et atomiques</h3><span class="badge badge-ok">Avancé</span></div><div class="card-body"><p>Mémoire partagée, barrières vérifiées à la compilation, écritures atomiques, Tensor Cores pour les produits de matrices d&#x27;octets.</p><div class="tags"><span class="tag">gs.shared</span><span class="tag">gs.barrier</span><span class="tag">gs.atomic_add</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Fenêtre native</h3><span class="badge badge-ok">Temps réel</span></div><div class="card-body"><p>Une image calculée sur le GPU passe directement à l&#x27;écran, sans repasser par la mémoire centrale.</p><div class="tags"><span class="tag">gs.Window</span><span class="tag">ZÉRO COPIE</span></div></div></div></div>
+<div class="stats"><div class="stat"><div class="stat-value">5</div><div class="stat-label">backends: CUDA, Metal, Vulkan, DX12, OpenCL</div></div><div class="stat"><div class="stat-value">× 45</div><div class="stat-label">faster than NumPy: histogram of 100 million values (Apple M5 Pro)</div></div><div class="stat"><div class="stat-value">100 % portable</div><div class="stat-label">the same code on every machine, no GPU SDK to install: the drivers already there are enough</div></div><div class="stat"><div class="stat-value">0 copies</div><div class="stat-label">on unified-memory GPUs</div></div></div>
+<h2 class="section-title">What GPUsync does</h2>
+<p class="section-lead">A Python library with a Rust core, and no GPU dependency to install.</p>
+<div class="cards"><div class="card"><div class="card-head"><h3 class="card-title">Kernels in Python</h3><span class="badge badge-ok">Native</span></div><div class="card-body"><p>You write how one cell of the result is computed, with simple types. GPUsync translates it and runs it for every cell in parallel.</p><div class="tags"><span class="tag">@gs.kernel</span><span class="tag">gs.index()</span><span class="tag">gs.f32</span><span class="tag">gs.i64</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Every GPU</h3><span class="badge badge-ok">Portable</span></div><div class="card-body"><p>The same code on an NVIDIA card, a Mac or a laptop with an integrated GPU. The device is chosen from what the kernel needs.</p><div class="tags"><span class="tag">CUDA</span><span class="tag">METAL</span><span class="tag">VULKAN</span><span class="tag">DX12</span><span class="tag">OPENCL</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">No size limit</h3><span class="badge badge-ok">Out-of-core</span></div><div class="card-body"><p>Inputs and outputs larger than GPU memory, or than main memory: the computation is split and transfers are overlapped.</p><div class="tags"><span class="tag">np.memmap</span><span class="tag">out=</span><span class="tag">.stream()</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Async and interop</h3><span class="badge badge-ok">Modern</span></div><div class="card-body"><p>Results stay on the GPU until they are read. await, Jupyter, several threads, zero-copy exchange through DLPack.</p><div class="tags"><span class="tag">ASYNCIO</span><span class="tag">DLPACK</span><span class="tag">PYTORCH</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Groups and atomics</h3><span class="badge badge-ok">Advanced</span></div><div class="card-body"><p>Shared memory, barriers checked at compile time, atomic writes, Tensor Cores for byte matrix products.</p><div class="tags"><span class="tag">gs.shared</span><span class="tag">gs.barrier</span><span class="tag">gs.atomic_add</span></div></div></div><div class="card"><div class="card-head"><h3 class="card-title">Native window</h3><span class="badge badge-ok">Real time</span></div><div class="card-body"><p>An image computed on the GPU goes straight to the screen, without going through main memory.</p><div class="tags"><span class="tag">gs.Window</span><span class="tag">ZERO COPY</span></div></div></div></div>
 <h2 class="section-title">Documentation</h2>
-<p class="section-lead">Chaque exemple écrit en Python est exécuté par les tests : marqué <span class="badge badge-ok">Vérifié</span>, il fonctionne tel quel.</p>
-<div class="cards"><a class="card" href="installation.html"><div class="card-head"><h3 class="card-title">Installation</h3><span class="badge badge-ok">01</span></div><div class="card-body"><p>Compiler, vérifier les GPU détectés, CUDA, variables d&#x27;environnement.</p></div></a><a class="card" href="kernels.html"><div class="card-head"><h3 class="card-title">Écrire un kernel</h3><span class="badge badge-ok">02</span></div><div class="card-body"><p>Les trois formes de kernel, les types, ce qu&#x27;on peut écrire dedans.</p></div></a><a class="card" href="resultats.html"><div class="card-head"><h3 class="card-title">Résultats et volumes</h3><span class="badge badge-ok">03</span></div><div class="card-body"><p>Gs.Array, chaînage, await, out=, fichiers, flux, plusieurs kernels en une soumission.</p></div></a><a class="card" href="peripheriques.html"><div class="card-head"><h3 class="card-title">Périphériques</h3><span class="badge badge-ok">04</span></div><div class="card-body"><p>Choix automatique, choix manuel, repli quand une opération manque, mémoire.</p></div></a><a class="card" href="atomiques.html"><div class="card-head"><h3 class="card-title">Atomiques</h3><span class="badge badge-ok">05</span></div><div class="card-body"><p>Histogrammes, dispersion : un thread par entrée, écritures gs.atomic_*.</p></div></a><a class="card" href="groupes.html"><div class="card-head"><h3 class="card-title">Groupes de threads</h3><span class="badge badge-ok">06</span></div><div class="card-body"><p>Mémoire partagée, barrières, plusieurs cases par thread, produit de matrices d&#x27;octets.</p></div></a><a class="card" href="fenetre.html"><div class="card-head"><h3 class="card-title">Fenêtre</h3><span class="badge badge-ok">07</span></div><div class="card-body"><p>Gs.Window : afficher un résultat du GPU sans repasser par la mémoire centrale.</p></div></a><a class="card" href="erreurs.html"><div class="card-head"><h3 class="card-title">Erreurs et performances</h3><span class="badge badge-ok">08</span></div><div class="card-body"><p>Exceptions, code généré, pièges, limites connues.</p></div></a><a class="card" href="reference.html"><div class="card-head"><h3 class="card-title">Référence</h3><span class="badge badge-ok">09</span></div><div class="card-body"><p>Chaque nom public, en une page.</p></div></a></div>
-<h2 class="section-title">Moteur graphique</h2>
-<p class="section-lead">Rendu 2D et 3D, fluides, atmosphère et météo : le paquet séparé <code>gpusync-gfx</code>, écrit avec GPUsync.</p>
-<div class="cards"><a class="card" href="https://github.com/GalTechDev/GPUsync/tree/new-rust/gfx"><div class="card-head"><h3 class="card-title">gpusync-gfx</h3><span class="badge badge-ok">Optionnel</span></div><div class="card-body"><p>Installé en plus de la bibliothèque, il s&#x27;importe sous le nom gpusync.gfx. Sans lui, GPUsync fonctionne normalement.</p><div class="tags"><span class="tag">pip install gpusync-gfx</span><span class="tag">import gpusync.gfx</span></div></div></a></div>
+<p class="section-lead">Every Python example is run by the tests: marked <span class="badge badge-ok">Verified</span>, it works as written.</p>
+<div class="cards"><a class="card" href="installation.html"><div class="card-head"><h3 class="card-title">Installation</h3><span class="badge badge-ok">01</span></div><div class="card-body"><p>Build, check the detected GPUs, CUDA, environment variables.</p></div></a><a class="card" href="kernels.html"><div class="card-head"><h3 class="card-title">Writing a kernel</h3><span class="badge badge-ok">02</span></div><div class="card-body"><p>The three kinds of kernel, types, what you can write inside one.</p></div></a><a class="card" href="results.html"><div class="card-head"><h3 class="card-title">Results and data</h3><span class="badge badge-ok">03</span></div><div class="card-body"><p>Gs.Array, chaining, await, out=, files, streams, several kernels in one submission.</p></div></a><a class="card" href="devices.html"><div class="card-head"><h3 class="card-title">Devices</h3><span class="badge badge-ok">04</span></div><div class="card-body"><p>Automatic choice, manual choice, fallback when an operation is missing, memory.</p></div></a><a class="card" href="atomics.html"><div class="card-head"><h3 class="card-title">Atomics</h3><span class="badge badge-ok">05</span></div><div class="card-body"><p>Histograms, scattering: one thread per input, gs.atomic_* writes.</p></div></a><a class="card" href="groups.html"><div class="card-head"><h3 class="card-title">Thread groups</h3><span class="badge badge-ok">06</span></div><div class="card-body"><p>Shared memory, barriers, several cells per thread, byte matrix products.</p></div></a><a class="card" href="window.html"><div class="card-head"><h3 class="card-title">Window</h3><span class="badge badge-ok">07</span></div><div class="card-body"><p>Gs.Window: show a GPU result without going through main memory.</p></div></a><a class="card" href="errors.html"><div class="card-head"><h3 class="card-title">Errors and performance</h3><span class="badge badge-ok">08</span></div><div class="card-body"><p>Exceptions, generated code, pitfalls, known limits.</p></div></a><a class="card" href="reference.html"><div class="card-head"><h3 class="card-title">Reference</h3><span class="badge badge-ok">09</span></div><div class="card-body"><p>Every public name, on one page.</p></div></a></div>
+<h2 class="section-title">Graphics engine</h2>
+<p class="section-lead">2D and 3D rendering, fluids, atmosphere and weather: the separate <code>gpusync-gfx</code> package, written with GPUsync.</p>
+<div class="cards"><a class="card" href="https://github.com/GalTechDev/GPUsync/tree/new-rust/gfx"><div class="card-head"><h3 class="card-title">gpusync-gfx</h3><span class="badge badge-ok">Optional</span></div><div class="card-body"><p>Installed on top of the library, it is imported as gpusync.gfx. Without it, GPUsync works normally.</p><div class="tags"><span class="tag">pip install gpusync-gfx</span><span class="tag">import gpusync.gfx</span></div></div></a></div>
 </div>
 
 </main>
-<footer class="footer"><span>GPUsync · kernels GPU en Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Généré depuis docs/ par tools/build_pages.py</span></footer>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
 </div>
 </body>
 </html>

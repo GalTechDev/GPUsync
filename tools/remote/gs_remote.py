@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-gs-remote — exécuter des commandes sur les machines de test de GPUsync.
+gs-remote — run commands on the GPUsync test machines.
 
-Trois rôles, un seul fichier (Python >= 3.9, bibliothèque standard uniquement) :
+Three roles, a single file (Python >= 3.9, standard library only):
 
-  hub    sur la machine de dev (le Mac). Il écoute ; les agents viennent y chercher leurs tâches.
-  agent  sur chaque machine de test. Il N'ÉCOUTE RIEN : il se connecte au hub (connexion sortante),
-         se reconnecte tout seul, et n'exécute que des tâches signées par le hub.
-  CLI    sur la machine de dev : envoie les tâches au hub et affiche les résultats.
+  hub    on the dev machine (the Mac). It listens; agents come to it to fetch their tasks.
+  agent  on each test machine. It LISTENS TO NOTHING: it connects to the hub (outgoing connection),
+         reconnects by itself, and only runs tasks signed by the hub.
+  CLI    on the dev machine: sends tasks to the hub and shows the results.
 
-    python3 gs_remote.py hub                                   # sur le Mac, à laisser tourner
-    python3 gs_remote.py agents add win                        # affiche la commande à lancer sur le PC
-    py gs_remote.py agent --hub http://192.168.1.20:8765 --name win --token ...   # sur le PC
+    python3 gs_remote.py hub                                   # on the Mac, left running
+    python3 gs_remote.py agents add win                        # prints the command to run on the PC
+    py gs_remote.py agent --hub http://192.168.1.20:8765 --name win --token ...   # on the PC
     python3 gs_remote.py info all
     python3 gs_remote.py run all -- @python -c "import platform; print(platform.platform())"
 
-Sécurité : chaque requête d'un agent est signée (HMAC-SHA256) avec son jeton, et chaque réponse du
-hub est signée avec le même jeton et liée au nonce de la requête. Un agent n'exécute donc rien qui ne
-vienne du vrai hub, et une ancienne tâche ne peut pas être rejouée. L'API de contrôle (CLI) n'est
-accessible que depuis la machine du hub. Le trafic n'est pas chiffré : réseau local de confiance uniquement.
+Security: every agent request is signed (HMAC-SHA256) with its token, and every hub response
+is signed with the same token and bound to the request's nonce. An agent therefore runs nothing that
+does not come from the real hub, and an old task cannot be replayed. The control API (CLI) is
+only reachable from the hub's machine. Traffic is not encrypted: trusted local network only.
 """
 
 from __future__ import annotations
@@ -52,19 +52,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-TOOL_VERSION = 7                # à incrémenter à chaque changement du protocole ou de l'agent
-EXIT_RESTART = 75                 # code de sortie du worker d'agent : « redémarre-moi » (après mise à jour)
+TOOL_VERSION = 7                # to increment at every change of the protocol or of the agent
+EXIT_RESTART = 75                 # exit code of the agent worker: "restart me" (after an update)
 HOME = Path(os.environ.get("GS_REMOTE_HOME", Path.home() / ".gpusync-remote"))
 HUB_CONFIG = HOME / "hub.json"
 AGENT_CONFIG = HOME / "agent.json"
 DEFAULT_PORT = 8765
-CTL = "@ctl"                      # identité de la CLI auprès du hub
-POLL_WAIT_S = 25                  # long-polling : durée max d'attente d'une tâche
-ONLINE_TIMEOUT_S = 45             # un agent silencieux depuis plus longtemps est « hors ligne »
-HEARTBEAT_S = 5                   # un agent qui exécute une tâche donne signe de vie au moins toutes les 5 s
-LOST_GRACE_S = 600                # CLI : délai d'attente d'un agent injoignable avant d'abandonner une tâche
-ORPHAN_S = 60                     # tâche que plus aucune CLI ne suit depuis 60 s → arrêtée (CLI tuée, terminal fermé)
-UNKILLABLE_S = 15                 # processus toujours vivant 15 s après l'arrêt forcé → l'agent l'abandonne
+CTL = "@ctl"                      # identity of the CLI with the hub
+POLL_WAIT_S = 25                  # long-polling: maximum wait for a task
+ONLINE_TIMEOUT_S = 45             # an agent silent for longer is "offline"
+HEARTBEAT_S = 5                   # an agent running a task shows signs of life at least every 5 s
+LOST_GRACE_S = 600                # CLI: wait for an unreachable agent before giving up a task
+ORPHAN_S = 60                     # task no longer followed by any CLI for 60 s → stopped (CLI killed, terminal closed)
+UNKILLABLE_S = 15                 # process still alive 15 s after the forced stop → the agent gives up on it
 MAX_CLOCK_SKEW_S = 300
 MAX_BODY = 2 * 1024 ** 3
 MAX_GET_FILE = 512 * 1024 ** 2
@@ -128,32 +128,32 @@ def sign_response(token, nonce, status: int, body: bytes) -> str:
     return _mac(token, "resp", nonce, str(status), sha256_hex(body))
 
 
-def check_name(name: str, what: str = "nom") -> str:
+def check_name(name: str, what: str = "name") -> str:
     if not NAME_RE.match(name or ""):
-        raise HttpError(400, f"{what} invalide : {name!r} (lettres, chiffres, - et _ uniquement)")
+        raise HttpError(400, f"invalid {what}: {name!r} (letters, digits, - and _ only)")
     return name
 
 
 def safe_rel_path(p: str) -> str:
-    """Chemin relatif normalisé ; refuse les chemins absolus, `..`, lettres de lecteur."""
+    """Normalized relative path; rejects absolute paths, `..`, drive letters."""
     if not isinstance(p, str) or not p:
         raise HttpError(400, "chemin vide")
     p = p.replace("\\", "/")
     if p.startswith("/") or ":" in p or "\x00" in p:
-        raise HttpError(400, f"chemin refusé : {p!r}")
+        raise HttpError(400, f"path rejected: {p!r}")
     parts = [x for x in p.split("/") if x not in ("", ".")]
     if not parts or ".." in parts:
-        raise HttpError(400, f"chemin refusé : {p!r}")
+        raise HttpError(400, f"path rejected: {p!r}")
     return "/".join(parts)
 
 
 def resolve_inside(base: Path, rel: str) -> Path:
-    """`base/rel`, en refusant qu'il sorte de `base` (y compris via un lien symbolique)."""
+    """`base/rel`, refusing that it leaves `base` (including through a symbolic link)."""
     target = base / safe_rel_path(rel)
     try:
         target.resolve().relative_to(base.resolve())
     except ValueError:
-        raise HttpError(400, f"chemin refusé (sort du workspace) : {rel!r}") from None
+        raise HttpError(400, f"path rejected (leaves the workspace): {rel!r}") from None
     return target
 
 
@@ -180,7 +180,7 @@ def local_ips() -> list[str]:
             ips.add(info[4][0])
     except OSError:
         pass
-    try:  # interface par défaut (connect UDP : aucun paquet envoyé)
+    try:  # default interface (UDP connect: no packet sent)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))
             ips.add(s.getsockname()[0])
@@ -190,7 +190,7 @@ def local_ips() -> list[str]:
 
 
 class SignedClient:
-    """Client HTTP qui signe ses requêtes et n'accepte que des réponses signées par le hub."""
+    """HTTP client that signs its requests and only accepts responses signed by the hub."""
 
     def __init__(self, base_url: str, who: str, token: str):
         self.base, self.who, self.token = base_url.rstrip("/"), who, token
@@ -218,10 +218,10 @@ class SignedClient:
                 msg = json.loads(data).get("error", "")
             except ValueError:
                 msg = data[:200].decode("utf-8", "replace")
-            suffix = "" if authentic else " [réponse non authentifiée : mauvais jeton, ou ce n'est pas le bon hub]"
+            suffix = "" if authentic else " [unauthenticated response: wrong token, or this is not the right hub]"
             raise RemoteError(f"HTTP {status} — {msg}{suffix}")
         if not authentic:
-            raise RemoteError("réponse NON AUTHENTIFIÉE : ce serveur n'est pas le hub attendu (ou le jeton est faux). Rien n'a été exécuté.")
+            raise RemoteError("UNAUTHENTICATED response: this server is not the expected hub (or the token is wrong). Nothing was run.")
         return data if raw else json.loads(data)
 
 
@@ -243,8 +243,8 @@ class HubJob:
         self.started: float | None = None
         self.ended: float | None = None
         self.kill_requested = False
-        self.exec_s: float | None = None  # durée mesurée sur la machine de test
-        self.last_watch = time.time()  # dernière fois qu'une CLI a lu la sortie de cette tâche
+        self.exec_s: float | None = None  # duration measured on the test machine
+        self.last_watch = time.time()  # last time a CLI read this task's output
         self.result: bytes | None = None
         self.log_path = hub.jobs_dir / f"{self.id}.log"
         self.log_path.write_bytes(b"")
@@ -252,7 +252,7 @@ class HubJob:
     def describe(self, hub: "Hub") -> dict:
         status = self.status
         if status == "running" and time.time() - hub.agents[self.agent].last_seen > ONLINE_TIMEOUT_S:
-            status = "lost"  # l'agent ne donne plus signe de vie
+            status = "lost"  # the agent no longer shows signs of life
         ref = self.started or self.created
         return {"id": self.id, "agent": self.agent, "type": self.spec["type"], "status": status,
                 "exit_code": self.exit_code, "duration_s": round((self.ended or time.time()) - ref, 3),
@@ -280,7 +280,7 @@ class Hub:
         self.jobs: dict[str, HubJob] = {}
         self.nonces: dict[str, float] = {}
 
-    # --- configuration (relue à chaque requête : `agents add` n'exige pas de redémarrer) ---
+    # --- configuration (read again at every request: `agents add` needs no restart) ---
 
     def config(self) -> dict:
         return read_json(HUB_CONFIG, {})
@@ -297,7 +297,7 @@ class Hub:
             st = self.agents[name] = AgentState(name)
         return st
 
-    # --- contrôle d'accès ---
+    # --- access control ---
 
     def ip_allowed(self, addr: str) -> bool:
         ip = ipaddress.ip_address(addr)
@@ -317,22 +317,22 @@ class Hub:
     def verify(self, token: str, who: str, method: str, path: str, headers, body: bytes) -> None:
         ts, nonce, sig = headers.get("X-GS-Time"), headers.get("X-GS-Nonce"), headers.get("X-GS-Sig")
         if not (ts and nonce and sig):
-            raise HttpError(401, "requête non signée")
+            raise HttpError(401, "unsigned request")
         try:
             skew = abs(time.time() - float(ts))
         except ValueError:
-            raise HttpError(401, "horodatage invalide") from None
+            raise HttpError(401, "invalid timestamp") from None
         if skew > MAX_CLOCK_SKEW_S:
-            raise HttpError(401, f"horloges désynchronisées ({skew:.0f} s d'écart)")
+            raise HttpError(401, f"clocks out of sync ({skew:.0f} s apart)")
         if not hmac.compare_digest(sign_request(token, who, method, path, ts, nonce, body), sig):
-            raise HttpError(401, "signature invalide (mauvais jeton ?)")
+            raise HttpError(401, "invalid signature (wrong token?)")
         now = time.time()
         with self.cond:
             for n, t in list(self.nonces.items()):
                 if now - t > 2 * MAX_CLOCK_SKEW_S:
                     del self.nonces[n]
             if nonce in self.nonces:
-                raise HttpError(401, "requête rejouée")
+                raise HttpError(401, "replayed request")
             self.nonces[nonce] = now
 
     # --- API agents ---
@@ -340,20 +340,20 @@ class Hub:
     def job_of(self, agent: str, job_id: str) -> HubJob:
         job = self.jobs.get(job_id)
         if job is None or job.agent != agent:
-            raise HttpError(404, "tâche inconnue")
+            raise HttpError(404, "unknown task")
         return job
 
     def a_hello(self, agent: str, req: dict, address: str) -> dict:
         with self.cond:
             st = self.agent(agent)
             st.info, st.last_seen, st.address = req.get("info") or {}, time.time(), address
-            for job in self.jobs.values():  # l'agent a redémarré : ses tâches en cours sont perdues
+            for job in self.jobs.values():  # the agent restarted: its running tasks are lost
                 if job.agent == agent and job.status == "running" and job.spec["type"] != "update":
                     job.status, job.ended = "lost", time.time()
             st.current = None
         version = st.info.get("tool_version")
         warn = "" if version == TOOL_VERSION else f" — version {version} ≠ hub {TOOL_VERSION} : gs_remote.py update {agent}"
-        log(f"agent {agent} connecté depuis {address}{warn}")
+        log(f"agent {agent} connected from {address}{warn}")
         return {"ok": True}
 
     def a_poll(self, agent: str) -> dict:
@@ -373,12 +373,12 @@ class Hub:
     def a_files(self, agent: str, req: dict) -> bytes:
         job = self.job_of(agent, req.get("job", ""))
         if job.src is None:
-            raise HttpError(400, "cette tâche n'a pas de fichiers")
+            raise HttpError(400, "this task has no files")
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for rel in req.get("paths") or []:
-                if rel not in job.manifest:  # l'agent ne peut demander QUE les fichiers de la tâche
-                    raise HttpError(403, f"fichier hors de la tâche : {rel!r}")
+                if rel not in job.manifest:  # the agent may ONLY request the task's files
+                    raise HttpError(403, f"file outside the task: {rel!r}")
                 zf.write(resolve_inside(job.src, rel), rel)
         self.agent(agent).last_seen = time.time()
         return buf.getvalue()
@@ -392,7 +392,7 @@ class Hub:
         self.agent(agent).last_seen = time.time()
         if not job.kill_requested and time.time() - job.last_watch > self.orphan_s:
             job.kill_requested = True
-            log(f"tâche {job.id} ({agent}) : plus suivie par aucune CLI depuis {self.orphan_s:.0f} s → arrêt")
+            log(f"task {job.id} ({agent}): no longer followed by any CLI for {self.orphan_s:.0f} s → stopping")
         return {"kill": job.kill_requested}
 
     def a_upload(self, agent: str, job_id: str, body: bytes) -> dict:
@@ -403,7 +403,7 @@ class Hub:
     def a_done(self, agent: str, req: dict) -> dict:
         job = self.job_of(agent, req.get("job", ""))
         tail = base64.b64decode(req.get("data_b64") or "")
-        if tail:  # écrit AVANT de passer au statut final : un statut final implique un log complet
+        if tail:  # written BEFORE switching to the final status: a final status implies a complete log
             with open(job.log_path, "ab") as f:
                 f.write(tail)
         with self.cond:
@@ -417,7 +417,7 @@ class Hub:
                 st.info = req["info"]
         return {"ok": True}
 
-    # --- API contrôle (CLI, machine locale uniquement) ---
+    # --- control API (CLI, local machine only) ---
 
     def c_agents(self) -> dict:
         now = time.time()
@@ -440,13 +440,13 @@ class Hub:
     def c_submit(self, req: dict) -> dict:
         agent = check_name(req.get("agent", ""), "agent")
         if agent not in (self.config().get("agents") or {}):
-            raise HttpError(404, f"agent inconnu : {agent}")
+            raise HttpError(404, f"unknown agent: {agent}")
         st = self.agents.get(agent)
         if not (st and time.time() - st.last_seen < ONLINE_TIMEOUT_S):
-            raise HttpError(409, f"l'agent {agent} est hors ligne")
+            raise HttpError(409, f"agent {agent} is offline")
         spec = req.get("spec") or {}
         if spec.get("type") not in ("run", "sync", "get", "reset", "update"):
-            raise HttpError(400, "type de tâche invalide")
+            raise HttpError(400, "invalid task type")
         check_name(spec.get("ws", ""), "workspace")
         src = Path(req["src"]) if req.get("src") else None
         job = HubJob(self, agent, spec, src)
@@ -459,15 +459,15 @@ class Hub:
     def c_job(self, job_id: str, offset: int) -> dict:
         job = self.jobs.get(job_id)
         if job is None:
-            raise HttpError(404, f"tâche inconnue : {job_id}")
+            raise HttpError(404, f"unknown task: {job_id}")
         job.last_watch = time.time()
-        d = job.describe(self)  # lu AVANT le log : si terminé, le log est complet
+        d = job.describe(self)  # read BEFORE the log: if finished, the log is complete
         with open(job.log_path, "rb") as f:
             f.seek(offset)
             data = f.read(LOG_CHUNK_MAX)
         d.update({"next_offset": offset + len(data), "data_b64": base64.b64encode(data).decode()})
         if d["status"] not in ("queued", "running") and len(data) == LOG_CHUNK_MAX:
-            d["status"] = "running"  # il reste de la sortie à lire
+            d["status"] = "running"  # there is output left to read
         return d
 
     def c_jobs(self) -> dict:
@@ -477,7 +477,7 @@ class Hub:
     def c_kill(self, job_id: str) -> dict:
         job = self.jobs.get(job_id)
         if job is None:
-            raise HttpError(404, f"tâche inconnue : {job_id}")
+            raise HttpError(404, f"unknown task: {job_id}")
         with self.cond:
             st = self.agent(job.agent)
             if job.status == "queued":
@@ -492,7 +492,7 @@ class Hub:
     def c_result(self, job_id: str) -> bytes:
         job = self.jobs.get(job_id)
         if job is None or job.result is None:
-            raise HttpError(404, "aucun fichier pour cette tâche")
+            raise HttpError(404, "no file for this task")
         return job.result
 
 
@@ -502,7 +502,7 @@ def make_hub_handler(hub: Hub):
         server_version = "gs-remote-hub/2"
 
         def log_message(self, fmt, *args):
-            pass  # le hub journalise lui-même les événements utiles
+            pass  # the hub logs the useful events itself
 
         def _send(self, status: int, payload=None, raw: bytes | None = None, token=None, nonce=""):
             body = raw if raw is not None else json.dumps(payload or {}, ensure_ascii=False).encode()
@@ -520,23 +520,23 @@ def make_hub_handler(hub: Hub):
             addr = self.client_address[0]
             try:
                 if not hub.ip_allowed(addr):
-                    hint = f" — pour l'autoriser : gs_remote.py hub --allow {addr}/32"
+                    hint = f" — to allow it: gs_remote.py hub --allow {addr}/32"
                     ip = ipaddress.ip_address(addr)
                     if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"):
                         hint += " (adresse Tailscale / CGNAT)"
-                    log(f"refusé {addr} : adresse IP non autorisée{hint}")
-                    self._send(403, {"error": "adresse IP non autorisée"})
+                    log(f"rejected {addr}: IP address not allowed{hint}")
+                    self._send(403, {"error": "IP address not allowed"})
                     return
                 length = int(self.headers.get("Content-Length") or 0)
                 if length > MAX_BODY:
-                    raise HttpError(413, "requête trop grosse")
+                    raise HttpError(413, "request too large")
                 body = self.rfile.read(length) if length else b""
                 who = self.headers.get("X-GS-Who", "")
                 if who == CTL and not hub.is_loopback(addr):
-                    raise HttpError(403, "l'API de contrôle n'est accessible que depuis la machine du hub")
+                    raise HttpError(403, "the control API is only reachable from the hub's machine")
                 token = hub.token_for(who) if who == CTL or NAME_RE.match(who) else None
                 if not token:
-                    raise HttpError(401, f"identité inconnue : {who!r}")
+                    raise HttpError(401, f"unknown identity: {who!r}")
                 hub.verify(token, who, method, self.path, self.headers, body)
                 result = self._route(method, who, body, addr)
                 if isinstance(result, bytes):
@@ -545,7 +545,7 @@ def make_hub_handler(hub: Hub):
                     self._send(200, result, token=token, nonce=nonce)
             except HttpError as e:
                 if e.status in (401, 403):
-                    log(f"refusé {addr} : {e.message}")
+                    log(f"rejected {addr}: {e.message}")
                 self._send(e.status, {"error": e.message}, token=token, nonce=nonce)
             except Exception as e:
                 self._send(500, {"error": f"{type(e).__name__}: {e}"}, token=token, nonce=nonce)
@@ -581,7 +581,7 @@ def make_hub_handler(hub: Hub):
                     return hub.a_upload(who, q.get("job", [""])[0], body)
                 if method == "POST" and parts == ["a", "done"]:
                     return hub.a_done(who, js())
-            raise HttpError(404, f"route inconnue : {method} {url.path}")
+            raise HttpError(404, f"unknown route: {method} {url.path}")
 
         def do_GET(self):
             self._handle("GET")
@@ -611,14 +611,14 @@ def cmd_hub(args) -> int:
     hub = Hub(allow, args.orphan_timeout)
     httpd = ThreadingHTTPServer((args.bind, args.port), make_hub_handler(hub))
     httpd.daemon_threads = True
-    print(f"gs-remote hub v{TOOL_VERSION} — {socket.gethostname()}, écoute sur {args.bind}:{args.port}")
-    print(f"  agents autorisés : {', '.join(args.allow) if args.allow else 'IP privées et locales'}")
-    print(f"  agents enregistrés : {', '.join(cfg['agents']) or 'aucun'} (ajout : gs_remote.py agents add <nom>)")
-    print(f"  adresses de ce hub : {', '.join(local_ips()) or '?'}\n", flush=True)
+    print(f"gs-remote hub v{TOOL_VERSION} — {socket.gethostname()}, listening on {args.bind}:{args.port}")
+    print(f"  allowed agents: {', '.join(args.allow) if args.allow else 'private and local IPs'}")
+    print(f"  registered agents: {', '.join(cfg['agents']) or 'none'} (add: gs_remote.py agents add <name>)")
+    print(f"  addresses of this hub: {', '.join(local_ips()) or '?'}\n", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nHub arrêté.")
+        print("\nHub stopped.")
     return 0
 
 
@@ -627,33 +627,33 @@ def cmd_agents(args) -> int:
     agents = cfg["agents"]
     port = cfg.get("port", DEFAULT_PORT)
     if args.action == "add":
-        name = args.name or sys.exit("Usage : gs_remote.py agents add <nom>")
+        name = args.name or sys.exit("Usage: gs_remote.py agents add <name>")
         try:
-            check_name(name, "nom d'agent")
+            check_name(name, "agent name")
         except HttpError as e:
             sys.exit(e.message)
         if name in agents and not args.force:
-            sys.exit(f"L'agent {name} existe déjà (--force pour régénérer son jeton).")
+            sys.exit(f"Agent {name} already exists (--force to regenerate its token).")
         token = secrets.token_urlsafe(32)
         agents[name] = {"token": token, "created": time.strftime("%Y-%m-%d %H:%M")}
         write_private_json(HUB_CONFIG, cfg)
-        ip = (local_ips() or ["<IP-du-Mac>"])[0]
-        print(f"Agent {name} enregistré. Sur la machine de test, lance (une seule fois avec ces options) :\n")
+        ip = (local_ips() or ["<Mac-IP>"])[0]
+        print(f"Agent {name} registered. On the test machine, run (once with these options):\n")
         print(f"  Windows : py gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
         print(f"  macOS   : python3 gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
-        print(f"  (agent sur la machine du hub : --hub http://127.0.0.1:{port})\n")
-        print("Ensuite, `gs_remote.py agent` suffit : la configuration est mémorisée sur la machine de test.")
-        print("Le jeton est secret : il permet d'exécuter du code via ce hub.")
+        print(f"  (agent on the hub's machine: --hub http://127.0.0.1:{port})\n")
+        print("Afterwards, `gs_remote.py agent` is enough: the configuration is remembered on the test machine.")
+        print("The token is secret: it allows running code through this hub.")
     elif args.action == "rm":
         if agents.pop(args.name or "", None) is None:
-            sys.exit(f"Agent inconnu : {args.name}")
+            sys.exit(f"Unknown agent: {args.name}")
         write_private_json(HUB_CONFIG, cfg)
-        print(f"Agent {args.name} supprimé : son jeton n'est plus accepté.")
+        print(f"Agent {args.name} removed: its token is no longer accepted.")
     else:
         if not agents:
-            print("Aucun agent enregistré.")
+            print("No agent registered.")
         for n, a in agents.items():
-            print(f"  {n:<12} créé le {a.get('created', '?')}")
+            print(f"  {n:<12} created on {a.get('created', '?')}")
     return 0
 
 
@@ -674,7 +674,7 @@ _STATIC_INFO: dict | None = None
 
 
 def machine_info(ws_root: Path) -> dict:
-    """Infos matérielles (calculées une fois : certaines sondes prennent ~1 s) + workspaces actuels."""
+    """Hardware info (computed once: some probes take ~1 s) + current workspaces."""
     global _STATIC_INFO
     if _STATIC_INFO is None:
         _STATIC_INFO = _probe_machine()
@@ -695,7 +695,7 @@ def _probe_machine() -> dict:
         try:
             for d in json.loads(sp or "{}").get("SPDisplaysDataType", []):
                 cores = d.get("sppci_cores")
-                gpus.append(d.get("sppci_model", "?") + (f" ({cores} cœurs)" if cores else ""))
+                gpus.append(d.get("sppci_model", "?") + (f" ({cores} cores)" if cores else ""))
         except ValueError:
             pass
     else:
@@ -717,19 +717,19 @@ def _probe_machine() -> dict:
 
 
 class AgentJob:
-    """Exécute une tâche reçue du hub et renvoie sa sortie au fil de l'eau."""
+    """Runs a task received from the hub and sends its output back as it goes."""
 
     def __init__(self, api: SignedClient, spec: dict, ws_root: Path):
         self.api, self.spec, self.ws_root = api, spec, ws_root
         self.id = spec["id"]
         self.ws = ws_root / check_name(spec["ws"], "workspace")
-        self.final_text = ""  # fin de sortie, envoyée avec /a/done (économise un aller-retour)
-        self.exec_s: float | None = None  # durée de la commande, chronométrée SUR la machine de test
+        self.final_text = ""  # end of output, sent with /a/done (saves a round trip)
+        self.exec_s: float | None = None  # duration of the command, timed ON the test machine
 
     def _call(self, *args, **kwargs):
-        """Appel au hub pendant une tâche : délai court par tentative, nouvelles tentatives pendant
-        ~5 min. Une coupure réseau ne doit pas faire abandonner une tâche longue (constaté : coupures
-        de plus de 45 s entre deux continents via Tailscale)."""
+        """Call to the hub during a task: short timeout per attempt, new attempts for
+        ~5 min. A network outage must not make a long task give up (seen: outages
+        of more than 45 s between two continents through Tailscale)."""
         kwargs.setdefault("timeout", 20)
         deadline = time.time() + 300
         while True:
@@ -741,7 +741,7 @@ class AgentJob:
                 time.sleep(5)
 
     def say(self, text: str) -> bool:
-        """Envoie de la sortie au hub. Renvoie True si le hub demande l'arrêt."""
+        """Sends output to the hub. Returns True if the hub asks to stop."""
         r = self._call("POST", "/a/output", {"job": self.id, "data_b64": base64.b64encode(text.encode()).decode()})
         return bool(r.get("kill"))
 
@@ -751,7 +751,7 @@ class AgentJob:
                                        "info": machine_info(self.ws_root)}, timeout=120)
 
     def execute(self) -> bool:
-        """Exécute la tâche. Renvoie True si l'agent doit redémarrer (mise à jour installée)."""
+        """Runs the task. Returns True if the agent must restart (update installed)."""
         kind = self.spec["type"]
         try:
             if kind == "update":
@@ -769,14 +769,14 @@ class AgentJob:
             elif kind == "get":
                 target = resolve_inside(self.ws, self.spec["path"])
                 if not target.is_file():
-                    raise HttpError(404, f"fichier introuvable : {self.spec['path']}")
+                    raise HttpError(404, f"file not found: {self.spec['path']}")
                 if target.stat().st_size > MAX_GET_FILE:
-                    raise HttpError(413, "fichier trop gros")
+                    raise HttpError(413, "file too large")
                 self._call("POST", f"/a/upload?job={self.id}", body=target.read_bytes(), timeout=600)
             elif kind == "reset":
                 if self.ws.exists():
                     shutil.rmtree(self.ws)
-                self.say(f"workspace {self.ws.name} supprimé\n")
+                self.say(f"workspace {self.ws.name} removed\n")
             self.done("done", 0)
         except HttpError as e:
             self.say(f"[gs-remote] erreur : {e.message}\n")
@@ -789,16 +789,16 @@ class AgentJob:
         return False
 
     def install_update(self) -> None:
-        """Remplace ce script par la version envoyée par le hub (tâche signée comme les autres)."""
+        """Replaces this script with the version sent by the hub (a task signed like the others)."""
         content = base64.b64decode(self.spec["content_b64"])
         if sha256_hex(content) != self.spec.get("sha256"):
-            raise HttpError(400, "mise à jour corrompue (hash différent)")
-        compile(content, "gs_remote.py", "exec")  # refuse un fichier qui ne se lancerait pas
+            raise HttpError(400, "corrupted update (different hash)")
+        compile(content, "gs_remote.py", "exec")  # rejects a file that would not start
         script = Path(__file__).resolve()
         tmp = script.with_name(script.name + ".new")
         tmp.write_bytes(content)
         os.replace(tmp, script)
-        self.final_text = f"mise à jour installée dans {script} : redémarrage de l'agent\n"
+        self.final_text = f"update installed in {script}: restarting the agent\n"
 
     def sync(self) -> None:
         manifest = {safe_rel_path(k): v for k, v in self.spec["manifest"].items()}
@@ -806,8 +806,8 @@ class AgentJob:
         state = read_json(state_path, {})
         need = []
         for rel, (size, sha) in manifest.items():
-            # Comparaison rapide (un stat). Les chemins sont déjà validés par safe_rel_path ;
-            # resolve_inside (plus lent, surtout sous Windows) n'est appliqué qu'aux écritures.
+            # Quick comparison (one stat). Paths are already validated by safe_rel_path;
+            # resolve_inside (slower, especially on Windows) is only applied to writes.
             if state.get(rel) != sha:
                 need.append(rel)
                 continue
@@ -833,7 +833,7 @@ class AgentJob:
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     for member in zf.infolist():
                         if member.filename not in batch:
-                            raise HttpError(400, f"fichier non demandé dans l'archive : {member.filename!r}")
+                            raise HttpError(400, f"file not requested in the archive: {member.filename!r}")
                         target = resolve_inside(self.ws, member.filename)
                         if target.is_symlink():
                             target.unlink()
@@ -844,17 +844,17 @@ class AgentJob:
                         received += 1
                 write_private_json(state_path, state)
                 batch, batch_bytes = [], 0
-        for rel in manifest:  # fichiers déjà à jour
+        for rel in manifest:  # files already up to date
             state.setdefault(rel, manifest[rel][1])
         write_private_json(state_path, state)
         if need or deleted:
-            self.say(f"[sync] {received} fichier(s) reçu(s), {deleted} supprimé(s)\n")
+            self.say(f"[sync] {received} file(s) received, {deleted} removed\n")
 
     def run_command(self) -> tuple[str, int | None]:
         cmd, shell = self.spec.get("cmd"), bool(self.spec.get("shell"))
         if shell:
             if not isinstance(cmd, str):
-                raise HttpError(400, "avec --shell, la commande doit être une chaîne")
+                raise HttpError(400, "with --shell, the command must be a string")
             cmd = cmd.replace(PY_PLACEHOLDER, f'"{sys.executable}"')
         else:
             if not (isinstance(cmd, list) and cmd and all(isinstance(c, str) for c in cmd)):
@@ -862,23 +862,23 @@ class AgentJob:
             cmd = [sys.executable if c == PY_PLACEHOLDER else c for c in cmd]
         cwd = resolve_inside(self.ws, self.spec["cwd"]) if self.spec.get("cwd") else self.ws
         if not cwd.is_dir():
-            raise HttpError(400, f"dossier introuvable dans le workspace : {self.spec.get('cwd')}")
+            raise HttpError(400, f"folder not found in the workspace: {self.spec.get('cwd')}")
         env = os.environ.copy()
         fresh_path = windows_registry_path()
-        if fresh_path:  # outils installés après le lancement de l'agent (ex. rustup) : visibles sans le relancer
+        if fresh_path:  # tools installed after the agent started (e.g. rustup): visible without restarting it
             env["PATH"] = fresh_path
         env.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"})
         env.update({str(k): str(v) for k, v in (self.spec.get("env") or {}).items()})
         if not shell and os.name == "nt":
             if not os.path.dirname(cmd[0]):
-                # Sous Windows, Popen cherche l'exécutable dans le PATH de l'AGENT, pas dans `env` :
-                # on le résout nous-mêmes avec le PATH de la tâche (ex. cargo installé après le lancement).
+                # On Windows, Popen looks for the executable on the AGENT's PATH, not in `env`:
+                # resolve it ourselves with the task's PATH (e.g. cargo installed after the launch).
                 found = shutil.which(cmd[0], path=env.get("PATH"))
                 if found:
                     cmd = [found] + cmd[1:]
             elif not os.path.isabs(cmd[0]):
-                # Chemin relatif (.venv/Scripts/python.exe) : Windows le résout depuis le dossier de
-                # l'agent, pas depuis `cwd` comme macOS et Linux.
+                # Relative path (.venv/Scripts/python.exe): Windows resolves it from the agent's
+                # folder, not from `cwd` as macOS and Linux do.
                 cmd = [str(cwd / cmd[0])] + cmd[1:]
         timeout = float(self.spec.get("timeout") or 600)
 
@@ -891,9 +891,9 @@ class AgentJob:
                 proc = subprocess.Popen(cmd, shell=shell, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
                                         stdout=logf, stderr=subprocess.STDOUT, **kwargs)
             except OSError as e:
-                raise HttpError(400, f"impossible de lancer la commande : {e}") from None
+                raise HttpError(400, f"cannot start the command: {e}") from None
 
-        def _wait_exit():  # chrono précis : instant exact de fin du processus, mesuré sur place
+        def _wait_exit():  # precise timing: exact instant the process ended, measured locally
             proc.wait()
             self.exec_s = time.perf_counter() - t0
 
@@ -910,26 +910,26 @@ class AgentJob:
                         waiter.join(timeout=5)
                     chunk = reader.read(LOG_CHUNK_MAX)
                     if finished:
-                        # Le processus est terminé : tout le reste de la sortie part avec /a/done.
+                        # The process has finished: all the remaining output goes with /a/done.
                         self.final_text = decoder.decode(chunk + reader.read(), final=True)
                         break
                     if chunk or time.time() - last_send > HEARTBEAT_S:
                         if self.say(decoder.decode(chunk)) and reason is None:
                             reason, kill_time = "killed", time.time()
-                            self.say("\n[gs-remote] arrêt forcé demandé\n")
+                            self.say("\n[gs-remote] forced stop requested\n")
                             kill_tree(proc)
                         last_send = time.time()
                     if reason is None and time.time() - start > timeout:
                         reason, kill_time = "timeout", time.time()
-                        self.say(f"\n[gs-remote] timeout ({timeout:.0f} s) : arrêt de la commande\n")
+                        self.say(f"\n[gs-remote] timeout ({timeout:.0f} s): stopping the command\n")
                         kill_tree(proc)
                     if kill_time and not finished and time.time() - kill_time > UNKILLABLE_S:
-                        # Typiquement : processus bloqué dans un appel au driver GPU. On l'abandonne
-                        # pour que l'agent reste disponible ; il faudra peut-être redémarrer la machine.
+                        # Typically: a process stuck in a GPU driver call. Give up on it
+                        # so that the agent stays available; the machine may need a restart.
                         reason = "unkillable"
-                        self.say(f"\n[gs-remote] le processus {proc.pid} ne répond pas à l'arrêt forcé "
-                                 f"depuis {UNKILLABLE_S} s (bloqué dans le driver ?). Abandonné : "
-                                 "l'agent reste disponible, mais le processus peut encore tourner.\n")
+                        self.say(f"\n[gs-remote] process {proc.pid} has not responded to the forced stop "
+                                 f"for {UNKILLABLE_S} s (stuck in the driver?). Abandoned: "
+                                 "the agent stays available, but the process may still be running.\n")
                         break
                     if not chunk:
                         time.sleep(0.3)
@@ -944,7 +944,7 @@ class AgentJob:
 
 
 def windows_registry_path() -> str | None:
-    """PATH tel qu'un nouveau terminal Windows le verrait (système + utilisateur, relu dans le registre)."""
+    """PATH as a new Windows terminal would see it (system + user, read again from the registry)."""
     if os.name != "nt":
         return None
     try:
@@ -974,7 +974,7 @@ def kill_tree(proc: subprocess.Popen) -> None:
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        pass  # la boucle de run_command surveille la suite (abandon après UNKILLABLE_S)
+        pass  # run_command's loop watches what follows (gives up after UNKILLABLE_S)
 
 
 def cmd_agent(args) -> int:
@@ -984,8 +984,8 @@ def cmd_agent(args) -> int:
             cfg[key] = getattr(args, key)
     missing = [k for k in ("hub", "name", "token") if not cfg.get(k)]
     if missing:
-        sys.exit("Première utilisation : gs_remote.py agent --hub http://<IP-du-hub>:8765 --name <nom> --token <jeton>\n"
-                 "(commande affichée par `gs_remote.py agents add <nom>` sur la machine du hub)")
+        sys.exit("First use: gs_remote.py agent --hub http://<hub-IP>:8765 --name <name> --token <token>\n"
+                 "(command printed by `gs_remote.py agents add <name>` on the hub's machine)")
     write_private_json(AGENT_CONFIG, cfg)
     ws_root = Path(args.root).expanduser() if args.root else HOME / "agent" / "workspaces"
     ws_root.mkdir(parents=True, exist_ok=True)
@@ -995,27 +995,27 @@ def cmd_agent(args) -> int:
 
 
 def agent_supervisor(cfg: dict, args) -> int:
-    """Relance le worker : après une mise à jour (nouveau code) ou un plantage."""
+    """Restarts the worker: after an update (new code) or a crash."""
     print(f"gs-remote agent v{TOOL_VERSION} « {cfg['name']} » → hub {cfg['hub']}", flush=True)
-    print("Cet agent n'écoute aucun port : il se connecte au hub et n'exécute que des tâches signées.\n", flush=True)
+    print("This agent listens to no port: it connects to the hub and only runs signed tasks.\n", flush=True)
     script = str(Path(__file__).resolve())
     cmd = [sys.executable, script, "agent", "--worker"] + (["--root", args.root] if args.root else [])
     while True:
         try:
             rc = subprocess.call(cmd)
         except KeyboardInterrupt:
-            print("\nAgent arrêté.")
+            print("\nAgent stopped.")
             return 0
         if rc == EXIT_RESTART:
-            log("mise à jour installée : redémarrage de l'agent avec le nouveau code")
+            log("update installed: restarting the agent with the new code")
             continue
         if rc in (0, 130):
             return rc
-        log(f"l'agent s'est arrêté anormalement (code {rc}) : redémarrage dans 5 s")
+        log(f"the agent stopped abnormally (code {rc}): restarting in 5 s")
         try:
             time.sleep(5)
         except KeyboardInterrupt:
-            print("\nAgent arrêté.")
+            print("\nAgent stopped.")
             return 0
 
 
@@ -1026,48 +1026,48 @@ def agent_worker(cfg: dict, ws_root: Path) -> int:
         try:
             api.call("POST", "/a/hello", {"info": machine_info(ws_root)})
             if not connected:
-                log("connecté au hub")
+                log("connected to the hub")
             connected, backoff = True, 2.0
             while True:
                 r = api.call("POST", "/a/poll", {}, timeout=POLL_WAIT_S + 20)
                 spec = r.get("job")
                 if spec:
                     detail = spec.get("cmd") or spec.get("path") or ""
-                    log(f"tâche {spec['id']} : {spec['type']} {spec.get('ws', '')} {detail}")
+                    log(f"task {spec['id']}: {spec['type']} {spec.get('ws', '')} {detail}")
                     restart = AgentJob(api, spec, ws_root).execute()
-                    log(f"tâche {spec['id']} terminée")
+                    log(f"task {spec['id']} finished")
                     if restart:
                         return EXIT_RESTART
         except KeyboardInterrupt:
-            print("\nAgent arrêté.")
+            print("\nAgent stopped.")
             return 0
         except Unreachable as e:
             if connected:
-                log(f"connexion au hub perdue ({e}). Nouvelle tentative…")
+                log(f"connection to the hub lost ({e}). Trying again…")
             elif backoff == 2.0:
-                log(f"hub injoignable ({e}). Nouvelle tentative régulière…")
+                log(f"hub unreachable ({e}). Trying again regularly…")
             connected = False
         except RemoteError as e:
-            log(f"refusé par le hub : {e}")
+            log(f"rejected by the hub: {e}")
             connected = False
             backoff = max(backoff, 30.0)
         try:
             time.sleep(backoff)
         except KeyboardInterrupt:
-            print("\nAgent arrêté.")
+            print("\nAgent stopped.")
             return 0
         backoff = min(backoff * 2, 30.0)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# CLI (machine du hub)
-# ═════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+# CLI (hub machine)
+# ══════════════════════════════════════════════════════════════════════════
 
 
 def ctl() -> SignedClient:
     cfg = read_json(HUB_CONFIG, {})
     if "control_token" not in cfg:
-        sys.exit("Aucun hub configuré sur cette machine. Lance d'abord : gs_remote.py hub")
+        sys.exit("No hub configured on this machine. Start one first: gs_remote.py hub")
     return SignedClient(f"http://127.0.0.1:{cfg.get('port', DEFAULT_PORT)}", CTL, cfg["control_token"])
 
 
@@ -1075,22 +1075,22 @@ def list_agents(api: SignedClient) -> list[dict]:
     try:
         return api.call("GET", "/c/agents")["agents"]
     except Unreachable:
-        sys.exit("Le hub ne répond pas. Lance-le dans un autre terminal : gs_remote.py hub")
+        sys.exit("The hub does not answer. Start it in another terminal: gs_remote.py hub")
 
 
 def resolve_targets(api: SignedClient, spec: str) -> tuple[list[str], list[str]]:
-    """Renvoie (agents en ligne ciblés, agents ciblés hors ligne)."""
+    """Returns (targeted online agents, targeted offline agents)."""
     rows = {a["name"]: a for a in list_agents(api) if a["registered"]}
     if not rows:
-        sys.exit("Aucun agent enregistré. Ajoute-en un : gs_remote.py agents add <nom>")
+        sys.exit("No agent registered. Add one: gs_remote.py agents add <name>")
     names = list(rows) if spec == "all" else [s.strip() for s in spec.split(",") if s.strip()]
     unknown = [n for n in names if n not in rows]
     if unknown:
-        sys.exit(f"Agent(s) inconnu(s) : {', '.join(unknown)}. Enregistrés : {', '.join(rows)}")
+        sys.exit(f"Unknown agent(s): {', '.join(unknown)}. Registered: {', '.join(rows)}")
     online = [n for n in names if rows[n]["online"]]
     offline = [n for n in names if not rows[n]["online"]]
     if not online:
-        sys.exit(f"Aucun agent en ligne parmi : {', '.join(names)}. Lance `gs_remote.py agent` sur la machine de test.")
+        sys.exit(f"No online agent among: {', '.join(names)}. Run `gs_remote.py agent` on the test machine.")
     return online, offline
 
 
@@ -1144,7 +1144,7 @@ def build_manifest(src: Path, patterns: list[str]) -> dict[str, list]:
 
 
 class Follow:
-    """Soumet une tâche à un agent et suit sa sortie."""
+    """Submits a task to an agent and follows its output."""
 
     def __init__(self, api: SignedClient, agent: str, prefix: bool):
         self.api, self.agent, self.prefix = api, agent, prefix
@@ -1183,11 +1183,11 @@ class Follow:
                     self.emit(self._dec.decode(data))
                     delay = 0.2
                 if st["status"] == "lost":
-                    # Agent momentanément injoignable : on continue d'attendre (la tâche tourne
-                    # peut-être encore) ; abandon seulement après LOST_GRACE_S sans nouvelles.
+                    # Agent temporarily unreachable: keep waiting (the task may still be
+                    # running); give up only after LOST_GRACE_S without news.
                     lost_since = lost_since or time.time()
                     if not warned_lost:
-                        out(f"[{self.agent}] agent injoignable, attente de son retour…\n", sys.stderr)
+                        out(f"[{self.agent}] agent unreachable, waiting for it to come back…\n", sys.stderr)
                         warned_lost = True
                     if time.time() - lost_since < LOST_GRACE_S:
                         time.sleep(2)
@@ -1214,17 +1214,17 @@ class Follow:
 
 
 def fmt_timing(st: dict) -> str:
-    """Durée d'exécution mesurée sur la machine de test, puis durée totale vue du hub (réseau compris)."""
+    """Run time measured on the test machine, then total time seen from the hub (network included)."""
     total = f"total {st.get('duration_s', 0):.2f} s"
     if st.get("exec_s") is None:
         return total
-    return f"exécution {st['exec_s']:.3f} s sur place · {total}"
+    return f"run {st['exec_s']:.3f} s on site · {total}"
 
 
 def run_on_targets(api: SignedClient, target: str, spec: dict, src: Path | None, summary_always=False) -> tuple[int, list]:
     online, offline = resolve_targets(api, target)
     for n in offline:
-        out(f"[{n}] hors ligne : ignoré\n", sys.stderr)
+        out(f"[{n}] offline: skipped\n", sys.stderr)
     multi = len(online) > 1
     follows = [Follow(api, n, prefix=multi) for n in online]
     threads = [threading.Thread(target=f.run, args=(spec, src), daemon=True) for f in follows]
@@ -1235,14 +1235,14 @@ def run_on_targets(api: SignedClient, target: str, spec: dict, src: Path | None,
             for t in threads:
                 t.join(timeout=0.2)
     except KeyboardInterrupt:
-        out("\nInterruption : arrêt des tâches distantes…\n", sys.stderr)
+        out("\nInterrupted: stopping the remote tasks…\n", sys.stderr)
         for f in follows:
             f.kill()
         return 130, follows
 
     worst = 0
     if not multi and follows and not follows[0].ends_with_newline:
-        out("\n")  # la sortie distante ne finissait pas par un retour à la ligne
+        out("\n")  # the remote output did not end with a newline
     if multi or offline or summary_always:
         out("─" * 60 + "\n", sys.stderr)
     for f in follows:
@@ -1256,11 +1256,11 @@ def run_on_targets(api: SignedClient, target: str, spec: dict, src: Path | None,
             label = "OK" if ok else ("ERREUR" if f.error else str(st.get("status", "?")).upper())
             out(f"  {f.agent:<12} {label:<9} code {str(code):<5} {timing}\n", sys.stderr)
         elif not f.error:
-            state = "" if ok else f"tâche terminée : {st.get('status')} (code {code}) · "
+            state = "" if ok else f"task finished: {st.get('status')} (code {code}) · "
             if state or st.get("exec_s") is not None:
                 out(f"[{f.agent}] {state}{timing}\n", sys.stderr)
     for n in offline:
-        out(f"  {n:<12} HORS LIGNE\n", sys.stderr)
+        out(f"  {n:<12} OFFLINE\n", sys.stderr)
         worst = worst or 1
     return worst, follows
 
@@ -1274,7 +1274,7 @@ def sync_spec(args) -> tuple[Path, str, dict | None]:
 
 def cmd_run(args) -> int:
     if not args.command:
-        sys.exit("Commande manquante après `--`. Exemple : gs_remote.py run all -- @python script.py")
+        sys.exit("Command missing after `--`. Example: gs_remote.py run all -- @python script.py")
     src, ws, manifest = sync_spec(args)
     spec = {
         "type": "run", "ws": ws, "manifest": manifest,
@@ -1295,11 +1295,11 @@ def cmd_sync(args) -> int:
 def cmd_get(args) -> int:
     api = ctl()
     if args.target == "all" or "," in args.target:
-        sys.exit("get : une seule cible à la fois")
+        sys.exit("get: one target at a time")
     ws = args.ws or re.sub(r"[^A-Za-z0-9_-]", "_", default_src().name)
     code, follows = run_on_targets(api, args.target, {"type": "get", "ws": ws, "path": args.remote_path}, None)
     if len(follows) != 1:
-        sys.exit("get : une seule cible à la fois")
+        sys.exit("get: one target at a time")
     f = follows[0]
     if code == 0 and f.job_id:
         data = api.call("GET", f"/c/jobs/{f.job_id}/result", raw=True)
@@ -1321,14 +1321,14 @@ def cmd_update(args) -> int:
             "sha256": sha256_hex(content)}
     code, _ = run_on_targets(ctl(), args.target, spec, None, summary_always=True)
     if code == 0:
-        print(f"Agents mis à jour en v{TOOL_VERSION} ; ils redémarrent et se reconnectent en quelques secondes.")
+        print(f"Agents updated to v{TOOL_VERSION}; they restart and reconnect within a few seconds.")
     return code
 
 
 def cmd_jobs(args) -> int:
     jobs = ctl().call("GET", "/c/jobs")["jobs"]
     if not jobs:
-        print("Aucune tâche en cours.")
+        print("No task running.")
     for j in jobs:
         print(f"  {j['id']}  {j['agent']:<10} {j['type']:<6} {j['status']:<8} {j['duration_s']:.0f} s")
     return 0
@@ -1343,12 +1343,12 @@ def cmd_kill(args) -> int:
         agents = None if args.target == "all" else {s.strip() for s in args.target.split(",")}
         victims = [j for j in jobs if agents is None or j["agent"] in agents]
     if not victims:
-        print(f"Aucune tâche en cours pour « {args.target} ».")
+        print(f"No task running for \"{args.target}\".")
         return 0
     for j in victims:
         api.call("POST", f"/c/jobs/{j['id']}/kill")
-        print(f"  arrêt demandé : {j['id']} sur {j['agent']} ({j['type']})")
-    print("L'agent l'arrête au plus tard dans 5 s (vérifier avec : gs_remote.py jobs).")
+        print(f"  stop requested: {j['id']} on {j['agent']} ({j['type']})")
+    print("The agent stops it within 5 s at most (check with: gs_remote.py jobs).")
     return 0
 
 
@@ -1361,21 +1361,21 @@ def cmd_info(args) -> int:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
         return 0
     if not rows:
-        print("Aucun agent correspondant.")
+        print("No matching agent.")
     for a in rows:
         i = a["info"] or {}
-        state = "EN LIGNE" if a["online"] else "hors ligne"
-        busy = f", tâche {a['current']} en cours" if a.get("current") else ""
+        state = "ONLINE" if a["online"] else "offline"
+        busy = f", task {a['current']} running" if a.get("current") else ""
         print(f"[{a['name']}] {state}{busy}" + (f" — {a['address']}" if a["address"] else ""))
         if not i:
             continue
         v = i.get("tool_version")
         if v != TOOL_VERSION:
             print(f"    outil   : v{v or '1-2'} ≠ v{TOOL_VERSION} → gs_remote.py update {a['name']}")
-        print(f"    machine : {i.get('hostname')} — {i.get('os')} ({i.get('machine')}), {i.get('cpu_count')} cœurs CPU")
+        print(f"    machine: {i.get('hostname')} — {i.get('os')} ({i.get('machine')}), {i.get('cpu_count')} CPU cores")
         print(f"    python  : {i.get('python')}  ({i.get('python_executable')})")
         print(f"    rust    : {i.get('rustc') or 'absent'}")
-        for g in i.get("gpus") or ["(aucun GPU détecté)"]:
+        for g in i.get("gpus") or ["(no GPU detected)"]:
             print(f"    gpu     : {g}")
         for g in i.get("nvidia_smi") or []:
             print(f"    nvidia  : {g}")
@@ -1384,95 +1384,95 @@ def cmd_info(args) -> int:
     return 0
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Point d'entrée
-# ═════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════════════════════════════════
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="gs-remote : hub, agents et CLI pour tester GPUsync sur plusieurs machines.")
+    ap = argparse.ArgumentParser(description="gs-remote: hub, agents and CLI to test GPUsync on several machines.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("hub", help="lancer le hub (machine de dev)")
+    p = sub.add_parser("hub", help="start the hub (dev machine)")
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--allow", action="append", default=[], metavar="CIDR",
-                   help="réseaux d'où les agents peuvent se connecter (répétable). Défaut : IP privées")
+                   help="networks from which agents may connect (repeatable). Default: private IPs")
     p.add_argument("--orphan-timeout", type=float, default=ORPHAN_S, metavar="S",
-                   help=f"arrêter une tâche que plus aucune CLI ne suit depuis S secondes (défaut {ORPHAN_S})")
+                   help=f"stop a task no CLI has followed for S seconds (default {ORPHAN_S})")
     p.set_defaults(func=cmd_hub)
 
-    p = sub.add_parser("agents", help="enregistrer / supprimer / lister les agents (machine du hub)")
+    p = sub.add_parser("agents", help="register / remove / list the agents (hub machine)")
     p.add_argument("action", choices=["add", "rm", "list"])
     p.add_argument("name", nargs="?")
-    p.add_argument("--force", action="store_true", help="avec add : régénérer le jeton d'un agent existant")
+    p.add_argument("--force", action="store_true", help="with add: regenerate the token of an existing agent")
     p.set_defaults(func=cmd_agents)
 
     p = sub.add_parser("agent", help="lancer l'agent (machine de test)")
-    p.add_argument("--hub", help="URL du hub, ex. http://192.168.1.20:8765 (mémorisée)")
-    p.add_argument("--name", help="nom de cet agent (mémorisé)")
-    p.add_argument("--token", help="jeton de cet agent (mémorisé)")
-    p.add_argument("--root", help="dossier des workspaces")
+    p.add_argument("--hub", help="hub URL, e.g. http://192.168.1.20:8765 (remembered)")
+    p.add_argument("--name", help="name of this agent (remembered)")
+    p.add_argument("--token", help="token of this agent (remembered)")
+    p.add_argument("--root", help="workspaces folder")
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)  # usage interne (superviseur)
     p.set_defaults(func=cmd_agent)
 
-    p = sub.add_parser("update", help="installer cette version de gs_remote.py sur des agents (ils redémarrent seuls)")
+    p = sub.add_parser("update", help="install this version of gs_remote.py on agents (they restart by themselves)")
     p.add_argument("target")
     p.set_defaults(func=cmd_update)
 
-    p = sub.add_parser("info", help="état et matériel des agents")
+    p = sub.add_parser("info", help="status and hardware of the agents")
     p.add_argument("target", nargs="?", default="all")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_info)
 
     def sync_opts(p):
-        p.add_argument("--src", help="dossier à synchroniser (défaut : racine git ou dossier courant)")
-        p.add_argument("--ws", help="nom du workspace distant (défaut : nom du dossier)")
-        p.add_argument("--exclude", action="append", default=[], help="motif à exclure (répétable)")
+        p.add_argument("--src", help="folder to synchronize (default: git root or current folder)")
+        p.add_argument("--ws", help="name of the remote workspace (default: name of the folder)")
+        p.add_argument("--exclude", action="append", default=[], help="pattern to exclude (repeatable)")
 
-    p = sub.add_parser("sync", help="synchroniser le dossier sans rien exécuter")
+    p = sub.add_parser("sync", help="synchronize the folder without running anything")
     p.add_argument("target")
     sync_opts(p)
     p.set_defaults(func=cmd_sync)
 
-    p = sub.add_parser("run", help="synchroniser puis exécuter la commande placée après --")
+    p = sub.add_parser("run", help="synchronize, then run the command placed after --")
     p.add_argument("target")
     sync_opts(p)
     p.add_argument("--no-sync", action="store_true")
-    p.add_argument("--timeout", type=float, default=600, help="secondes avant d'arrêter la commande (défaut 600)")
+    p.add_argument("--timeout", type=float, default=600, help="seconds before stopping the command (default 600)")
     p.add_argument("--env", action="append", default=[], metavar="K=V")
-    p.add_argument("--cwd", help="sous-dossier du workspace où exécuter")
-    p.add_argument("--shell", action="store_true", help="passer par le shell distant (cmd.exe / sh)")
+    p.add_argument("--cwd", help="subfolder of the workspace to run in")
+    p.add_argument("--shell", action="store_true", help="go through the remote shell (cmd.exe / sh)")
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("get", help="récupérer un fichier du workspace distant")
+    p = sub.add_parser("get", help="fetch a file from the remote workspace")
     p.add_argument("target")
     p.add_argument("remote_path")
     p.add_argument("local", nargs="?")
     p.add_argument("--ws")
     p.set_defaults(func=cmd_get)
 
-    p = sub.add_parser("reset", help="supprimer le workspace distant")
+    p = sub.add_parser("reset", help="remove the remote workspace")
     p.add_argument("target")
     p.add_argument("--ws")
     p.set_defaults(func=cmd_reset)
 
-    p = sub.add_parser("jobs", help="tâches en attente ou en cours")
+    p = sub.add_parser("jobs", help="queued or running tasks")
     p.set_defaults(func=cmd_jobs)
 
-    p = sub.add_parser("kill", help="arrêter des tâches : un id de tâche, un agent, une liste ou all")
+    p = sub.add_parser("kill", help="stop tasks: a task id, an agent, a list or all")
     p.add_argument("target")
     p.set_defaults(func=cmd_kill)
 
     argv, command = sys.argv[1:], []
-    if "--" in argv:  # tout ce qui suit `--` est la commande distante, passée telle quelle
+    if "--" in argv:  # everything after `--` is the remote command, passed as is
         i = argv.index("--")
         argv, command = argv[:i], argv[i + 1:]
     args = ap.parse_args(argv)
     args.command = command
     if args.cmd not in ("hub", "agent") and hasattr(signal, "SIGTERM"):
-        # CLI arrêtée par SIGTERM (kill, gestionnaire de tâches) : même effet que Ctrl+C,
-        # les tâches distantes suivies sont arrêtées.
+        # CLI stopped by SIGTERM (kill, task manager): same effect as Ctrl+C,
+        # the followed remote tasks are stopped.
         def _term(*_):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, _term)

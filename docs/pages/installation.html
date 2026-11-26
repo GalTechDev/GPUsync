@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Installation — GPUsync</title>
-<meta name="description" content="GPUsync n&#x27;est pas publié sur PyPI : on le compile depuis le dépôt. La compilation produit un module natif (gpusync._core, écrit en Rust) et installe le paquet Python en mode modifiable.">
+<meta name="description" content="GPUsync is not on PyPI yet: you build it from the repository. The build produces a native module (gpusync._core, written in Rust) and installs the Python package in editable mode.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
@@ -17,82 +17,82 @@
 <aside class="side" aria-label="Navigation">
 <a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
 <nav class="nav">
-<a href="index.html"><span class="icon">home</span>Accueil</a>
+<a href="index.html"><span class="icon">home</span>Home</a>
 <div class="nav-group">Guide</div>
 <a href="installation.html" aria-current="page"><span class="icon">download</span>Installation</a>
-<a href="kernels.html"><span class="icon">code</span>Écrire un kernel</a>
-<a href="resultats.html"><span class="icon">database</span>Résultats et volumes</a>
-<a href="peripheriques.html"><span class="icon">developer_board</span>Périphériques</a>
-<a href="atomiques.html"><span class="icon">scatter_plot</span>Atomiques</a>
-<a href="groupes.html"><span class="icon">hub</span>Groupes de threads</a>
-<a href="fenetre.html"><span class="icon">desktop_windows</span>Fenêtre</a>
-<a href="erreurs.html"><span class="icon">bug_report</span>Erreurs et performances</a>
+<a href="kernels.html"><span class="icon">code</span>Writing a kernel</a>
+<a href="results.html"><span class="icon">database</span>Results and data</a>
+<a href="devices.html"><span class="icon">developer_board</span>Devices</a>
+<a href="atomics.html"><span class="icon">scatter_plot</span>Atomics</a>
+<a href="groups.html"><span class="icon">hub</span>Thread groups</a>
+<a href="window.html"><span class="icon">desktop_windows</span>Window</a>
+<a href="errors.html"><span class="icon">bug_report</span>Errors and performance</a>
 <div class="nav-group">API</div>
-<a href="reference.html"><span class="icon">menu_book</span>Référence</a>
+<a href="reference.html"><span class="icon">menu_book</span>Reference</a>
 </nav>
-<div class="side-foot">Licence MIT · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Code source</a></div>
+<div class="side-foot">MIT licence · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Source code</a></div>
 </aside>
 <div class="scrim"></div>
 <div class="page">
 <header class="top">
 <button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
 <h1 class="top-title">Installation</h1>
-<button class="btn btn-plain theme-toggle" type="button" aria-label="Thème"><span class="icon">dark_mode</span></button>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Theme"><span class="icon">dark_mode</span></button>
 <a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
 </header>
 <main class="content">
-<article class="doc"><h2 class="lead-title">Installation</h2><p class="lead">GPUsync n'est pas publié sur PyPI : on le compile depuis le dépôt. La compilation produit un module natif (<code>gpusync._core</code>, écrit en Rust) et installe le paquet Python en mode modifiable.</p><hr class="rule"><h2 id="prerequis"><a class="anchor" href="#prerequis" aria-hidden="true">#</a>Prérequis</h2>
-<div class="table-wrap"><table><thead><tr><th></th><th>macOS</th><th>Windows</th><th>Linux</th></tr></thead><tbody><tr><td>Rust</td><td><code>rustup</code></td><td><code>rustup</code></td><td><code>rustup</code></td></tr><tr><td>Python</td><td>≥ 3.10</td><td>≥ 3.10</td><td>≥ 3.10</td></tr><tr><td>Compilateur C</td><td>Xcode Command Line Tools</td><td>Visual Studio Build Tools, charge « C++ »</td><td><code>gcc</code> ou <code>clang</code></td></tr></tbody></table></div>
-<p>Aucune bibliothèque GPU n'est nécessaire à la compilation : les pilotes (OpenCL, CUDA) sont chargés au démarrage s'ils sont présents, et leur absence désactive seulement le backend correspondant.</p>
-<h2 id="compiler"><a class="anchor" href="#compiler" aria-hidden="true">#</a>Compiler</h2>
-<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>python3 tools/dev.py setup      <span class="tk-com"># crée .venv, installe maturin, pytest, NumPy, puis compile</span></code></pre></div>
-<p>Après une modification du code Rust :</p>
-<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>python3 tools/dev.py build      <span class="tk-com"># recompile l'extension dans .venv</span>
-python3 tools/dev.py test       <span class="tk-com"># recompile, puis cargo test, pytest et le diagnostic</span></code></pre></div>
-<p>Les scripts se lancent avec le Python de <code>.venv</code> (<code>.venv/bin/python</code>, ou <code>.venv\Scripts\python.exe</code> sous Windows), ou par <code>python3 tools/dev.py run script.py</code>.</p>
-<p>Seule dépendance d'exécution : NumPy ≥ 1.22.</p>
-<p><code>setup</code> et <code>build</code> installent aussi le moteur graphique <code>gpusync.gfx</code>, qui est un paquet à part (<a href="https://github.com/GalTechDev/GPUsync/tree/new-rust/gfx">gpusync-gfx</a>, dossier <code>gfx/</code>, Python pur). Pour la bibliothèque seule, ignorez-le : sans lui, tout fonctionne, et <code>gs.gfx</code> lève une <code>ImportError</code> qui donne la commande d'installation. Pour l'ajouter ou le retirer à la main :</p>
-<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>.venv/bin/python -m pip install --no-build-isolation --no-deps -e gfx
+<article class="doc"><h2 class="lead-title">Installation</h2><p class="lead">GPUsync is not on PyPI yet: you build it from the repository. The build produces a native module (<code>gpusync._core</code>, written in Rust) and installs the Python package in editable mode.</p><hr class="rule"><h2 id="requirements"><a class="anchor" href="#requirements" aria-hidden="true">#</a>Requirements</h2>
+<div class="table-wrap"><table><thead><tr><th></th><th>macOS</th><th>Windows</th><th>Linux</th></tr></thead><tbody><tr><td>Rust</td><td><code>rustup</code></td><td><code>rustup</code></td><td><code>rustup</code></td></tr><tr><td>Python</td><td>≥ 3.10</td><td>≥ 3.10</td><td>≥ 3.10</td></tr><tr><td>C compiler</td><td>Xcode Command Line Tools</td><td>Visual Studio Build Tools, "C++" workload</td><td><code>gcc</code> or <code>clang</code></td></tr></tbody></table></div>
+<p>No GPU library is needed to build: drivers (OpenCL, CUDA) are loaded at startup when present, and a missing one only disables the matching backend.</p>
+<h2 id="build"><a class="anchor" href="#build" aria-hidden="true">#</a>Build</h2>
+<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>python3 tools/dev.py setup      <span class="tk-com"># creates .venv, installs maturin, pytest, NumPy, then builds</span></code></pre></div>
+<p>After changing Rust code:</p>
+<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>python3 tools/dev.py build      <span class="tk-com"># rebuilds the extension in .venv</span>
+python3 tools/dev.py test       <span class="tk-com"># rebuilds, then cargo test, pytest and the diagnostic</span></code></pre></div>
+<p>Run scripts with the Python from <code>.venv</code> (<code>.venv/bin/python</code>, or <code>.venv\Scripts\python.exe</code> on Windows), or with <code>python3 tools/dev.py run script.py</code>.</p>
+<p>The only runtime dependency is NumPy ≥ 1.22.</p>
+<p><code>setup</code> and <code>build</code> also install the graphics engine <code>gpusync.gfx</code>, which is a separate package (<a href="https://github.com/GalTechDev/GPUsync/tree/new-rust/gfx">gpusync-gfx</a>, folder <code>gfx/</code>, pure Python). If you only want the library, ignore it: everything works without it, and <code>gs.gfx</code> raises an <code>ImportError</code> that gives the install command. To add or remove it by hand:</p>
+<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>.venv/bin/python -m pip install --no-build-isolation --no-deps -e gfx
 .venv/bin/python -m pip uninstall gpusync-gfx</code></pre></div>
-<h2 id="verifier-ce-qui-est-detecte"><a class="anchor" href="#verifier-ce-qui-est-detecte" aria-hidden="true">#</a>Vérifier ce qui est détecté</h2>
-<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>.venv/bin/python -m gpusync</code></pre></div>
-<p>affiche chaque backend, ses périphériques et, s'il est indisponible, pourquoi (ici sur le Mac) :</p>
-<div class="code"><div class="code-head"><span>Sortie</span><span class="spacer"></span></div><pre><code>gpusync 0.1.0 — Darwin arm64, Python 3.15.2
+<h2 id="check-what-is-detected"><a class="anchor" href="#check-what-is-detected" aria-hidden="true">#</a>Check what is detected</h2>
+<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>.venv/bin/python -m gpusync</code></pre></div>
+<p>lists each backend, its devices and, when a backend is unavailable, why (here on the Mac):</p>
+<div class="code"><div class="code-head"><span>Output</span><span class="spacer"></span></div><pre><code>gpusync 0.1.0 — Darwin arm64, Python 3.15.2
 
-[cuda] indisponible : pas de driver CUDA sous macOS (aucun GPU NVIDIA)
-[wgpu] 1 périphérique(s)
+[cuda] unavailable: no CUDA driver on macOS (no NVIDIA GPU)
+[wgpu] 1 device(s)
   metal:0    Apple M5 Pro
-             integrated_gpu, Apple, metal | mémoire ?, buffer max 4.0 Go | mémoire unifiée
-[opencl] 1 périphérique(s)
+             integrated_gpu, Apple, metal | memory ?, buffer max 4.0 GB | unified memory
+[opencl] 1 device(s)
   opencl:0   Apple M5 Pro
-             integrated_gpu, Apple, OpenCL 1.2 | mémoire 17.8 Go, buffer max 3.3 Go | mémoire unifiée
-[cpu] 1 périphérique(s)
-  cpu:0      Interpréteur GPUsync (CPU, lent)
-             cpu, GPUsync, 0.1.0 | mémoire ?, buffer max ? | f64, mémoire unifiée
+             integrated_gpu, Apple, OpenCL 1.2 | memory 17.8 GB, buffer max 3.3 GB | unified memory
+[cpu] 1 device(s)
+  cpu:0      GPUsync interpreter (CPU, slow)
+             cpu, GPUsync, 0.1.0 | memory ?, buffer max ? | f64, unified memory
 
-Périphérique par défaut : Device('Apple M5 Pro', backend='metal', f64=False, unified_memory=True)</code></pre></div>
-<p>Depuis Python :</p>
-<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Exécuté par tests/test_docs.py">Vérifié</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code><span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
+Default device: Device('Apple M5 Pro', backend='metal', f64=False, unified_memory=True)</code></pre></div>
+<p>From Python:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
 
-<span class="tk-kw">for</span> st <span class="tk-kw">in</span> <span class="tk-gs">gs.backends</span>():                       <span class="tk-com"># un état par backend : cuda, wgpu, opencl, cpu</span>
+<span class="tk-kw">for</span> st <span class="tk-kw">in</span> <span class="tk-gs">gs.backends</span>():                       <span class="tk-com"># one status per backend: cuda, wgpu, opencl, cpu</span>
     print(st.name, st.available, st.error)
-<span class="tk-kw">for</span> d <span class="tk-kw">in</span> <span class="tk-gs">gs.devices</span>():                         <span class="tk-com"># périphériques utilisables</span>
-    print(d.id, d.name, d.kind, <span class="tk-str">"f64"</span> <span class="tk-kw">if</span> d.f64 <span class="tk-kw">else</span> <span class="tk-str">"sans f64"</span>)</code></pre></div>
-<p><code>cpu:0</code> existe toujours : c'est l'interpréteur de référence de GPUsync, exact mais lent, utile pour vérifier un résultat ou déboguer.</p>
+<span class="tk-kw">for</span> d <span class="tk-kw">in</span> <span class="tk-gs">gs.devices</span>():                         <span class="tk-com"># usable devices</span>
+    print(d.id, d.name, d.kind, <span class="tk-str">"f64"</span> <span class="tk-kw">if</span> d.f64 <span class="tk-kw">else</span> <span class="tk-str">"no f64"</span>)</code></pre></div>
+<p><code>cpu:0</code> always exists: it is GPUsync's reference interpreter, exact but slow, useful to check a result or to debug.</p>
 <h2 id="backends"><a class="anchor" href="#backends" aria-hidden="true">#</a>Backends</h2>
-<div class="table-wrap"><table><thead><tr><th>Backend</th><th>Périphériques</th><th>Remarques</th></tr></thead><tbody><tr><td>CUDA</td><td>GPU NVIDIA</td><td>préféré sur un GPU NVIDIA ; demande le pilote et NVRTC (voir plus bas)</td></tr><tr><td>wgpu</td><td>Metal (macOS), Vulkan, DX12</td><td>Metal sur Mac ; Vulkan sur les GPU dédiés sans CUDA</td></tr><tr><td>OpenCL ≥ 1.2</td><td>tout pilote OpenCL installé</td><td>zéro-copie sur les GPU à mémoire unifiée ; repli quand une opération manque ailleurs</td></tr><tr><td>cpu</td><td>interpréteur</td><td>toujours disponible</td></tr></tbody></table></div>
-<h3 id="cuda-et-nvrtc"><a class="anchor" href="#cuda-et-nvrtc" aria-hidden="true">#</a>CUDA et NVRTC</h3>
-<p>Le backend CUDA compile les kernels avec NVRTC, la bibliothèque de compilation de NVIDIA. Sans elle, <code>gs.backends()</code> l'explique et Vulkan prend le relais sur le même GPU. Deux façons de l'obtenir :</p>
-<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>pip install nvidia-cuda-nvrtc-cu12      <span class="tk-com"># une bibliothèque, pas un compilateur à installer</span></code></pre></div>
-<p>ou le toolkit CUDA. GPUsync cherche NVRTC dans les roues pip <code>nvidia-*</code> visibles par Python, puis dans le toolkit et le <code>PATH</code>. Le code compilé (PTX) est gardé en cache sur disque.</p>
-<h2 id="variables-d-environnement"><a class="anchor" href="#variables-d-environnement" aria-hidden="true">#</a>Variables d'environnement</h2>
-<div class="table-wrap"><table><thead><tr><th>Variable</th><th>Effet</th></tr></thead><tbody><tr><td><code>GPUSYNC_DEVICE</code></td><td>périphérique par défaut, ex. <code>opencl</code>, <code>cuda:0</code>, <code>cpu</code> (voir <a href="peripheriques.html">Périphériques</a>)</td></tr><tr><td><code>GPUSYNC_CACHE_DIR</code></td><td>dossier du cache du code CUDA compilé</td></tr><tr><td><code>GPUSYNC_CACHE=0</code></td><td>désactive ce cache</td></tr><tr><td><code>GPUSYNC_NVRTC</code></td><td>chemin exact de la bibliothèque NVRTC</td></tr><tr><td><code>GPUSYNC_NVRTC_DIRS</code></td><td>dossiers où chercher NVRTC (séparés par <code>:</code>, ou <code>;</code> sous Windows) ; vide : ne pas chercher dans les roues pip</td></tr><tr><td><code>GPUSYNC_SPECIALIZE=0</code></td><td>désactive la spécialisation des tailles (voir <a href="erreurs.html">Erreurs, débogage, performances</a>)</td></tr><tr><td><code>GPUSYNC_DUMP_DIR</code></td><td>écrit dans ce dossier chaque code généré au moment de sa compilation</td></tr></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Backend</th><th>Devices</th><th>Notes</th></tr></thead><tbody><tr><td>CUDA</td><td>NVIDIA GPUs</td><td>preferred on an NVIDIA GPU; needs the driver and NVRTC (see below)</td></tr><tr><td>wgpu</td><td>Metal (macOS), Vulkan, DX12</td><td>Metal on a Mac; Vulkan on discrete GPUs without CUDA</td></tr><tr><td>OpenCL ≥ 1.2</td><td>any installed OpenCL driver</td><td>zero-copy on unified-memory GPUs; fallback when an operation is missing elsewhere</td></tr><tr><td>cpu</td><td>interpreter</td><td>always available</td></tr></tbody></table></div>
+<h3 id="cuda-and-nvrtc"><a class="anchor" href="#cuda-and-nvrtc" aria-hidden="true">#</a>CUDA and NVRTC</h3>
+<p>The CUDA backend compiles kernels with NVRTC, NVIDIA's runtime compilation library. Without it, <code>gs.backends()</code> says so and Vulkan takes over on the same GPU. Two ways to get it:</p>
+<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>pip install nvidia-cuda-nvrtc-cu12      <span class="tk-com"># a library, not a compiler to install</span></code></pre></div>
+<p>or the CUDA toolkit. GPUsync looks for NVRTC in the <code>nvidia-*</code> pip wheels visible to Python, then in the toolkit and on the <code>PATH</code>. Compiled code (PTX) is cached on disk.</p>
+<h2 id="environment-variables"><a class="anchor" href="#environment-variables" aria-hidden="true">#</a>Environment variables</h2>
+<div class="table-wrap"><table><thead><tr><th>Variable</th><th>Effect</th></tr></thead><tbody><tr><td><code>GPUSYNC_DEVICE</code></td><td>default device, e.g. <code>opencl</code>, <code>cuda:0</code>, <code>cpu</code> (see <a href="devices.html">Devices</a>)</td></tr><tr><td><code>GPUSYNC_CACHE_DIR</code></td><td>folder of the compiled CUDA code cache</td></tr><tr><td><code>GPUSYNC_CACHE=0</code></td><td>disables that cache</td></tr><tr><td><code>GPUSYNC_NVRTC</code></td><td>exact path of the NVRTC library</td></tr><tr><td><code>GPUSYNC_NVRTC_DIRS</code></td><td>folders where NVRTC is looked for (separated by <code>:</code>, or <code>;</code> on Windows); empty: do not look in pip wheels</td></tr><tr><td><code>GPUSYNC_SPECIALIZE=0</code></td><td>disables size specialization (see <a href="errors.html">Errors, debugging, performance</a>)</td></tr><tr><td><code>GPUSYNC_DUMP_DIR</code></td><td>writes every generated code to this folder when it is compiled</td></tr></tbody></table></div>
 <h2 id="tests"><a class="anchor" href="#tests" aria-hidden="true">#</a>Tests</h2>
-<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copier</button></div><pre><code>python3 tools/dev.py test</code></pre></div>
-<p>Les tests différentiels exécutent chaque kernel sur tous les périphériques de la machine et comparent les résultats à l'interpréteur. <code>GS_EXPECT=metal,opencl</code> (ou <code>vulkan,opencl</code>…) fait échouer la suite si l'un de ces backends n'a aucun périphérique, pour ne pas croire testé ce qui ne l'est pas. Les tests du moteur (<code>gfx/tests</code>) sont lancés avec les autres s'il est installé, ignorés sinon.</p><nav class="pager"><a class="next" href="kernels.html"><span class="dir">Suivant →</span><span class="name">Écrire un kernel</span></a></nav></article>
-<aside class="toc" aria-label="Sur cette page"><div class="toc-title">Sur cette page</div><a href="#prerequis">Prérequis</a><a href="#compiler">Compiler</a><a href="#verifier-ce-qui-est-detecte">Vérifier ce qui est détecté</a><a href="#backends">Backends</a><a href="#variables-d-environnement">Variables d'environnement</a><a href="#tests">Tests</a></aside>
+<div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>python3 tools/dev.py test</code></pre></div>
+<p>Differential tests run each kernel on every device of the machine and compare the results with the interpreter. <code>GS_EXPECT=metal,opencl</code> (or <code>vulkan,opencl</code>…) makes the suite fail if one of these backends has no device, so that nothing is believed tested when it is not. The engine tests (<code>gfx/tests</code>) run with the others when the engine is installed, and are skipped otherwise.</p><nav class="pager"><a class="next" href="kernels.html"><span class="dir">Next →</span><span class="name">Writing a kernel</span></a></nav></article>
+<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#requirements">Requirements</a><a href="#build">Build</a><a href="#check-what-is-detected">Check what is detected</a><a href="#backends">Backends</a><a href="#environment-variables">Environment variables</a><a href="#tests">Tests</a></aside>
 </main>
-<footer class="footer"><span>GPUsync · kernels GPU en Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Généré depuis docs/ par tools/build_pages.py</span></footer>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
 </div>
 </body>
 </html>

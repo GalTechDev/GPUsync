@@ -1,4 +1,4 @@
-"""Sonde : mémoire unifiée, un appel tableau NumPy → résultat lu, selon la taille."""
+"""Probe: unified memory, a NumPy array call → result read, depending on the size."""
 import sys, time
 import numpy as np
 import gpusync as gs

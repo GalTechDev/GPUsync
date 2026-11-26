@@ -1,4 +1,4 @@
-"""Kernels GPU de la couche 2D pure (`render_2d_shapes`, `scatter_particles_2d`, `composite_particles_2d`)."""
+"""GPU kernels of the pure 2D layer (`render_2d_shapes`, `scatter_particles_2d`, `composite_particles_2d`)."""
 
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ def render_2d_shapes(
     clear_rgba: gs.u32,
     do_clear: gs.i32,
 ) -> gs.u32["h", "w"]:
-    """Rend rectangles, cercles, lignes anti-aliasés et sprites texturés 2D en 1 seul dispatch GPU.
+    """Renders anti-aliased rectangles, circles, lines and textured 2D sprites in a single GPU dispatch.
 
-    Si `do_clear != 0`, part de `clear_rgba` (scène 2D pure ou RenderTarget).
-    Sinon, compose directement par-dessus `base` (couche 2D au-dessus de la 3D).
+    If `do_clear != 0`, starts from `clear_rgba` (pure 2D scene or RenderTarget).
+    Otherwise, composites directly over `base` (2D layer above the 3D).
     """
     py, px = gs.index()
     h = base.shape[0]
@@ -42,7 +42,7 @@ def render_2d_shapes(
     g = float((c0 >> gs.u32(8)) & mask)
     b = float((c0 >> gs.u32(16)) & mask)
 
-    # Coordonnées pixel → monde 2D (origine caméra au centre de l'écran, Y vers le bas)
+    # Pixel coordinates → 2D world (camera origin at the screen centre, Y pointing down)
     sx = (float(px) + 0.5 - float(w) * 0.5) * cam_inv_zoom
     sy = (float(py) + 0.5 - float(h) * 0.5) * cam_inv_zoom
     wx = cam_x + sx * cam_cos - sy * cam_sin
@@ -232,7 +232,7 @@ def scatter_particles_2d(
     point_size: gs.i32,
     layer: gs.Out[gs.u32["h", "w"]],
 ):
-    """Projette et dessine N particules 2D directement en VRAM (`gs.atomic_max`, 0 copie CPU)."""
+    """Projects and draws N 2D particles directly in VRAM (`gs.atomic_max`, no CPU copy)."""
     i = gs.index()
     h = layer.shape[0]
     w = layer.shape[1]
@@ -258,7 +258,7 @@ def scatter_particles_2d(
 
 @gs.kernel
 def composite_particles_2d(base: gs.u32["h", "w"], layer: gs.u32["h", "w"]) -> gs.u32["h", "w"]:
-    """Superpose la couche particules 2D (où `layer != 0`) sur le framebuffer."""
+    """Overlays the 2D particle layer (where `layer != 0`) on the framebuffer."""
     py, px = gs.index()
     p = layer[py, px]
     if p != gs.u32(0):

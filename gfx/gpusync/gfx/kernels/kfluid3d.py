@@ -1,14 +1,14 @@
-"""Kernels 100 % GPU (`@gs.kernel`) pour le moteur fluide volumétrique 3D nouvelle génération :
-1. Solveur **Staggered MAC Grid 3D FLIP / PIC** (Blender Mantaflow / Bridson, O(N) jusqu'à 25 000+ gouttes).
-2. **Système Whitewater GPU** (Sebastian Lague `Rendering Fluids`) : milliers de micro-particules réelles
-   d'embruns (*spray* dans l'air), d'écume de surface (*foam*) et de bulles sous-marines (*bubbles*).
-3. **Volume 3D continu haute résolution** (`96×60×52` en VRAM, filtrage 3D séparable).
-4. **Raytracing 3D optique à 2 rebonds (`fluid_raymarch_3d`)** :
-   - Isosurface 3D exacte + contact parfaitement plat contre les vitres de l'aquarium.
-   - Normales 3D C¹ trilinéaires exactes (`-∇density`).
-   - **Réfraction 3D Snell entrée (air→eau) + sortie (eau→air) + Réflexion Interne Totale (TIR)** !
-   - **Absorption Beer-Lambert exacte**, **caustiques sous-marines**, **ombre translucide du fluide** sur le fond,
-     **réflexion Fresnel + skybox HDRI** et incrustation des micro-particules *whitewater* (spray/foam/bubbles).
+"""100 % GPU kernels (`@gs.kernel`) for the next-generation volumetric 3D fluid engine:
+1. **Staggered 3D MAC grid FLIP / PIC** solver (Blender Mantaflow / Bridson, O(N) up to 25,000+ drops).
+2. **GPU whitewater system** (Sebastian Lague, `Rendering Fluids`): thousands of real micro-particles
+   of spray (*spray* in the air), surface foam (*foam*) and underwater bubbles (*bubbles*).
+3. **Continuous high-resolution 3D volume** (`96×60×52` in VRAM, separable 3D filtering).
+4. **Two-bounce optical 3D ray tracing (`fluid_raymarch_3d`)**:
+   - Exact 3D isosurface + perfectly flat contact against the aquarium glass.
+   - Exact trilinear C¹ 3D normals (`-∇density`).
+   - **3D Snell refraction on entry (air→water) + exit (water→air) + total internal reflection (TIR)**!
+   - **Exact Beer-Lambert absorption**, **underwater caustics**, **translucent fluid shadow** on the bottom,
+     **Fresnel reflection + HDRI skybox** and inlay of the *whitewater* micro-particles (spray / foam / bubbles).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def mac_p2g(
     w_wt: gs.Out[gs.u32["nw"], 0],
     cell_cnt: gs.Out[gs.u32["nc"], 0],
 ):
-    """P2G sur grille MAC décalée : splatte u sur faces X, v sur faces Y, w sur faces Z et densité au centre."""
+    """P2G on a staggered MAC grid: splats u on X faces, v on Y faces, w on Z faces and density at the centre."""
     i = gs.index()
     _z = (u_tpl[0] + v_tpl[0] + w_tpl[0] + c_tpl[0]) * 0.0
 
@@ -84,7 +84,7 @@ def mac_p2g(
                 wt = wx * wy * wz * 256.0
                 if wt > 0.5:
                     idx = (uz0 + dz) * u_sz + (uy0 + dy) * nx1 + (ux0 + dx)
-                    # Poids entier commun aux deux sommes : sinon la moyenne est biaisée
+                    # Integer weight shared by both sums: otherwise the mean is biased
                     q = gs.u32(wt + 0.5)
                     gs.atomic_add(u_wt, idx, q)
                     gs.atomic_add(u_sum, idx, gs.u32(float(q) * vx_b + 0.5))
@@ -110,7 +110,7 @@ def mac_p2g(
                 wt = wx * wy * wz * 256.0
                 if wt > 0.5:
                     idx = (vz0 + dz) * v_sz + (vy0 + dy) * nx + (vx0 + dx)
-                    # Poids entier commun aux deux sommes : sinon la moyenne est biaisée
+                    # Integer weight shared by both sums: otherwise the mean is biased
                     q = gs.u32(wt + 0.5)
                     gs.atomic_add(v_wt, idx, q)
                     gs.atomic_add(v_sum, idx, gs.u32(float(q) * vy_b + 0.5))
@@ -135,7 +135,7 @@ def mac_p2g(
                 wt = wx * wy * wz * 256.0
                 if wt > 0.5:
                     idx = (wz0 + dz) * w_sz + (wy0 + dy) * nx + (wx0 + dx)
-                    # Poids entier commun aux deux sommes : sinon la moyenne est biaisée
+                    # Integer weight shared by both sums: otherwise the mean is biased
                     q = gs.u32(wt + 0.5)
                     gs.atomic_add(w_wt, idx, q)
                     gs.atomic_add(w_sum, idx, gs.u32(float(q) * vz_b + 0.5))
@@ -151,7 +151,7 @@ def mac_face_forces(
     axis_max: gs.i32,
     accel_dt: gs.f32,
 ) -> (gs.f32["nf"], gs.f32["nf"]):
-    """Normalise une grille de faces MAC (u, v ou w) et renvoie `(vel_old, vel_star)` avec parois solides."""
+    """Normalizes a grid of MAC faces (u, v or w) and returns `(vel_old, vel_star)` with solid walls."""
     idx = gs.index()
     plane = stride_x * stride_y
     iz = idx // plane
@@ -190,7 +190,7 @@ def mac_mass_splat(
     floor_y: gs.f32,
     mass: gs.Out[gs.u32["nc"], 0],
 ):
-    """Masse trilinéaire au centre des cellules (256 = une particule)."""
+    """Trilinear mass at the cell centres (256 = one particle)."""
     i = gs.index()
     _z = c_tpl[0] * 0.0
     gx = gs.min(gs.max((pos[i, 0] + bx) / gs.max(2.0 * bx, 1e-4) * float(nx) - 0.5 + _z, 0.0), float(nx) - 1.001)
@@ -214,7 +214,7 @@ def mac_mass_splat(
 
 @gs.kernel
 def mac_fill(mass: gs.u32["nc"], rest_cnt: gs.f32) -> gs.f32["nc"]:
-    """Taux de remplissage de chaque cellule (1 = eau au repos). Eau à partir de 0,5 : la surface est à ce niveau."""
+    """Fill ratio of each cell (1 = water at rest). Water from 0.5 on: the surface is at that level."""
     cid = gs.index()
     return float(mass[cid]) / (256.0 * rest_cnt)
 
@@ -229,7 +229,7 @@ def mac_divergence(
     ny: gs.i32,
     nz: gs.i32,
 ) -> gs.f32["nc"]:
-    """Divergence MAC sur 1 cellule."""
+    """MAC divergence over 1 cell."""
     cid = gs.index()
     f = fill[cid]
     if f < 0.5:
@@ -253,10 +253,10 @@ def mac_divergence(
 
 @gs.kernel
 def mac_pressure_diag(fill: gs.f32["nc"], nx: gs.i32, ny: gs.i32, nz: gs.i32) -> gs.f32["nc"]:
-    """Inverse de la diagonale du système de pression (0 : air).
+    """Inverse of the diagonal of the pressure system (0: air).
 
-    Parois en Neumann ; pression nulle à la surface libre, placée à l'intérieur de la cellule (distance `theta`
-    au niveau 0,5 du remplissage) et non au centre de la cellule d'air."""
+    Neumann walls; zero pressure at the free surface, placed inside the cell (distance `theta`
+    to the 0.5 fill level) rather than at the centre of the air cell."""
     cid = gs.index()
     f = fill[cid]
     if f < 0.5:
@@ -303,7 +303,7 @@ def mac_pressure_jacobi2(
     ny: gs.i32,
     nz: gs.i32,
 ) -> gs.f32["nc"]:
-    """Deux itérations de Jacobi en un lancement : la deuxième ne dépend que des six voisines de la première."""
+    """Two Jacobi iterations in one launch: the second only depends on the six neighbours of the first."""
     cid = gs.index()
     inv_c = inv_diag[cid]
     if inv_c <= 0.0:
@@ -361,7 +361,7 @@ def mac_project_face(
     nz: gs.i32,
     axis: gs.i32,
 ) -> gs.f32["nf"]:
-    """Soustrait le gradient de pression sur chaque face interne (même surface libre que `mac_pressure_diag`)."""
+    """Subtracts the pressure gradient on each interior face (same free surface as `mac_pressure_diag`)."""
     idx = gs.index()
     sx = nx + 1 if axis == 0 else nx
     sy = ny + 1 if axis == 1 else ny
@@ -394,7 +394,7 @@ def mac_project_face(
     f_lo = fill[c_lo]
     grad = p[c_hi] - p[c_lo]
     if f_hi < 0.5 and f_lo < 0.5:
-        # Gouttes isolées : chute libre
+        # Isolated drops: free fall
         grad = 0.0
     elif f_hi < 0.5:
         grad = -p[c_lo] / gs.min(gs.max((f_lo - 0.5) / gs.max(f_lo - f_hi, 1e-4), 0.25), 1.0)
@@ -411,7 +411,7 @@ def mac_volume_source(
     nz: gs.i32,
     density_push: gs.f32,
 ) -> gs.f32["nc"]:
-    """Second membre du maintien de volume : une cellule trop pleine se vide, une cellule creuse se remplit."""
+    """Right-hand side of volume preservation: an overfull cell empties, a hollow cell fills."""
     cid = gs.index()
     f = fill[cid]
     if f < 0.5:
@@ -423,7 +423,7 @@ def mac_volume_source(
     ix = rem - iy * nx
     excess = f - 1.0
     if excess < 0.0:
-        # Une cellule de surface est à moitié vide par nature : seules les cellules entourées d'eau comptent
+        # A surface cell is half empty by nature: only cells surrounded by water count
         inner = 1
         if ix > 0 and fill[cid - 1] < 0.8:
             inner = 0
@@ -454,9 +454,9 @@ def mac_volume_move(
     bz: gs.f32,
     floor_y: gs.f32,
 ) -> gs.f32["n", "c4"]:
-    """Maintien du volume par les positions seules (d'après Kugelstadt et al., « Implicit Density Projection », 2019).
+    """Volume preservation through the positions only (after Kugelstadt et al., "Implicit Density Projection", 2019).
 
-    Passer par les vitesses donnerait à l'eau une énergie qu'elle n'a pas : elle ne se calmerait jamais."""
+    Going through the velocities would give the water an energy it does not have: it would never calm down."""
     i, c = gs.index()
     if c == 3:
         return pos[i, 3]
@@ -516,9 +516,9 @@ def mac_shift(
     strength: gs.f32,
     spacing: gs.f32,
 ) -> gs.f32["n", "c4"]:
-    """Redistribue les particules au cœur de l'eau : petit déplacement des zones denses vers les zones creuses.
+    """Redistributes the particles in the core of the water: a small move from dense areas toward hollow ones.
 
-    Nul près de la surface (densité sous 75 % du cœur), où le gradient est celui de la surface elle-même."""
+    Zero near the surface (density below 75 % of the core), where the gradient is that of the surface itself."""
     i, c = gs.index()
     val = pos[i, c]
     if c == 3:
@@ -582,7 +582,7 @@ def mac_g2p(
     restitution: gs.f32,
     max_speed: gs.f32,
 ) -> (gs.f32["n", "c4"], gs.f32["n", "c4"]):
-    """G2P MAC trilinéaire exact (PIC/FLIP) + énergie de turbulence (`vel[i, 3]`) pour l'émission *whitewater*."""
+    """Exact trilinear MAC G2P (PIC/FLIP) + turbulence energy (`vel[i, 3]`) for *whitewater* emission."""
     i, c = gs.index()
     px = pos[i, 0]
     py = pos[i, 1]
@@ -593,7 +593,7 @@ def mac_g2p(
     gy = gs.min(gs.max((py - floor_y) / gs.max(by, 1e-4) * float(ny), 0.01), float(ny) - 0.01)
     gz = gs.min(gs.max((pz + bz) / gs.max(2.0 * bz, 1e-4) * float(nz), 0.01), float(nz) - 0.01)
 
-    # 1) Interpolation trilinéaire U
+    # 1) Trilinear interpolation of U
     ux_f = gs.min(gs.max(gx, 0.001), float(nx) - 0.001)
     uy_f = gs.min(gs.max(gy - 0.5, 0.001), float(ny - 1) - 0.001)
     uz_f = gs.min(gs.max(gz - 0.5, 0.001), float(nz - 1) - 0.001)
@@ -619,7 +619,7 @@ def mac_g2p(
                 pic_x += un * wt
                 dvx += (un - u_old[idx]) * wt
 
-    # 2) Interpolation trilinéaire V
+    # 2) Trilinear interpolation of V
     vx_f = gs.min(gs.max(gx - 0.5, 0.001), float(nx - 1) - 0.001)
     vy_f = gs.min(gs.max(gy, 0.001), float(ny) - 0.001)
     vz_f = gs.min(gs.max(gz - 0.5, 0.001), float(nz - 1) - 0.001)
@@ -645,7 +645,7 @@ def mac_g2p(
                 pic_y += vn * wt
                 dvy += (vn - v_old[idx]) * wt
 
-    # 3) Interpolation trilinéaire W
+    # 3) Trilinear interpolation of W
     wx_f = gs.min(gs.max(gx - 0.5, 0.001), float(nx - 1) - 0.001)
     wy_f = gs.min(gs.max(gy - 0.5, 0.001), float(ny - 1) - 0.001)
     wz_f = gs.min(gs.max(gz, 0.001), float(nz) - 0.001)
@@ -683,7 +683,7 @@ def mac_g2p(
         vz = vz * sc
         sp = max_speed
 
-    # Énergie de turbulence / air piégé (alimente les micro-particules whitewater spray/foam/bubbles)
+    # Turbulence energy / trapped air (feeds the spray / foam / bubble whitewater micro-particles)
     cx = gs.min(gs.max(int(gs.floor(gx)), 0), nx - 1)
     cy = gs.min(gs.max(int(gs.floor(gy)), 0), ny - 1)
     cz = gs.min(gs.max(int(gs.floor(gz)), 0), nz - 1)
@@ -768,7 +768,7 @@ def fluid_velocity_splat(
     mom_y: gs.Out[gs.u32["nc"], 0],
     mom_z: gs.Out[gs.u32["nc"], 0],
 ):
-    """Vitesse locale du fluide : masse et quantité de mouvement cumulées au centre des cellules."""
+    """Local fluid velocity: mass and momentum accumulated at the cell centres."""
     i = gs.index()
     _z = cell_tpl[0] * 0.0
     gx = gs.min(gs.max((pos[i, 0] + bx) / gs.max(2.0 * bx, 1e-4) * float(nx) - 0.5 + _z, 0.0), float(nx) - 1.001)
@@ -806,7 +806,7 @@ def fluid_velocity_resolve(
     mom_z: gs.u32["nc"],
     c4_tpl: gs.f32["c4"],
 ) -> gs.f32["nc", "c4"]:
-    """`[vx, vy, vz, masse]` par cellule (masse en nombre de particules)."""
+    """`[vx, vy, vz, mass]` per cell (mass in number of particles)."""
     cid, c = gs.index()
     m = mass[cid]
     out = float(m) / 256.0 + c4_tpl[0] * 0.0
@@ -834,7 +834,7 @@ def mac_cell_velocity(
     ny: gs.i32,
     nz: gs.i32,
 ) -> gs.f32["nc", "c4"]:
-    """`[vx, vy, vz, masse]` par cellule, lu sur les faces MAC du pas (même contenu que `fluid_velocity_resolve`)."""
+    """`[vx, vy, vz, mass]` per cell, read on the step's MAC faces (same content as `fluid_velocity_resolve`)."""
     cid, c = gs.index()
     if c == 3:
         return fill[cid] * rest_cnt + c4_tpl[0] * 0.0
@@ -855,7 +855,7 @@ def mac_cell_velocity(
 @gs.kernel
 def ww_step(
     ww_pos: gs.f32["nw", "c4"],  # [x, y, z, vie]
-    ww_vel: gs.f32["nw", "c4"],  # [vx, vy, vz, état : 0 = bulle, 1 = écume, 2 = embrun]
+    ww_vel: gs.f32["nw", "c4"],  # [vx, vy, vz, state: 0 = bubble, 1 = foam, 2 = spray]
     fl_pos: gs.f32["nf", "c4"],
     fl_vel: gs.f32["nf", "c4"],
     cells: gs.f32["nc", "c4"],
@@ -877,12 +877,12 @@ def ww_step(
     frame_seed: gs.i32,
     rate: gs.f32,
 ) -> (gs.f32["nw", "c4"], gs.f32["nw", "c4"]):
-    """Embruns, écume et bulles, d'après Ihmsen et al., « Unified Spray, Foam and Bubbles » (CGI 2012).
+    """Spray, foam and bubbles, after Ihmsen et al., "Unified Spray, Foam and Bubbles" (CGI 2012).
 
-    Naissance selon trois potentiels (air piégé, crête de vague, énergie cinétique) ; un embrun suit une
-    trajectoire balistique, l'écume est portée par la vitesse locale de l'eau, une bulle ajoute flottabilité
-    et traînée. Deux écarts à l'article : les sommes sur les voisins sont faites sur les 26 cellules voisines,
-    et chaque emplacement libre tire une particule de fluide au hasard (le nombre total reste borné)."""
+    Birth according to three potentials (trapped air, wave crest, kinetic energy); spray follows a
+    ballistic trajectory, foam is carried by the local water velocity, a bubble adds buoyancy
+    and drag. Two departures from the paper: the sums over neighbours use the 26 neighbouring cells,
+    and each free slot draws a fluid particle at random (the total number stays bounded)."""
     i, c = gs.index()
     nf = fl_pos.shape[0]
 
@@ -899,7 +899,7 @@ def ww_step(
     csz = 2.0 * bz / float(nz)
 
     if life <= 0.0:
-        # Suite pseudo-aléatoire propre à l'emplacement et au pas
+        # Pseudo-random sequence specific to the slot and the step
         h = gs.u32(i) * gs.u32(747796405) + gs.u32(frame_seed) * gs.u32(2891336453)
         h = (h ^ (h >> gs.u32(16))) * gs.u32(2246822519)
         h = (h ^ (h >> gs.u32(13))) * gs.u32(3266489917)
@@ -919,7 +919,7 @@ def ww_step(
         uy = fl_vel[src, 1]
         uz = fl_vel[src, 2]
         sp2 = ux * ux + uy * uy + uz * uz
-        # Énergie cinétique (masse 1) : Phi(0,5 v², 1,5, 10)
+        # Kinetic energy (mass 1): Phi(0.5 v², 1.5, 10)
         i_k = gs.min(gs.max((0.5 * sp2 - 1.5) / 8.5, 0.0), 1.0)
         if i_k > 0.0:
             speed = gs.sqrt(sp2)
@@ -928,7 +928,7 @@ def ww_step(
             iz = gs.min(gs.max(int((fz + bz) / csz), 1), nz - 2)
             base = (iz * ny + iy) * nx + ix
             plane_c = nx * ny
-            # Normale : opposée au gradient de la masse
+            # Normal: opposite to the gradient of the mass
             nnx = cells[base - 1, 3] - cells[base + 1, 3]
             nny = cells[base - nx, 3] - cells[base + nx, 3]
             nnz = cells[base - plane_c, 3] - cells[base + plane_c, 3]
@@ -950,7 +950,7 @@ def ww_step(
                 nid = base + oz * plane_c + oy * nx + ox
                 mj = cells[nid, 3]
                 if k != 13 and mj > 0.05:
-                    # Direction du voisin vers la particule
+                    # Direction from the neighbour to the particle
                     ex = -float(ox) * csx
                     ey = -float(oy) * csy
                     ez = -float(oz) * csz
@@ -963,7 +963,7 @@ def ww_step(
                     ry = uy - cells[nid, 1]
                     rz = uz - cells[nid, 2]
                     r_len = gs.sqrt(rx * rx + ry * ry + rz * rz)
-                    # |v_ij| (1 - v̂·x̂) : nul si elles s'éloignent, double si elles se rapprochent
+                    # |v_ij| (1 - v̂·x̂): zero if they move apart, double if they come closer
                     v_diff += (r_len - (rx * ex + ry * ey + rz * ez)) * wj
                     if crest_ok != 0 and -(ex * nnx + ey * nny + ez * nnz) < 0.0:
                         jx = gs.min(gs.max(ix + ox, 1), nx - 2)
@@ -981,7 +981,7 @@ def ww_step(
             i_wc = gs.min(gs.max((kappa * inv_m - 0.6) / 2.4, 0.0), 1.0)
             n_d = i_k * (i_ta + i_wc) * rate * dt * float(nf) / float(ww_pos.shape[0])
             if r_accept < n_d:
-                # Cylindre autour de la trajectoire de la particule pendant le pas
+                # Cylinder around the particle's trajectory during the step
                 inv_s = 1.0 / gs.max(speed, 1e-4)
                 dxu = ux * inv_s
                 dyu = uy * inv_s
@@ -1010,15 +1010,15 @@ def ww_step(
                 px = gs.min(gs.max(fx + offx + along * dxu, -bx + 0.03), bx - 0.03)
                 py = gs.max(fy + offy + along * dyu, floor_y + 0.03)
                 pz = gs.min(gs.max(fz + offz + along * dzu, -bz + 0.03), bz - 0.03)
-                # L'article prend l'écart comme vitesse ; amplifié, car le rayon vaut ici quelques centimètres
+                # The paper takes the deviation as a velocity; amplified, since the radius is a few centimetres here
                 vx = ux + offx * 4.0
                 vy = uy + offy * 4.0
                 vz = uz + offz * 4.0
-                # Les amas d'écume durent plus longtemps : durée liée aux potentiels
+                # Foam clusters last longer: lifetime tied to the potentials
                 life = 1.2 + 3.3 * gs.min(i_k * (i_ta + i_wc), 1.0)
                 kind = 1.0
     else:
-        # Densité locale (nombre de voisins de l'article : < 6 embrun, > 20 bulle, pour ~33 au cœur)
+        # Local density (the paper's neighbour count: < 6 spray, > 20 bubble, for ~33 in the core)
         gx = gs.min(gs.max((px + bx) / gs.max(2.0 * bx, 1e-4) * float(dx - 1), 0.0), float(dx) - 1.001)
         gy = gs.min(gs.max((py - floor_y) / gs.max(by, 1e-4) * float(dy - 1), 0.0), float(dy) - 1.001)
         gz = gs.min(gs.max((pz + bz) / gs.max(2.0 * bz, 1e-4) * float(dz - 1), 0.0), float(dz) - 1.001)
@@ -1034,7 +1034,7 @@ def ww_step(
         d_hi = (dens[b1] * (1.0 - ax) + dens[b1 + 1] * ax) * (1.0 - ay) + (dens[b1 + dx] * (1.0 - ax) + dens[b1 + dx + 1] * ax) * ay
         d_loc = d_lo * (1.0 - az) + d_hi * az
 
-        # Vitesse locale de l'eau, pondérée par la masse
+        # Local water velocity, weighted by mass
         lx = gs.min(gs.max((px + bx) / csx - 0.5, 0.0), float(nx) - 1.001)
         ly = gs.min(gs.max((py - floor_y) / csy - 0.5, 0.0), float(ny) - 1.001)
         lz = gs.min(gs.max((pz + bz) / csz - 0.5, 0.0), float(nz) - 1.001)
@@ -1069,17 +1069,17 @@ def ww_step(
             px += vx * dt
             py += vy * dt
             pz += vz * dt
-            # Ajout à l'article : décompte lent, pour libérer un jour l'emplacement
+            # Addition to the paper: slow countdown, to free the slot some day
             life -= dt * 0.25
         elif d_loc < iso_level * 0.95:
-            # Écume : position portée par l'eau, vitesse propre inchangée
+            # Foam: position carried by the water, own velocity unchanged
             kind = 1.0
             px += wx_f * dt
             py += wy_f * dt
             pz += wz_f * dt
             life -= dt
         else:
-            # Bulle : flottabilité k_b = 2, traînée k_d = 0,8
+            # Bubble: buoyancy k_b = 2, drag k_d = 0.8
             kind = 0.0
             vx += 0.8 * (wx_f - vx)
             vy += 2.0 * gravity * dt + 0.8 * (wy_f - vy)
@@ -1130,7 +1130,7 @@ def ww_splat_screen(
     ww_alpha: gs.Out[gs.u32["h", "w"], 0],
     ww_depth: gs.Out[gs.u32["h", "w"], 4294967295],
 ):
-    """Projette les 6 000 micro-particules whitewater (spray/foam/bubbles) en points scintillants 1–2 px."""
+    """Projects the 6,000 whitewater micro-particles (spray / foam / bubbles) as 1–2 px sparkling points."""
     i = gs.index()
     life = ww_pos[i, 3]
     if life <= 0.02:
@@ -1162,7 +1162,7 @@ def ww_splat_screen(
 
     kind = ww_vel[i, 3]
     fade = gs.min(life * 1.4, 1.0)
-    # Intensité : spray brillant, écume vive, bulles douces
+    # Intensity: bright spray, vivid foam, soft bubbles
     base_a = 140.0 if kind > 1.5 else (175.0 if kind > 0.5 else 95.0)
     a_c = gs.u32(base_a * fade)
     a_n = gs.u32(base_a * 0.35 * fade)
@@ -1170,12 +1170,12 @@ def ww_splat_screen(
 
     gs.atomic_add(ww_alpha, (py, px), a_c)
     gs.atomic_min(ww_depth, (py, px), d_u32)
-    # Micro-halo croix 1 px pour un scintillement doux sans pixel dur
+    # 1 px cross micro-halo for a soft sparkle without hard pixels
     gs.atomic_add(ww_alpha, (py, px + 1), a_n)
     gs.atomic_add(ww_alpha, (py + 1, px), a_n)
 
 
-# ───────────────────────── 3. Volume 3D Continu Densité Haute Résolution (96×60×52) ─────────────────────────
+# ───────────────────────── 3. Continuous high-resolution 3D density volume (96×60×52) ─────────────────────────
 
 
 @gs.kernel(grid=("n",))
@@ -1191,7 +1191,7 @@ def vol_splat_density(
     floor_y: gs.f32,
     dens_u: gs.Out[gs.u32["nv"], 0],
 ):
-    """Projette toutes les particules sur un champ scalaire 3D haute résolution (noyau cubique 3×3×3)."""
+    """Projects every particle onto a high-resolution 3D scalar field (3×3×3 cubic kernel)."""
     i = gs.index()
     _z = vol_tpl[0] * 0.0
     fx = (pos[i, 0] + bx) / gs.max(2.0 * bx, 1e-4) * float(dx - 1) + _z
@@ -1207,7 +1207,7 @@ def vol_splat_density(
         iz = cz + oz
         if iz >= 0 and iz < dz:
             wz = gs.max(1.0 - gs.abs(float(iz) - fz) * 0.65, 0.0)
-            # Nœud posé sur une paroi : la moitié du noyau est hors du bassin, on la compte par symétrie
+            # Node on a wall: half the kernel is outside the basin, counted by symmetry
             wz2 = wz * wz * (2.0 if iz == 0 or iz == dz - 1 else 1.0)
             for oy in range(-1, 2):
                 iy = cy + oy
@@ -1229,7 +1229,7 @@ def vol_unpack_f32(
     dens_u: gs.u32["nv"],
     dens_scale: gs.f32,
 ) -> gs.f32["nv"]:
-    """Convertit le volume atomique `u32` en champ scalaire `f32` normalisé."""
+    """Converts the atomic `u32` volume into a normalized `f32` scalar field."""
     vid = gs.index()
     d = float(dens_u[vid]) / 512.0 * dens_scale
     return gs.min(d, 4.0)
@@ -1243,7 +1243,7 @@ def vol_blur_axis(
     dz: gs.i32,
     axis: gs.i32,
 ) -> gs.f32["nv"]:
-    """Filtre gaussien 3D séparable `[1, 4, 6, 4, 1]/16` sur X, Y ou Z."""
+    """Separable 3D Gaussian filter `[1, 4, 6, 4, 1]/16` along X, Y or Z."""
     vid = gs.index()
     plane = dx * dy
     iz = vid // plane
@@ -1279,7 +1279,7 @@ def vol_blur_axis(
 
 @gs.kernel
 def vol_wet_walls(dens: gs.f32["nv"], dx: gs.i32, dy: gs.i32, dz: gs.i32) -> gs.f32["nv"]:
-    """L'eau touche ses parois : un nœud du bord (vitres et fond) est au moins aussi dense que son voisin intérieur."""
+    """The water touches its walls: an edge node (glass and bottom) is at least as dense as its inner neighbour."""
     vid = gs.index()
     plane = dx * dy
     iz = vid // plane
@@ -1292,7 +1292,7 @@ def vol_wet_walls(dens: gs.f32["nv"], dx: gs.i32, dy: gs.i32, dz: gs.i32) -> gs.
     return gs.max(dens[vid], dens[jz * plane + jy * dx + jx])
 
 
-# ───────────────────────── 3 bis. Caustiques : rayons du soleil réfractés puis cumulés sur le fond ─────────────────────────
+# ───────────────────────── 3 bis. Caustics: sun rays refracted, then accumulated on the bottom ─────────────────────────
 
 
 @gs.kernel
@@ -1302,7 +1302,7 @@ def water_height(
     dy: gs.i32,
     iso_level: gs.f32,
 ) -> gs.f32["dz", "dx"]:
-    """Hauteur d'eau de chaque colonne (en voxels, 0 = sec) : première sortie du liquide en montant du fond."""
+    """Water height of each column (in voxels, 0 = dry): first exit from the liquid going up from the bottom."""
     iz, ix = gs.index()
     dx = tpl.shape[1]
     base = iz * dx * dy + ix
@@ -1323,7 +1323,7 @@ def water_height(
 
 @gs.kernel
 def height_blur(src: gs.f32["dz", "dx"], axis: gs.i32) -> gs.f32["dz", "dx"]:
-    """Lissage `[1, 4, 6, 4, 1]` de la hauteur ; une colonne sèche ne compte pas dans la moyenne."""
+    """`[1, 4, 6, 4, 1]` smoothing of the height; a dry column does not count in the mean."""
     iz, ix = gs.index()
     dz = src.shape[0]
     dx = src.shape[1]
@@ -1366,9 +1366,9 @@ def caustic_photons(
     ior: gs.f32,
     photons: gs.Out[gs.u32["mz", "mx"], 0],
 ):
-    """Un photon par point de la grille : réfracté par la pente de la surface, déposé en bilinéaire sur le fond.
+    """One photon per grid point: refracted by the surface slope, deposited bilinearly on the bottom.
 
-    La grille déborde du bassin (hauteur prolongée) : sans cela, un soleil oblique laisserait un bord sans lumière."""
+    The grid extends past the basin (height extended): otherwise an oblique sun would leave an unlit edge."""
     jz, jx = gs.index()
     pz = grid_tpl.shape[0]
     px = grid_tpl.shape[1]
@@ -1376,10 +1376,10 @@ def caustic_photons(
     dx = height.shape[1]
     mz = map_tpl.shape[0]
     mx = map_tpl.shape[1]
-    # Position sur le bassin élargi de 50 % (25 % de chaque côté), en fraction de la largeur
+    # Position on the basin widened by 50 % (25 % on each side), as a fraction of the width
     u = (float(jx) + 0.5) / float(px) * 1.5 - 0.25
     v = (float(jz) + 0.5) / float(pz) * 1.5 - 0.25
-    # Hauteur lue à trois voxels au moins des parois, où l'eau monte et descend sans cesse
+    # Height read at least three voxels from the walls, where the water keeps rising and falling
     gx = gs.min(gs.max(u * float(dx - 1), 3.0), float(dx - 4))
     gz = gs.min(gs.max(v * float(dz - 1), 3.0), float(dz - 4))
     ix = gs.min(int(gx), dx - 2)
@@ -1398,7 +1398,7 @@ def caustic_photons(
     if h00 <= 0.0 or h10 <= 0.0 or h01 <= 0.0 or h11 <= 0.0:
         wet = 0
     if wet != 0:
-        # Pentes lissées entre les différences des quatre voisins (continues d'une case à l'autre)
+        # Slopes smoothed between the differences of the four neighbours (continuous from one cell to the next)
         xm = gs.max(ix - 1, 0)
         xp = gs.min(ix + 2, dx - 1)
         zm = gs.max(iz - 1, 0)
@@ -1443,7 +1443,7 @@ def caustic_photons(
 
 @gs.kernel
 def caustic_resolve(photons: gs.u32["mz", "mx"], expected: gs.f32) -> gs.f32["mz", "mx"]:
-    """Éclairement relatif du fond (1 = eau plate), lissé en 3×3."""
+    """Relative irradiance of the bottom (1 = flat water), smoothed over 3×3."""
     iz, ix = gs.index()
     mz = photons.shape[0]
     mx = photons.shape[1]
@@ -1455,14 +1455,14 @@ def caustic_resolve(photons: gs.u32["mz", "mx"], expected: gs.f32) -> gs.f32["mz
             jz = iz + oz
             if jx >= 0 and jx < mx and jz >= 0 and jz < mz:
                 wk = float(2 - gs.abs(ox)) * float(2 - gs.abs(oz))
-                # Les bords extrêmes ne reçoivent qu'une partie des dépôts bilinéaires : on les ignore
+                # The outermost edges only receive part of the bilinear deposits: ignore them
                 if jx > 0 and jx < mx - 1 and jz > 0 and jz < mz - 1:
                     total += float(photons[jz, jx]) * wk
                     weight += wk
     return total / (gs.max(weight, 1.0) * 1024.0 * gs.max(expected, 1e-4))
 
 
-# ───────────────────────── 4. Raytracing 3D 2-Rebonds (Snell Entrée + Sortie + TIR + Whitewater) ─────────────────────────
+# ───────────────────────── 4. Two-bounce 3D ray tracing (Snell entry + exit + TIR + whitewater) ─────────────────────────
 
 
 @gs.kernel
@@ -1531,8 +1531,8 @@ def fluid_raymarch_3d(
     foam_strength: gs.f32,
     caustic_strength: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Raytracing 3D optique à 2 rebonds : Snell entrée & sortie, Réflexion Interne Totale (TIR),
-    Beer-Lambert, caustiques sous-marines, ombre translucide sur le sol, Fresnel HDRI et micro-particules whitewater."""
+    """Two-bounce optical 3D ray tracing: Snell entry & exit, total internal reflection (TIR),
+    Beer-Lambert, underwater caustics, translucent shadow on the floor, Fresnel HDRI and whitewater micro-particles."""
     py, px = gs.index()
     h = zbuf.shape[0]
     w = zbuf.shape[1]
@@ -1540,7 +1540,7 @@ def fluid_raymarch_3d(
     bg_g0 = hdr_g[py, px]
     bg_b0 = hdr_b[py, px]
 
-    # 1) Rayon caméra 3D
+    # 1) 3D camera ray
     aspect = float(w) / float(h)
     ndc_x = ((float(px) + 0.5) / float(w) * 2.0 - 1.0) * aspect * tan_hfov
     ndc_y = (1.0 - (float(py) + 0.5) / float(h) * 2.0) * tan_hfov
@@ -1560,14 +1560,14 @@ def fluid_raymarch_3d(
         scene_z = near + (float(sz) / 16777215.0) * depth_range
     scene_t = scene_z / cos_ray
 
-    # Micro-particules whitewater (spray aérien / écume / bulles) à ce pixel
+    # Whitewater micro-particles (airborne spray / foam / bubbles) at this pixel
     ww_a_raw = float(ww_alpha[py, px]) / 255.0
     ww_d_u = ww_depth[py, px]
     ww_z = far + 20.0
     if ww_d_u != gs.u32(4294967295):
         ww_z = near + (float(ww_d_u) / 4000000000.0) * depth_range
 
-    # 2) Intersection Rayon ↔ Boîte de l'aquarium
+    # 2) Ray ↔ aquarium box intersection
     inv_rx = 1.0 / (rdx if gs.abs(rdx) > 1e-6 else 1e-6)
     inv_ry = 1.0 / (rdy if gs.abs(rdy) > 1e-6 else 1e-6)
     inv_rz = 1.0 / (rdz if gs.abs(rdz) > 1e-6 else 1e-6)
@@ -1591,7 +1591,7 @@ def fluid_raymarch_3d(
     fdz = float(dz - 1)
     plane = dx * dy
 
-    # 3) Raymarching 3D jusqu'à l'isosurface d'entrée `density >= iso_level`
+    # 3) 3D ray marching up to the entry isosurface `density >= iso_level`
     hit = 0
     hit_wall = 0
     t_hit = t_enter
@@ -1633,17 +1633,17 @@ def fluid_raymarch_3d(
                     t_cur += step_s
 
     if hit == 0:
-        # Même hors de l'eau, afficher : (a) ombre translucide/caustique sur le sol + (b) embruns (spray) en l'air !
+        # Even outside the water, show: (a) translucent shadow / caustic on the floor + (b) spray in the air!
         out_nr = bg_r0
         out_ng = bg_g0
         out_nb = bg_b0
         if sz != gs.u32(4294967295) and rdy < -0.02:
-            # Ombre douce + caustiques de l'eau projetées sur le sol par le soleil
+            # Soft shadow + water caustics cast on the floor by the sun
             px_s = cam_x + rdx * scene_t
             py_s = cam_y + rdy * scene_t
             pz_s = cam_z + rdz * scene_t
             if gs.abs(py_s - floor_y) < 0.08:
-                # Marcher 6 sondes vers le soleil dans la boîte d'eau pour l'ombre translucide
+                # March 6 probes toward the sun in the water box for the translucent shadow
                 sh_dens = 0.0
                 for sk in range(6):
                     st_l = 0.35 + float(sk) * 0.45
@@ -1657,7 +1657,7 @@ def fluid_raymarch_3d(
                         if dens[igz * plane + igy * dx + igx] >= iso_level * 0.7:
                             sh_dens += 0.45
                 if sh_dens > 0.0:
-                    # Transmission colorée (ombre bleutée de l'eau claire)
+                    # Coloured transmission (bluish shadow of clear water)
                     out_nr = out_nr * gs.exp(-sh_dens * abs_r * 0.85)
                     out_ng = out_ng * gs.exp(-sh_dens * abs_g * 0.85)
                     out_nb = out_nb * gs.exp(-sh_dens * abs_b * 0.85)
@@ -1668,7 +1668,7 @@ def fluid_raymarch_3d(
             out_nb = out_nb * (1.0 - wa) + 1.25 * wa
         return out_nr, out_ng, out_nb
 
-    # 4) Raffinement dichotomique (4 étapes) sur la surface libre d'entrée
+    # 4) Bisection refinement (4 steps) on the free entry surface
     if hit_wall == 0:
         t_lo = t_prev
         t_hi = t_hit
@@ -1705,7 +1705,7 @@ def fluid_raymarch_3d(
     hy = cam_y + rdy * t_hit
     hz = cam_z + rdz * t_hit
 
-    # 5) Normale 3D C1 d'entrée (vitre plane si paroi, sinon gradient 3D trilinéaire exact)
+    # 5) C1 3D entry normal (flat glass if a wall, otherwise the exact trilinear 3D gradient)
     nx = 0.0
     ny = 1.0
     nz = 0.0
@@ -1821,7 +1821,7 @@ def fluid_raymarch_3d(
         ndotv = -ndotv
     ndotv = gs.max(ndotv, 0.01)
 
-    # 6) Rebond 1 — Réfraction Snell Entrée (air → eau)
+    # 6) Bounce 1 — Snell refraction on entry (air → water)
     eta1 = 1.0 / gs.max(ior, 1.001)
     k1 = 1.0 - eta1 * eta1 * (1.0 - ndotv * ndotv)
     r1x = rdx
@@ -1837,7 +1837,7 @@ def fluid_raymarch_3d(
         r1y = r1y * inv_r1
         r1z = r1z * inv_r1
 
-    # 7) Rebond 2 — Marche à travers le volume d'eau jusqu'à la SORTIE (eau → air) ou le fond/paroi !
+    # 7) Bounce 2 — march through the water volume to the EXIT (water → air) or the bottom / wall!
     inv_r1x = 1.0 / (r1x if gs.abs(r1x) > 1e-6 else 1e-6)
     inv_r1y = 1.0 / (r1y if gs.abs(r1y) > 1e-6 else 1e-6)
     inv_r1z = 1.0 / (r1z if gs.abs(r1z) > 1e-6 else 1e-6)
@@ -1852,7 +1852,7 @@ def fluid_raymarch_3d(
     in_lo = 0.0
     in_hi = 0.0
     n_ref = 0
-    # Marche, puis dichotomie (5 étapes) sur la sortie : distance dans l'eau continue, sans paliers
+    # March, then bisection (5 steps) on the exit: continuous distance in the water, without plateaus
     for k in range(72):
         tk = 0.05 + float(k) * ds_in
         if exited_water != 0:
@@ -1894,7 +1894,7 @@ def fluid_raymarch_3d(
     ex_z = hz + r1z * t_in
     water_dist = t_in
 
-    # Direction de sortie (Snell eau → air + Réflexion Interne Totale TIR !)
+    # Exit direction (Snell water → air + total internal reflection, TIR!)
     r2x = r1x
     r2y = r1y
     r2z = r1z
@@ -1904,15 +1904,15 @@ def fluid_raymarch_3d(
     n2z = 0.0
     leaves = exited_water
     if exited_water == 0 and rt_y > gs.min(rt_x, rt_z):
-        # Sortie par une vitre verticale : la normale est celle de la paroi, tournée vers l'eau
+        # Exit through a vertical glass pane: the normal is the wall's, facing the water
         leaves = 1
         if rt_x < rt_z:
             n2x = -1.0 if r1x > 0.0 else 1.0
         else:
             n2z = -1.0 if r1z > 0.0 else 1.0
     if exited_water != 0:
-        # Normale de sortie (pointant vers l'intérieur de l'eau, face au rayon r1)
-        # Gradient interpolé (différences centrées sur 6 points) : direction de sortie continue
+        # Exit normal (pointing into the water, facing ray r1)
+        # Interpolated gradient (centred differences over 6 points): continuous exit direction
         for q in range(6):
             e = 0.85 if (q & 1) == 0 else -0.85
             ax_q = q // 2
@@ -1958,15 +1958,15 @@ def fluid_raymarch_3d(
             r2y = r2y * inv_r2
             r2z = r2z * inv_r2
         else:
-            # RÉFLEXION INTERNE TOTALE (effet prisme / diamant à l'intérieur des vagues !)
+            # TOTAL INTERNAL REFLECTION (prism / diamond effect inside the waves!)
             is_tir = 1
             r2x = r1x + 2.0 * c2 * n2x
             r2y = r1y + 2.0 * c2 * n2y
             r2z = r1z + 2.0 * c2 * n2z
-            # Le rayon reste dans l'eau jusqu'au fond
+            # The ray stays in the water down to the bottom
             water_dist += gs.min((floor_y - ex_y) / r2y, 2.5) if r2y < -0.05 else 0.65
 
-    # 7 bis) Objets de la scène sous l'eau ou derrière elle : le rayon réfracté est suivi dans l'image déjà rendue
+    # 7 bis) Scene objects under or behind the water: the refracted ray is followed in the already rendered image
     hit_obj = 0
     obj_r = 0.0
     obj_g = 0.0
@@ -2012,7 +2012,7 @@ def fluid_raymarch_3d(
         if zq != gs.u32(4294967295):
             z_s = near + (float(zq) / 16777215.0) * depth_range
             y_s = cam_y + (fwd_y + right_y * nqx + up_y * nqy) * z_s
-            # Ni le fond (calculé plus bas avec ses caustiques), ni un objet placé devant l'eau
+            # Neither the bottom (computed below with its caustics) nor an object placed in front of the water
             if vz_q >= z_s and vz_q - z_s < 0.45 and y_s > floor_y + 0.03 and z_s > entry_z + 0.09:
                 behind = 1
         if hit_obj == 0:
@@ -2040,7 +2040,7 @@ def fluid_raymarch_3d(
         if is_tir != 0:
             water_dist = s_hi
 
-    # 8) Évaluer l'environnement vu au bout du rayon réfracté (sol lumineux + caustiques OU skybox HDRI !)
+    # 8) Evaluate the environment seen at the end of the refracted ray (lit floor + caustics OR HDRI skybox!)
     env_r = 0.0
     env_g = 0.0
     env_b = 0.0
@@ -2065,7 +2065,7 @@ def fluid_raymarch_3d(
                 fa_r = floor_c1_r if is_c2 == 0 else floor_c2_r
                 fa_g = floor_c1_g if is_c2 == 0 else floor_c2_g
                 fa_b = floor_c1_b if is_c2 == 0 else floor_c2_b
-                # Caustiques : éclairement réel du fond par le soleil réfracté
+                # Caustics: actual irradiance of the bottom by the refracted sun
                 caust = 1.0
                 if caustic_strength > 0.0 and gs.abs(fl_x) < bx and gs.abs(fl_z) < bz:
                     mz = caustic_map.shape[0]
@@ -2080,7 +2080,7 @@ def fluid_raymarch_3d(
                     c_hi = caustic_map[miz0 + 1, mix0] * (1.0 - mfx) + caustic_map[miz0 + 1, mix0 + 1] * mfx
                     c_map = gs.min(c_lo * (1.0 - mfz) + c_hi * mfz, 3.5)
                     caust = 1.0 + caustic_strength * (c_map - 1.0)
-                # La caustique ne module que le soleil, pas la lumière ambiante
+                # The caustic only modulates the sun, not the ambient light
                 sun_lit = 0.38 + 0.62 * gs.max(sun_y, 0.1) * sun_int * 0.48 * caust
                 env_r = fa_r * sun_lit
                 env_g = fa_g * sun_lit
@@ -2113,7 +2113,7 @@ def fluid_raymarch_3d(
             env_g = 0.22 + 0.30 * (1.0 - t_sk)
             env_b = 0.42 + 0.32 * (1.0 - t_sk)
 
-    # Absorption Beer-Lambert sur la distance exacte parcourue dans l'eau
+    # Beer-Lambert absorption over the exact distance travelled in the water
     wd = gs.max(water_dist, 0.05)
     tr = gs.exp(-wd * abs_r)
     tg = gs.exp(-wd * abs_g)
@@ -2124,12 +2124,12 @@ def fluid_raymarch_3d(
     refr_g = env_g * tg + tint_g * (1.0 - tg) * scat
     refr_b = env_b * tb + tint_b * (1.0 - tb) * scat
     if is_tir != 0:
-        # Légère brillance argentée prismatique lors d'une réflexion interne totale
+        # Slight prismatic silver sheen on total internal reflection
         refr_r = refr_r * 1.15
         refr_g = refr_g * 1.18
         refr_b = refr_b * 1.22
 
-    # 9) Réflexion 3D Fresnel d'entrée + Skybox HDRI + Spéculaire soleil
+    # 9) 3D Fresnel entry reflection + HDRI skybox + sun specular
     rlx = rdx + 2.0 * ndotv * nx
     rly = rdy + 2.0 * ndotv * ny
     rlz = rdz + 2.0 * ndotv * nz
@@ -2163,7 +2163,7 @@ def fluid_raymarch_3d(
         refl_g = 0.28 + 0.32 * (1.0 - r_sk)
         refl_b = 0.52 + 0.32 * (1.0 - r_sk)
 
-    # Spéculaire solaire cristallin
+    # Crystalline solar specular
     hx_s = -rdx + sun_x
     hy_s = -rdy + sun_y
     hz_s = -rdz + sun_z
@@ -2194,10 +2194,10 @@ def fluid_raymarch_3d(
     out_g = refr_g * (1.0 - fg) + refl_g * fg + sun_g * spec + em_g * em_mod
     out_b = refr_b * (1.0 - fb) + refl_b * fb + sun_b * spec + em_b * em_mod
 
-    # 10) Incrustation des micro-particules whitewater scintillantes (spray / écume / bulles)
+    # 10) Inlay of the sparkling whitewater micro-particles (spray / foam / bubbles)
     if foam_strength > 0.0 and ww_a_raw > 0.01:
         hit_z = t_hit * cos_ray
-        # Si devant la surface (spray/écume) → blanc pur ; si sous la surface (bulles) → teinté par l'eau !
+        # In front of the surface (spray / foam) → pure white; below the surface (bubbles) → tinted by the water!
         wa = gs.min(ww_a_raw * foam_strength, 0.85)
         if ww_z <= hit_z + 0.12:
             out_r = out_r * (1.0 - wa) + 1.18 * wa

@@ -1,11 +1,11 @@
-//! IR → WGSL (wgpu : Metal, Vulkan, DX12). Pas de f64 en WGSL : refusé avant d'arriver ici.
+//! IR → WGSL (wgpu: Metal, Vulkan, DX12). No f64 in WGSL: rejected before reaching this point.
 
 use gpusync_ir::*;
 
 use crate::opencl::{float_repr, intrinsic_name};
 use crate::{CodegenError, Helper, KernelSource, Out, helpers, local_name, param_name};
 
-/// Taille d'un groupe de travail. La grille est en 2D (x, y) pour dépasser 65 535 groupes.
+/// Workgroup size. The grid is 2-D (x, y) to go beyond 65,535 groups.
 pub const WGSL_WORKGROUP_SIZE: u32 = 256;
 
 fn w_type(t: Scalar) -> &'static str {
@@ -36,7 +36,7 @@ fn lit(c: Const) -> String {
         .into(),
         Const::F32(v) if v < 0.0 => format!("({}f)", float_repr(format!("{v:?}"))),
         Const::F32(v) => format!("{}f", float_repr(format!("{v:?}"))),
-        // Pas de bitcast vers f64 en naga : l'infini et NaN passent par un f32 (conversion exacte).
+        // No bitcast to f64 in naga: infinity and NaN go through an f32 (exact conversion).
         Const::F64(v) if v.is_nan() => "f64(bitcast<f32>(0x7fc00000u))".into(),
         Const::F64(v) if v.is_infinite() => (if v > 0.0 {
             "f64(bitcast<f32>(0x7f800000u))"
@@ -57,15 +57,15 @@ struct Gen<'a> {
     k: &'a Kernel,
     out: Out,
     tmp: usize,
-    /// Paramètres remplacés par une constante (spécialisation).
+    /// Parameters replaced by a constant (specialization).
     spec: Vec<(usize, i64)>,
-    /// Locales de valeur entière constante (affectées une seule fois, au premier niveau, à une
-    /// expression constante : `t = len(ref)` une fois la taille spécialisée).
+    /// Locals with a constant integer value (assigned once, at top level, from a
+    /// constant expression: `t = len(ref)` once the size is specialized).
     const_locals: Vec<(usize, i64)>,
 }
 
 impl Gen<'_> {
-    /// Indice d'écriture des sorties : décalé de `obase` pour un kernel avec index lancé par blocs.
+    /// Write index of the outputs: offset by `obase` for an indexed kernel launched in blocks.
     fn out_index(&self) -> String {
         match &self.k.grid {
             Grid::Indexed { obase, .. } => format!("gs_i + {}", param_name(self.k, *obase)),
@@ -91,8 +91,8 @@ impl Gen<'_> {
                 let (x, y) = (self.expr(a), self.expr(b));
                 let name = if *op == BinOp::Shl { "shl" } else { "shr" };
                 match crate::const_shift(b) {
-                    // Décalage à gauche d'un signé : en non signé (évite l'erreur de débordement
-                    // de l'évaluation constante WGSL), la conversion conservant les bits.
+                    // Left shift of a signed value: done unsigned (avoids the overflow error of
+                    // WGSL constant evaluation), the conversion keeping the bits.
                     Some(c) if *op == BinOp::Shl && matches!(a.ty, Scalar::I32 | Scalar::I64) => {
                         let (t, u) = (
                             w_type(a.ty),
@@ -144,7 +144,7 @@ impl Gen<'_> {
                 };
                 format!("({} {s} {})", self.expr(a), self.expr(b))
             }
-            // select(faux, vrai, condition)
+            // select(false, true, condition)
             ExprKind::Select(c, a, b) => format!(
                 "select({}, {}, {})",
                 self.expr(b),
@@ -182,14 +182,14 @@ impl Gen<'_> {
         self.out.depth -= 1;
     }
 
-    /// Locales affectées une seule fois, au premier niveau du kernel, à une expression constante.
+    /// Locals assigned once, at the kernel's top level, from a constant expression.
     fn find_const_locals(&self) -> Vec<(usize, i64)> {
         fn count(b: &Block, c: &mut Vec<usize>) {
             for s in b {
                 match s {
                     Stmt::Assign { local, .. } => c[*local] += 1,
                     Stmt::For { var, body, .. } => {
-                        c[*var] += 2; // variable de boucle : jamais constante
+                        c[*var] += 2; // loop variable: never constant
                         count(body, c);
                     }
                     Stmt::If {
@@ -228,7 +228,7 @@ impl Gen<'_> {
         out
     }
 
-    /// Valeur entière constante d'une expression (littéral, taille spécialisée, + − ×).
+    /// Constant integer value of an expression (literal, specialized size, + − ×).
     fn const_int(&self, e: &Expr) -> Option<i64> {
         match &e.kind {
             ExprKind::Const(Const::I32(v)) => Some(*v as i64),
@@ -248,8 +248,8 @@ impl Gen<'_> {
         }
     }
 
-    /// Valeurs successives de la variable si la boucle peut être déroulée : bornes constantes, au plus
-    /// 64 itérations, boucle la plus intérieure, sans `break`, `continue` ni `return`.
+    /// Successive values of the variable if the loop can be unrolled: constant bounds, at most
+    /// 64 iterations, innermost loop, no `break`, `continue` or `return`.
     fn unrollable(&self, start: &Expr, stop: &Expr, step: &Expr, body: &Block) -> Option<Vec<i64>> {
         fn plain(b: &Block) -> bool {
             b.iter().all(|s| match s {
@@ -312,7 +312,7 @@ impl Gen<'_> {
                     AtomicOp::Max => "atomicMax",
                 };
                 if ty == Scalar::F32 {
-                    // Pas d'atomiques flottants en WGSL : boucle de comparaison-échange sur les bits.
+                    // No float atomics in WGSL: compare-and-swap loop on the bits.
                     let combine = match op {
                         AtomicOp::Add => "bitcast<f32>(gs_old) + gs_av",
                         AtomicOp::Min => "min(bitcast<f32>(gs_old), gs_av)",
@@ -367,10 +367,10 @@ impl Gen<'_> {
             } => {
                 let v = local_name(self.k, *var);
                 if let Some(values) = self.unrollable(start, stop, step, body) {
-                    // Boucle déroulée : bornes constantes (après spécialisation), peu d'itérations.
-                    // Les indices des tableaux locaux deviennent constants : Metal et Vulkan peuvent
-                    // les garder en registres (naga réécrit les boucles, ce qui empêche le pilote de
-                    // les dérouler lui-même).
+                    // Unrolled loop: constant bounds (after specialization), few iterations.
+                    // Local array indices become constants: Metal and Vulkan can
+                    // keep them in registers (naga rewrites loops, which stops the driver from
+                    // unrolling them itself).
                     let suffix = if start.ty == Scalar::U32 { "u" } else { "i" };
                     for val in values {
                         self.out.line(format!("{v} = {val}{suffix};"));
@@ -387,8 +387,8 @@ impl Gen<'_> {
                 self.out.depth += 1;
                 self.out.line(format!("let gs_stop{n} = {e0};"));
                 self.out.line(format!("let gs_step{n} = {t0};"));
-                // Compteur caché (comme en Python) : la variable reçoit sa valeur à chaque tour et
-                // garde la dernière après la boucle.
+                // Hidden counter (as in Python): the variable gets its value on each iteration and
+                // keeps the last one after the loop.
                 let it = format!("gs_it{n}");
                 self.out.line(format!("var {it} = {s0};"));
                 let cond = if start.ty == Scalar::U32 {
@@ -523,17 +523,17 @@ const HELPERS: &[(Helper, &str)] = &[
         Helper::ModF64,
         "fn gs_mod_f64(a: f64, b: f64) -> f64 {\n    var r = a % b;\n    if (r != 0.0lf && ((r < 0.0lf) != (b < 0.0lf))) { r = r + b; }\n    return r;\n}",
     ),
-    // pow WGSL n'est défini que pour x ≥ 0 : on rétablit la sémantique de C / Python.
+    // WGSL pow is only defined for x ≥ 0: restore the C / Python semantics.
     (
         Helper::PowF32,
         "fn gs_pow_f32(x: f32, y: f32) -> f32 {\n    if (y == 0.0f) { return 1.0f; }\n    if (x > 0.0f) { return pow(x, y); }\n    if (x == 0.0f) { return select(bitcast<f32>(0x7f800000u), 0.0f, y > 0.0f); }\n    if (floor(y) != y) { return bitcast<f32>(0x7fc00000u); }\n    let r = pow(-x, y);\n    if (abs(y % 2.0f) == 1.0f) { return -r; }\n    return r;\n}",
     ),
 ];
 
-/// Metal : division euclidienne 64 bits par décalages et soustractions (64 tours), sans `/` ni `%`.
+/// Metal: 64-bit Euclidean division by shifts and subtractions (64 rounds), without `/` or `%`.
 const METAL_U64_DIVREM: &str = "fn gs_udiv_u64(a: u64, b: u64) -> u64 {\n    if (b == 0lu) { return 0lu; }\n    var q = 0lu;\n    var r = 0lu;\n    for (var i = 63i; i >= 0i; i = i - 1i) {\n        r = (r << 1u) | ((a >> u32(i)) & 1lu);\n        if (r >= b) { r = r - b; q = q | (1lu << u32(i)); }\n    }\n    return q;\n}\nfn gs_urem_u64(a: u64, b: u64) -> u64 {\n    if (b == 0lu) { return 0lu; }\n    var r = 0lu;\n    for (var i = 63i; i >= 0i; i = i - 1i) {\n        r = (r << 1u) | ((a >> u32(i)) & 1lu);\n        if (r >= b) { r = r - b; }\n    }\n    return r;\n}\nfn gs_uabs_i64(a: i64) -> u64 {\n    if (a < 0li) { return u64(0li - a); }\n    return u64(a);\n}";
 
-/// Metal : mêmes fonctions que `HELPERS` (sémantique de Python), sur `gs_udiv_u64` / `gs_urem_u64`.
+/// Metal: same functions as `HELPERS` (Python semantics), on `gs_udiv_u64` / `gs_urem_u64`.
 const METAL_INT64: &[(Helper, &str)] = &[
     (
         Helper::FloorDivI64,
@@ -553,8 +553,8 @@ const METAL_INT64: &[(Helper, &str)] = &[
     ),
 ];
 
-/// Décalages à compte variable (sémantique de `BinOp::Shl` / `Shr`) et partie haute d'un produit
-/// (`gs.mulhi`, absente de WGSL : produits partiels sur des moitiés).
+/// Shifts with a variable count (semantics of `BinOp::Shl` / `Shr`) and high half of a product
+/// (`gs.mulhi`, missing from WGSL: partial products on halves).
 fn bits_helper(op: u8, t: Scalar) -> String {
     let ty = w_type(t);
     let name = t.name();
@@ -600,21 +600,21 @@ fn bits_helper(op: u8, t: Scalar) -> String {
     }
 }
 
-/// Le kernel a-t-il des paramètres scalaires f64 (binding `gs_fparams`) ?
+/// Does the kernel have f64 scalar parameters (binding `gs_fparams`)?
 pub fn has_f64_params(k: &Kernel) -> bool {
     k.params
         .iter()
         .any(|p| p.kind == ParamKind::Scalar && p.ty == Scalar::F64)
 }
 
-/// Génère le module WGSL. Point d'entrée : `main`.
+/// Generates the WGSL module. Entry point: `main`.
 pub fn emit_wgsl(k: &Kernel) -> Result<KernelSource, CodegenError> {
     emit_wgsl_variant(k, &[], false)
 }
 
-/// Variante dont les paramètres de `spec` (tailles i32 connues à l'appel) sont des constantes.
-/// `metal` : division et reste entiers 64 bits sans les opérateurs `/` et `%` (naga 30 traduit ceux-ci
-/// en MSL invalide : « call to 'select' is ambiguous »).
+/// Variant whose `spec` parameters (i32 sizes known at call time) are constants.
+/// `metal`: 64-bit integer division and remainder without the `/` and `%` operators (naga 30 translates
+/// them into invalid MSL: "call to 'select' is ambiguous").
 pub fn emit_wgsl_variant(
     k: &Kernel,
     spec: &crate::Spec,
@@ -623,7 +623,7 @@ pub fn emit_wgsl_variant(
     let req = k.requirements();
     if let Some(op) = req.f64_math_op {
         return Err(CodegenError(format!(
-            "{op} en f64 n'est pas disponible via wgpu (Vulkan le calculerait en précision f32, voire planterait)"
+            "{op} in f64 is not available through wgpu (Vulkan would compute it at f32 precision, or even crash)"
         )));
     }
     let mut g = Gen {
@@ -638,11 +638,11 @@ pub fn emit_wgsl_variant(
     };
     g.const_locals = g.find_const_locals();
     g.out
-        .line(format!("// GPUsync — kernel « {} » (WGSL, généré)", k.name));
+        .line(format!("// GPUsync — kernel \"{}\" (WGSL, generated)", k.name));
     let mut binding = 0;
     for (i, p) in k.array_params() {
         if k.writable().contains(&i) {
-            // gs.Out : écrit seulement par des atomiques (f32 : bits dans un atomic<u32>).
+            // gs.Out: written only by atomics (f32: bits in an atomic<u32>).
             let t = if p.ty == Scalar::I32 { "i32" } else { "u32" };
             g.out.line(format!(
                 "@group(0) @binding({binding}) var<storage, read_write> {}: array<atomic<{t}>>;",
@@ -664,13 +664,13 @@ pub fn emit_wgsl_variant(
         ));
         binding += 1;
     }
-    let binding = binding - 1; // dernier binding de sortie : les paramètres suivent
+    let binding = binding - 1; // last output binding: the parameters follow
     g.out.line(format!(
         "@group(0) @binding({}) var<storage, read> gs_params: array<u32>;",
         binding + 1
     ));
     if has_f64_params(k) {
-        // Pas de bitcast vers f64 en naga : les scalaires f64 ont leur propre buffer.
+        // No bitcast to f64 in naga: f64 scalars have their own buffer.
         g.out.line(format!(
             "@group(0) @binding({}) var<storage, read> gs_fparams: array<f64>;",
             binding + 2
@@ -699,14 +699,14 @@ pub fn emit_wgsl_variant(
             g.out.line(bits_helper(*op, crate::INT_TYPES[*t as usize]));
         }
     }
-    // Mots u32 des scalaires (deux par entier 64 bits : poids faible, puis fort), puis n.
+    // u32 words of the scalars (two per 64-bit integer: low, then high), then n.
     let n_scalars: usize = k
         .params
         .iter()
         .filter(|p| p.kind == ParamKind::Scalar && p.ty != Scalar::F64)
         .map(|p| if p.ty.is_int64() { 2 } else { 1 })
         .sum();
-    // Mémoire partagée : variables du module (mises à zéro par wgpu pour chaque groupe).
+    // Shared memory: module variables (zero-filled by wgpu for each group).
     for (i, l) in k.locals.iter().enumerate() {
         if let (true, Some(n)) = (l.shared, l.len) {
             g.out.line(format!(
@@ -729,7 +729,7 @@ pub fn emit_wgsl_variant(
                 .line(format!("if (gs_i >= gs_params[{n_scalars}]) {{ return; }}"));
         }
         Some(gsz) => {
-            // Garde sur le numéro du groupe (uniforme) : les barrières restent en flot uniforme.
+            // Guard on the group number (uniform): barriers stay in uniform control flow.
             g.out.line(format!("@compute @workgroup_size({gsz})"));
             g.out.line("fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) gs_lid: u32, @builtin(num_workgroups) nwg: vec3<u32>) {");
             g.out.depth = 1;
@@ -737,7 +737,7 @@ pub fn emit_wgsl_variant(
             g.out.line(format!(
                 "if (gs_wg * {gsz}u >= gs_params[{n_scalars}]) {{ return; }}"
             ));
-            // cells= : première case du thread dans la tuile de son groupe (gsz·cells cases).
+            // cells=: first cell of the thread in its group's tile (gsz·cells cells).
             g.out.line(format!(
                 "let gs_i = gs_wg * {}u + gs_lid;",
                 gsz * k.cells.max(1)
@@ -774,8 +774,8 @@ pub fn emit_wgsl_variant(
         }
     }
     if let Grid::Indexed { axes, row0, .. } = &k.grid {
-        // Coordonnées du thread dans la grille (forme de la sortie, ordre C) ; le lancement
-        // couvre un bloc de lignes commençant à la ligne row0.
+        // Coordinates of the thread in the grid (output shape, C order); the launch
+        // covers a block of rows starting at row row0.
         g.out.line("var gs_r = gs_i;");
         for (a, p) in axes.iter().enumerate().skip(1).rev() {
             let size = param_name(k, *p);
@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn f64_arithmetic_accepted_but_not_transcendental_functions() {
         let mut k = crate::tests::sample();
-        // Tout en f64 : le sample utilise ** (pow) → refusé.
+        // Everything in f64: the sample uses ** (pow) → rejected.
         k.outputs = vec![Scalar::F64];
         k.params[0].ty = Scalar::F64;
         k.params[1].ty = Scalar::F64;
@@ -876,7 +876,7 @@ mod tests {
         retype(&mut k.body);
         let err = emit_wgsl(&k).unwrap_err().0;
         assert!(err.contains("**") && err.contains("f64"), "{err}");
-        // Sans le ** : accepté, avec le buffer gs_fparams et le % flottant f64.
+        // Without the **: accepted, with the gs_fparams buffer and the f64 float %.
         if let Stmt::Return(es) = &mut k.body[2] {
             let e = &mut es[0];
             if let ExprKind::Select(_, a, _) = &mut e.kind {

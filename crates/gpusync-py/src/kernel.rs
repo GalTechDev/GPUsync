@@ -1,8 +1,8 @@
-//! Kernels et résultats côté Python : `_core.compile_kernel`, `KernelIR.launch`, `DeviceArray`.
+//! Kernels and results on the Python side: `_core.compile_kernel`, `KernelIR.launch`, `DeviceArray`.
 //!
-//! Les tableaux NumPy sont passés par adresse (`arr.ctypes.data`) : le package Python vérifie le
-//! type, la contiguïté et la taille, et garde les tableaux en vie (champ `keepalive`) tant que le
-//! calcul peut encore les lire.
+//! NumPy arrays are passed by address (`arr.ctypes.data`): the Python package checks the
+//! type, contiguity and size, and keeps the arrays alive (`keepalive` field) as long as the
+//! computation may still read them.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,37 +20,37 @@ create_exception!(
     gpusync,
     GpusyncError,
     PyException,
-    "Erreur de base de GPUsync."
+    "Base error of GPUsync."
 );
 create_exception!(
     gpusync,
     KernelSyntaxError,
     GpusyncError,
-    "Construction Python non supportée dans un kernel."
+    "Python construct not supported in a kernel."
 );
 create_exception!(
     gpusync,
     TypeMismatch,
     GpusyncError,
-    "Type d'argument ou d'expression incompatible."
+    "Incompatible argument or expression type."
 );
 create_exception!(
     gpusync,
     ShapeMismatch,
     GpusyncError,
-    "Formes de tableaux incompatibles."
+    "Incompatible array shapes."
 );
 create_exception!(
     gpusync,
     UnsupportedFeature,
     GpusyncError,
-    "Capacité absente du périphérique (ex. f64)."
+    "Capability missing on the device (e.g. f64)."
 );
 create_exception!(
     gpusync,
     DeviceError,
     GpusyncError,
-    "Erreur du driver ou du périphérique."
+    "Driver or device error."
 );
 
 pub(crate) fn to_py(e: CoreError) -> PyErr {
@@ -63,7 +63,7 @@ pub(crate) fn to_py(e: CoreError) -> PyErr {
     }
 }
 
-/// Kernel analysé (IR), avec ses versions compilées par périphérique.
+/// Analysed kernel (IR), with its compiled versions per device.
 #[pyclass(module = "gpusync._core", frozen)]
 pub struct KernelIR {
     ir: Arc<Kernel>,
@@ -71,7 +71,7 @@ pub struct KernelIR {
 }
 
 impl KernelIR {
-    /// Version compilée pour `dev` (cache par identifiant, invalidé si le périphérique a été rouvert).
+    /// Compiled version for `dev` (cached by identifier, invalidated if the device was reopened).
     fn compiled_for(&self, dev: &Device) -> Result<Compiled, CoreError> {
         let id = dev.id();
         if let Some((d, c)) = self
@@ -100,7 +100,7 @@ impl KernelIR {
         self.ir.name.clone()
     }
 
-    /// Grille : "elementwise" (une case de sortie par élément d'entrée) ou "indexed" (`gs.index()`).
+    /// Grid: "elementwise" (one output cell per input element) or "indexed" (`gs.index()`).
     #[getter]
     fn grid(&self) -> &'static str {
         match self.ir.grid {
@@ -109,8 +109,8 @@ impl KernelIR {
         }
     }
 
-    /// Noms des dimensions passées en paramètres cachés (kernel avec index), dans l'ordre des
-    /// scalaires à ajouter après les scalaires visibles.
+    /// Names of the dimensions passed as hidden parameters (indexed kernel), in the order of the
+    /// scalars to append after the visible ones.
     #[getter]
     fn dims(&self) -> Vec<String> {
         self.ir
@@ -121,18 +121,18 @@ impl KernelIR {
             .collect()
     }
 
-    /// Nombre de sorties.
+    /// Number of outputs.
     #[getter]
     fn n_outputs(&self) -> usize {
         self.ir.outputs.len()
     }
 
-    /// Code généré : "opencl", "wgsl" ou "ir".
+    /// Generated code: "opencl", "wgsl" or "ir".
     fn source(&self, target: &str) -> PyResult<String> {
         source(&self.ir, target).map_err(to_py)
     }
 
-    /// Besoins du kernel : {"f64": bool, "f64_math": bool, "f64_math_op": str | None}.
+    /// Requirements of the kernel: {"f64": bool, "f64_math": bool, "f64_math_op": str | None}.
     #[getter]
     fn requirements(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
         let r = self.ir.requirements();
@@ -144,7 +144,7 @@ impl KernelIR {
         Ok(d.unbind())
     }
 
-    /// Compile pour `device_id` sans lancer (pour mesurer ou vérifier tôt).
+    /// Compiles for `device_id` without launching (to measure or check early).
     fn prepare(&self, py: Python<'_>, device_id: &str) -> PyResult<()> {
         py.detach(|| {
             let dev = Device::open(device_id)?;
@@ -153,16 +153,16 @@ impl KernelIR {
         .map_err(to_py)
     }
 
-    /// Lance le kernel sur une grille de `n` éléments (taille de chaque sortie).
+    /// Launches the kernel over a grid of `n` elements (size of each output).
     ///
-    /// - `arrays` : un élément par paramètre tableau, `(adresse, octets)` d'un tableau NumPy
-    ///   contigu, ou un `DeviceArray` ;
-    /// - `scalars` : un nombre Python par paramètre scalaire (dimensions cachées comprises, en
-    ///   dernier) ;
-    /// - `out_ptrs` : adresse d'un tableau NumPy par sortie (utilisé directement en zéro-copie) ;
-    /// - `keepalive` : objets à garder en vie jusqu'à la fin du calcul.
+    /// - `arrays`: one item per array parameter, `(address, bytes)` of a contiguous NumPy
+    ///   array, or a `DeviceArray`;
+    /// - `scalars`: one Python number per scalar parameter (hidden dimensions included,
+    ///   last);
+    /// - `out_ptrs`: address of a NumPy array per output (used directly in zero-copy);
+    /// - `keepalive`: objects to keep alive until the computation ends.
     #[pyo3(signature = (device_id, arrays, scalars, n, out_ptrs, keepalive))]
-    #[allow(clippy::too_many_arguments)] // signature imposée par l'appel Python
+    #[allow(clippy::too_many_arguments)] // signature imposed by the Python call
     fn launch(
         &self,
         py: Python<'_>,
@@ -173,7 +173,7 @@ impl KernelIR {
         out_ptrs: Vec<usize>,
         keepalive: Vec<Py<PyAny>>,
     ) -> PyResult<Vec<DeviceArrayPy>> {
-        // Scalaires : convertis et vérifiés selon le type déclaré.
+        // Scalars: converted and checked against the declared type.
         let scalar_params: Vec<_> = self
             .ir
             .params
@@ -184,7 +184,7 @@ impl KernelIR {
             .collect();
         if scalars.len() != scalar_params.len() {
             return Err(TypeMismatch::new_err(format!(
-                "{} scalaire(s) attendu(s)",
+                "{} scalar(s) expected",
                 scalar_params.len()
             )));
         }
@@ -193,7 +193,7 @@ impl KernelIR {
             consts.push(match p.ty {
                 Scalar::F32 | Scalar::F64 => Const::F64(v.extract::<f64>().map_err(|_| {
                     TypeMismatch::new_err(format!(
-                        "paramètre '{}' : nombre attendu, reçu {}",
+                        "parameter '{}': number expected, got {}",
                         p.name,
                         v.get_type()
                             .name()
@@ -204,7 +204,7 @@ impl KernelIR {
                 Scalar::I32 | Scalar::U32 | Scalar::I64 | Scalar::U64 => {
                     let i: i128 = v.extract().map_err(|_| {
                         TypeMismatch::new_err(format!(
-                            "paramètre '{}' ({}) : entier attendu, reçu {}",
+                            "parameter '{}' ({}): integer expected, got {}",
                             p.name,
                             p.ty,
                             v.repr().map(|r| r.to_string()).unwrap_or_default()
@@ -212,7 +212,7 @@ impl KernelIR {
                     })?;
                     let range = || {
                         TypeMismatch::new_err(format!(
-                            "paramètre '{}' : {i} hors de la plage de {}",
+                            "parameter '{}': {i} out of the range of {}",
                             p.name, p.ty
                         ))
                     };
@@ -226,7 +226,7 @@ impl KernelIR {
                 Scalar::Bool => Const::Bool(v.is_truthy()?),
             });
         }
-        // Tableaux : adresse hôte ou résultat d'un kernel précédent.
+        // Arrays: host address or result of a previous kernel.
         enum A {
             Host(usize, usize),
             Dev(Py<DeviceArrayPy>),
@@ -266,11 +266,11 @@ impl KernelIR {
             unsafe { launch(&dev, &c, &inputs, &consts, n, &outs) }
         });
         let arrays = result.map_err(to_py)?;
-        // Entrées issues d'un calcul précédent : gardées en vie seulement si elles s'appuient sur la
-        // mémoire de l'hôte (zéro-copie, CPU, flux). Un résultat resté sur le périphérique peut être
-        // libéré dès le lancement mis en file : son buffer n'est réutilisé qu'après les commandes qui
-        // le lisent (ordre des files, événements du pool). Le garder bloquerait toute réutilisation
-        // dans une boucle `y = f(y)` (chaque appel allouerait de la mémoire neuve).
+        // Inputs from a previous computation: kept alive only if they rely on host
+        // memory (zero-copy, CPU, flux). A result kept on the device can be released
+        // as soon as the launch is queued: its buffer is reused only after the commands that
+        // read it (queue order, pool events). Keeping it would block any reuse
+        // in a `y = f(y)` loop (each call would allocate fresh memory).
         let mut keep = keepalive;
         for i in items {
             if let A::Dev(d) = i {
@@ -279,8 +279,8 @@ impl KernelIR {
                 }
             }
         }
-        // Chaque sortie garde ses propres références : les entrées vivent tant qu'une sortie
-        // peut encore être calculée.
+        // Each output keeps its own references: inputs live as long as an output
+        // may still be computed.
         Ok(arrays
             .into_iter()
             .map(|array| DeviceArrayPy {
@@ -291,11 +291,11 @@ impl KernelIR {
     }
 }
 
-/// Résultat d'un kernel, resté sur le périphérique jusqu'à `read_into`.
+/// Result of a kernel, kept on the device until `read_into`.
 #[pyclass(name = "DeviceArray", module = "gpusync._core", frozen)]
 pub struct DeviceArrayPy {
-    // Ordre important : `array` est détruit en premier (il attend la fin des calculs), puis
-    // seulement les tableaux NumPy qu'il pouvait encore lire.
+    // Order matters: `array` is dropped first (it waits for the computations), and only
+    // then the NumPy arrays it could still read.
     pub(crate) array: DeviceArray,
     keepalive: Mutex<Vec<Py<PyAny>>>,
 }
@@ -312,20 +312,20 @@ impl DeviceArrayPy {
         self.array.bytes()
     }
 
-    /// Mode d'exécution : "direct" (zéro-copie), "resident", "flux" ou "cpu".
+    /// Execution mode: "direct" (zero-copy), "resident", "flux" or "cpu".
     #[getter]
     fn mode(&self) -> &'static str {
         self.array.mode.name()
     }
 
-    /// Adresse hôte du résultat s'il est en zéro-copie (sinon None).
+    /// Host address of the result if it is zero-copy (otherwise None).
     #[getter]
     fn host_ptr(&self) -> Option<usize> {
         self.array.host_ptr().map(|p| p as usize)
     }
 
-    /// Attend la fin du calcul et copie le résultat à l'adresse `ptr` (sans copie si c'est déjà
-    /// la mémoire du résultat). Libère ensuite les entrées gardées en vie.
+    /// Waits for the computation and copies the result to address `ptr` (no copy if it already is
+    /// the result's memory). Then releases the inputs kept alive.
     fn read_into(&self, py: Python<'_>, ptr: usize) -> PyResult<()> {
         py.detach(|| unsafe { self.array.read_into(ptr as *mut u8) })
             .map_err(to_py)?;
@@ -337,7 +337,7 @@ impl DeviceArrayPy {
     }
 }
 
-/// Analyse un kernel (JSON produit par `gpusync._ast`) et renvoie son IR.
+/// Analyses a kernel (JSON produced by `gpusync._ast`) and returns its IR.
 #[pyfunction]
 fn compile_kernel(spec_json: &str) -> PyResult<KernelIR> {
     let ir = parse(spec_json).map_err(to_py)?;
@@ -347,7 +347,7 @@ fn compile_kernel(spec_json: &str) -> PyResult<KernelIR> {
     })
 }
 
-/// Réglages du moteur de transferts : {"chunk_bytes", "budget_bytes", "direct_chunk_bytes"}.
+/// Settings of the transfer engine: {"chunk_bytes", "budget_bytes", "direct_chunk_bytes"}.
 #[pyfunction]
 fn get_transfer_limits(py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
     let l = transfer_limits();
@@ -358,7 +358,7 @@ fn get_transfer_limits(py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
     Ok(d.unbind())
 }
 
-/// Modifie les réglages du moteur de transferts (None : valeur par défaut pour budget et bloc Direct).
+/// Changes the transfer engine settings (None: default value for the budget and Direct chunk).
 #[pyfunction]
 #[pyo3(name = "set_transfer_limits", signature = (chunk_bytes, budget_bytes, direct_chunk_bytes))]
 fn set_transfer_limits_py(
@@ -368,7 +368,7 @@ fn set_transfer_limits_py(
 ) -> PyResult<()> {
     if chunk_bytes < 64 {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "chunk_bytes : au moins 64 octets",
+            "chunk_bytes: at least 64 bytes",
         ));
     }
     set_transfer_limits(TransferLimits {
@@ -379,14 +379,14 @@ fn set_transfer_limits_py(
     Ok(())
 }
 
-/// Le périphérique travaille-t-il directement dans la mémoire de l'hôte ?
+/// Does the device work directly in host memory?
 #[pyfunction]
 fn device_zero_copy(py: Python<'_>, device_id: &str) -> PyResult<bool> {
     py.detach(|| Device::open(device_id).map(|d| d.zero_copy()))
         .map_err(to_py)
 }
 
-/// Ouvre un lot de commandes sur `device_id` (wgpu : un seul CommandEncoder pour plusieurs kernels).
+/// Opens a command batch on `device_id` (wgpu: a single CommandEncoder for several kernels).
 #[pyfunction]
 fn begin_batch(py: Python<'_>, device_id: &str) -> PyResult<()> {
     py.detach(|| {
@@ -397,14 +397,14 @@ fn begin_batch(py: Python<'_>, device_id: &str) -> PyResult<()> {
     .map_err(to_py)
 }
 
-/// Ferme le lot de commandes courant et soumet le travail au GPU.
+/// Closes the current command batch and submits the work to the GPU.
 #[pyfunction]
 fn end_batch(py: Python<'_>, device_id: &str) -> PyResult<()> {
     py.detach(|| Device::open(device_id)?.end_batch())
         .map_err(to_py)
 }
 
-/// Attend la fin de tous les calculs soumis sur `device_id` (sans rapatrier de données en RAM).
+/// Waits for all work submitted on `device_id` (without copying data back to RAM).
 #[pyfunction]
 fn sync(py: Python<'_>, device_id: &str) -> PyResult<()> {
     py.detach(|| Device::open(device_id)?.finish())

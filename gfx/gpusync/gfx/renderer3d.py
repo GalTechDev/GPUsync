@@ -1,4 +1,4 @@
-"""Pipeline de rendu 3D multi-viewport + picking 3D O(1) et compositeur UI GPU (`Renderer3D`)."""
+"""Multi-viewport 3D rendering pipeline + O(1) 3D picking and GPU UI compositor (`Renderer3D`)."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def _aligned_u32(shape: tuple[int, ...]) -> np.ndarray:
 
 
 def _align_dim_w(width: int) -> int:
-    step = BLOOM_GROUP * 2  # 128 pour bloom_down_h (group=64 en demi-résolution)
+    step = BLOOM_GROUP * 2  # 128 for bloom_down_h (group=64 at half resolution)
     return max(step, ((width + step // 2) // step) * step)
 
 
@@ -76,7 +76,7 @@ def _align_dim_h(height: int) -> int:
 
 
 class _GpuSceneCache:
-    """Buffers statiques de la scène résidents en VRAM (évite tout re-upload par image)."""
+    """Static scene buffers resident in VRAM (avoids any re-upload per frame)."""
 
     def __init__(self, scene: Scene, device: str | None) -> None:
         scene.compile_geometry()
@@ -95,7 +95,7 @@ class _GpuSceneCache:
         self._slot_rows: dict[tuple, gs.Array] = {}
 
     def slot_rows(self, slots: tuple[tuple[int, int], ...], n_slots: int) -> gs.Array:
-        """Table emplacement de matrice → ligne du tableau lié (-1 : objet non lié)."""
+        """Table from matrix slot → row of the bound array (-1: object not bound)."""
         key = (slots, n_slots)
         if key not in self._slot_rows:
             if len(self._slot_rows) > 16:
@@ -107,8 +107,8 @@ class _GpuSceneCache:
         return self._slot_rows[key]
 
     def split_water(self, scene: Scene) -> tuple[gs.Array, list]:
-        """Triangles opaques (ceux de l'eau rendus dégénérés : la numérotation ne change pas) et, par surface d'eau,
-        `(objet, premier triangle, triangles)`."""
+        """Opaque triangles (the water ones rendered degenerate: the numbering does not change) and, per water surface,
+        `(object, first triangle, triangles)`."""
         which = tuple(i for i, o in enumerate(scene._objects) if o.water is not None and o.visible)
         if not which:
             return self.tri_idx, []
@@ -126,17 +126,17 @@ class _GpuSceneCache:
 
 @dataclass
 class _ViewportCapture:
-    """État minimal conservé après rendu pour le picking 3D exact `(objet, world_pos, uv)`."""
+    """Minimal state kept after rendering for exact 3D picking `(object, world_pos, uv)`."""
 
     camera: Camera3D
-    rect: tuple[int, int, int, int]  # (ox, oy, dw, dh) dans le framebuffer écran
-    render_size: tuple[int, int]  # (rw, rh) du visbuf
+    rect: tuple[int, int, int, int]  # (ox, oy, dw, dh) in the screen framebuffer
+    render_size: tuple[int, int]  # (rw, rh) of the visbuf
     visbuf: gs.Array
-    models_flat: np.ndarray | gs.Array  # sur GPU si des objets y sont placés : relu seulement au clic
+    models_flat: np.ndarray | gs.Array  # on the GPU if objects are placed there: read back only on click
 
 
 class Renderer3D:
-    """Moteur de rendu 3D GPUsync (mono-caméra ultra rapide, multi-viewport, UI GPU, picking 3D)."""
+    """GPUsync 3D renderer (ultra-fast single camera, multi-viewport, GPU UI, 3D picking)."""
 
     def __init__(
         self,
@@ -147,7 +147,7 @@ class Renderer3D:
         device: str | None = None,
         render_scale: float = 1.0,
     ) -> None:
-        # Part de la résolution calculée en 3D (caméra unique plein écran), agrandie ensuite ; 2D et interface intactes
+        # Share of the resolution computed in 3D (single full-screen camera), scaled up afterwards; 2D and interface untouched
         self.render_scale = float(render_scale)
         self.width = _align_dim_w(width)
         self.height = _align_dim_h(height)
@@ -238,7 +238,7 @@ class Renderer3D:
         light_vp: np.ndarray,
         dev: str | None,
     ) -> tuple[gs.Array, gs.Array, np.ndarray | gs.Array, np.ndarray | gs.Array, np.ndarray | gs.Array, bool]:
-        """Applique les sommets dynamiques GPU et les instances GPU directement en VRAM (0 copie CPU)."""
+        """Applies dynamic GPU vertices and GPU instances directly in VRAM (no CPU copy)."""
         v_pos = gpu.v_pos
         v_norm = gpu.v_norm
         total_v = int(v_pos.shape[0])
@@ -261,7 +261,7 @@ class Renderer3D:
             isinstance(o, InstancedMesh3D) and (o.gpu_trs is not None or o.gpu_matrices is not None)
             for o in scene._objects
         )
-        # Objets liés à un calcul GPU, regroupés par tableau source (un noyau par tableau)
+        # Objects bound to a GPU computation, grouped by source array (one kernel per array)
         bound: dict[int, tuple[gs.Array, list[tuple[int, int]]]] = {}
         for oi, obj in enumerate(scene._objects):
             if obj.gpu_transform is not None and not isinstance(obj, InstancedMesh3D):
@@ -313,7 +313,7 @@ class Renderer3D:
         timings: dict[str, float],
         profile: bool,
     ) -> tuple[gs.Array, gs.Array, gs.Array | None]:
-        """Rend une vue caméra `(rw, rh)` et renvoie `(fb_cam, visbuf, smap)`."""
+        """Renders a camera view `(rw, rh)` and returns `(fb_cam, visbuf, smap)`."""
 
         def stamp(name: str, t0: float, arr=None) -> float:
             if profile:
@@ -336,7 +336,7 @@ class Renderer3D:
         sun_d = sun.dir_normalized
         is_ortho = 1 if cam.ortho else 0
 
-        # L'eau transparente est tracée après la scène opaque (en perspective seulement)
+        # Transparent water is drawn after the opaque scene (in perspective only)
         tri_opaque, waters = gpu.split_water(scene) if not cam.ortho else (gpu.tri_idx, [])
 
         t0 = time.perf_counter()
@@ -377,7 +377,7 @@ class Renderer3D:
         smap_arg = smap if (cam.shadows and smap is not None) else self._get_dummy_u32(dev)
 
         inv_depth_range = 1.0 / max(cam.far - cam.near, 1e-4)
-        # Profondeur (24 bits), puis numéro du triangle visible (32 bits) : deux passes du même noyau
+        # Depth (24 bits), then number of the visible triangle (32 bits): two passes of the same kernel
         tri_args = (tri_opaque, sx, sy, inv_w)
         clip = (float(cam.near), float(inv_depth_range))
         empty = self._get_vis_empty(rw, rh, dev)
@@ -435,7 +435,7 @@ class Renderer3D:
         )
         t0 = stamp("shade_pbr", t0, hdr_r)
 
-        # Reflets Screen-Space (SSR) optionnels sur les surfaces brillantes/métalliques
+        # Optional screen-space reflections (SSR) on shiny / metallic surfaces
         if cam.ssr and not cam.ortho:
             hdr_r, hdr_g, hdr_b = ssr_pass(
                 hdr_r,
@@ -463,7 +463,7 @@ class Renderer3D:
             )
             t0 = stamp("ssr", t0, hdr_r)
 
-        # Surfaces d'eau transparentes (réfraction, absorption, caustiques, reflets)
+        # Transparent water surfaces (refraction, absorption, caustics, reflections)
         for obj, first_tri, tri_w in waters:
             surf = obj.water
             cfg = surf.config
@@ -515,7 +515,7 @@ class Renderer3D:
             zbuf, visbuf = water_merge(zbuf, visbuf, zbuf_w, vis_w, int(first_tri), device=dev)
             t0 = stamp("water", t0, hdr_r)
 
-        # Fluides volumétriques 3D (Raymarching 3D Snell/Beer-Lambert OU SSFR Screen-Space)
+        # Volumetric 3D fluids (3D Snell / Beer-Lambert raymarching OR screen-space SSFR)
         if scene.fluid_volumes and not cam.ortho:
             for fl in scene.fluid_volumes:
                 if not getattr(fl, "visible", True):
@@ -616,7 +616,7 @@ class Renderer3D:
                     device=dev,
                 )
                 depth_f, thick_f = fluid_unpack_dt(d_u32, t_u32, float(cam.near), float(cam.far), device=dev)
-                # Flux de courbure (van der Laan / NVIDIA FleX) : surface vitreuse lisse sans effet d'escalier
+                # Curvature flow (van der Laan / NVIDIA FleX): smooth glassy surface without staircase artefacts
                 n_smooth = max(0, int(cfg.smooth_iters))
                 for _ in range(n_smooth):
                     depth_f, thick_f = fluid_curvature_flow(
@@ -727,7 +727,7 @@ class Renderer3D:
             fb = fxaa_pass(fb, device=dev, out=post_out)
             t0 = stamp("fxaa", t0, fb)
 
-        # Effets LDR / écran pluggables (`PostEffect` ou `@gs.kernel` utilisateur)
+        # Pluggable LDR / screen effects (`PostEffect` or user `@gs.kernel`)
         for fi, fx in enumerate(ldr_fx):
             fx_out = final_out if fi == len(ldr_fx) - 1 else None
             if hasattr(fx, "apply"):
@@ -754,17 +754,17 @@ class Renderer3D:
         parent_lights: np.ndarray | None,
         dev: str | None,
     ) -> None:
-        """Rend un `RenderTarget` (caméra 3D, scène 2D/3D ou UI interactive) directement en VRAM."""
+        """Renders a `RenderTarget` (3D camera, 2D/3D scene or interactive UI) directly in VRAM."""
         rw = max(16, (rt.width // 2) * 2)
         rh = max(16, (rt.height // 2) * 2)
         if rt.match_viewport_aspect and self.width >= 64 and self.height >= 64:
-            # Calibrer exactement le ratio d'aspect du miroir sur le viewport principal (demi-résolution)
+            # Match the mirror's aspect ratio exactly to the main viewport (half resolution)
             rw = max(64, ((self.width // 2) // 2) * 2)
             rh = max(64, ((self.height // 2) // 2) * 2)
         fb: gs.Array | None = None
 
         if rt.camera is not None:
-            # Caméra 3D (ex. caméra de surveillance, miroir, portail)
+            # 3D camera (e.g. security camera, mirror, portal)
             target_scene = rt.scene if rt.scene is not None else parent_scene
             target_scene._ensure_loaded()
             if (
@@ -792,8 +792,8 @@ class Renderer3D:
                 )
                 t_wpos, t_wnorm = vertex_world(t_vpos, t_vnorm, t_gpu.v_obj, t_models, t_norms, device=dev)
 
-            # Conserver toutes les textures statiques (dont la skybox HDRI !) aux mêmes indices,
-            # et remplacer uniquement les RenderTarget par une texture noire 2×2 pour éviter toute récursion.
+            # Keep every static texture (the HDRI skybox included!) at the same indices,
+            # and replace only the RenderTargets with a 2×2 black texture to avoid any recursion.
             has_rt_tex = any(isinstance(t, RenderTarget) for t in target_scene._textures)
             if has_rt_tex:
                 if not hasattr(self, "_rt_dummy_tex"):
@@ -848,7 +848,7 @@ class Renderer3D:
                 t_gpu.materials = old_mats
 
         elif rt.scene is not None:
-            # Scène 2D (ou 2D + UI) rendue dans la texture
+            # 2D scene (or 2D + UI) rendered into the texture
             sub = rt.scene
             sub._ensure_loaded()
             fb = self._renderer2d.render(
@@ -866,10 +866,10 @@ class Renderer3D:
                 if uc is not None:
                     fb = ui_composite(fb, uc[0], uc[1], uc[2], device=dev)
         else:
-            # UI autonome sur fond uni
+            # Standalone UI on a plain background
             fb = clear_u32(self._get_vis_empty(rw, rh, dev), _pack_rgba_u32(rt.clear_color), device=dev)
 
-        # UI additionnelle attachée directement au RenderTarget
+        # Extra UI attached directly to the RenderTarget
         if rt.ui is not None and rt.ui.has_visible() and fb is not None:
             uc = rt.ui.compile(rw, rh, dev)
             if uc is not None:
@@ -879,7 +879,7 @@ class Renderer3D:
             rt.set_gpu_frame(fb)
 
     def render_frame(self, scene: Scene, *, profile: bool = False, host_out: bool = False) -> gs.Array:
-        """Exécute les couches 3D (si présentes), 2D (si présentes) et UI dans un seul `gs.batch()`."""
+        """Runs the 3D layers (if any), 2D (if any) and UI in a single `gs.batch()`."""
         scene._ensure_loaded()
         dev = self.device
         timings: dict[str, float] = {}
@@ -891,7 +891,7 @@ class Renderer3D:
         has_ui = scene.ui.has_visible()
         ui_compiled = scene.ui.compile(self.width, self.height, dev) if has_ui else None
 
-        # Chemin 2D pur (ou scène vide/UI) : AUCUNE passe 3D lancée !
+        # Pure 2D path (or empty scene / UI): NO 3D pass launched!
         if not has_3d:
             with gs.batch(dev):
                 if has_2d:
@@ -937,13 +937,13 @@ class Renderer3D:
         views_capture: list[_ViewportCapture] = []
 
         with gs.batch(dev):
-            # 1. Sommets dynamiques GPU + Instancing GPU + transformation espace monde (1 fois pour tout)
+            # 1. Dynamic GPU vertices + GPU instancing + world-space transform (once for everything)
             v_pos_f, v_norm_f, models_f, norms_f, light_mvps_f, models_on_gpu = self._apply_dynamic_gpu_buffers(
                 scene, gpu, models_flat, normals_flat, light_mvps, light_vp, dev
             )
             wpos, wnorm = vertex_world(v_pos_f, v_norm_f, gpu.v_obj, models_f, norms_f, device=dev)
 
-            # 2. Mise à jour des RenderTargets (caméras sur écrans 3D, scènes 2D / UI sur surfaces 3D)
+            # 2. Update the RenderTargets (cameras on 3D screens, 2D scenes / UI on 3D surfaces)
             for rt in scene._render_targets:
                 self._update_render_target(
                     rt, scene, gpu, v_pos_f, wpos, wnorm, models_f, models_on_gpu, light_mvps_f, light_vp, lights, dev
@@ -1047,7 +1047,7 @@ class Renderer3D:
                         blit_out = final_3d_out if is_last_cam else None
                         fb = blit_viewport(fb, sub_fb, ox, oy, dw, dh, border_u32, device=dev, out=blit_out)
 
-            # 3. Couche 2D éventuelle composée par-dessus la 3D
+            # 3. 2D layer, if any, composited over the 3D
             if has_2d and fb is not None:
                 fb = self._renderer2d.render(
                     self.width,
@@ -1061,7 +1061,7 @@ class Renderer3D:
                     out=self._fb_buf if (host_out and ui_compiled is None) else None,
                 )
 
-            # 4. Couche UI écran (en dernier par-dessus toutes les caméras et la 2D)
+            # 4. Screen UI layer (last, over every camera and the 2D)
             if ui_compiled is not None and fb is not None:
                 t_ui = time.perf_counter()
                 boxes_gpu, glyphs_gpu, n_boxes = ui_compiled
@@ -1080,19 +1080,19 @@ class Renderer3D:
         return fb
 
     def render_rgba(self, scene: Scene, *, profile: bool = False) -> np.ndarray:
-        """Rend la scène et renvoie une vue NumPy `(H, W, 4)` uint8."""
+        """Renders the scene and returns a NumPy view `(H, W, 4)` uint8."""
         fb = self.render_frame(scene, profile=profile, host_out=True)
         return np.asarray(fb).view(np.uint8).reshape(self.height, self.width, 4)
 
     def pick(self, scene: Scene, x: float, y: float) -> PickResult | None:
-        """Picking 3D exact en O(1) depuis le Visibility Buffer de la dernière image.
+        """Exact O(1) 3D picking from the Visibility Buffer of the last frame.
 
-        Renvoie `PickResult(object, triangle, world_pos, uv, camera)` ou `None` si le pixel est du ciel.
+        Returns `PickResult(object, triangle, world_pos, uv, camera)` or `None` if the pixel is sky.
         """
         if not self._last_views or not scene.objects:
             return None
         ix, iy = int(x), int(y)
-        # Parcourir dans l'ordre inverse du tracé : la caméra dessinée au-dessus gagne
+        # Go in reverse drawing order: the camera drawn on top wins
         for cap in reversed(self._last_views):
             ox, oy, dw, dh = cap.rect
             if not (ox <= ix < ox + dw and oy <= iy < oy + dh):
@@ -1110,8 +1110,8 @@ class Renderer3D:
             obj_idx = int(scene.tri_obj[tri_id])
             obj = scene.objects[obj_idx]
 
-            # Calcul exact de (world_pos, uv) : barycentriques homogènes (valables aussi quand le triangle
-            # traverse le plan proche). La matrice est celle du sommet (une instance en occupe plusieurs).
+            # Exact computation of (world_pos, uv): homogeneous barycentrics (valid even when the triangle
+            # crosses the near plane). The matrix is the vertex's (an instance occupies several).
             i0, i1, i2 = int(scene.tri_idx[tri_id, 0]), int(scene.tri_idx[tri_id, 1]), int(scene.tri_idx[tri_id, 2])
             models = np.asarray(cap.models_flat)
             m = models[int(scene.v_obj[i0])].reshape(4, 4).astype(np.float64)

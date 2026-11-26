@@ -1,9 +1,9 @@
-"""Jalon M5 : mode explicite (atomiques) sur de gros volumes, comparé à NumPy.
+"""Milestone M5: explicit mode (atomics) on large volumes, compared with NumPy.
 
     python tools/dev.py run tools/bench_m5.py [millions]
 
-Histogramme (16 cases, atomiques entiers très disputés) et somme pondérée par case (1000 cases,
-atomiques flottants émulés par comparaison-échange). Mesure à chaud, résultat lu ; vérifié contre NumPy.
+Histogram (16 bins, heavily contended integer atomics) and weighted sum per cell (1000 cells,
+float atomics emulated by compare-and-swap). Warm measurement, result read; checked against NumPy.
 """
 
 import sys
@@ -46,7 +46,7 @@ def main():
     w = rng.random(n, dtype=np.float32)
     tn, ref_h = best(lambda: np.bincount(np.minimum((data * BINS).astype(np.int64), BINS - 1), minlength=BINS), 1)
     tw, ref_s = best(lambda: np.bincount(idx, w, minlength=M), 1)
-    print(f"{n / 1e6:.0f} M éléments — NumPy : histogramme {tn * 1e3:.0f} ms, somme par case {tw * 1e3:.0f} ms")
+    print(f"{n / 1e6:.0f} M elements — NumPy: histogram {tn * 1e3:.0f} ms, sum per cell {tw * 1e3:.0f} ms")
     for d in gs.devices():
         if d.id == "cpu:0":
             continue
@@ -57,7 +57,7 @@ def main():
         ok_h = "✓" if (h == ref_h).all() else "✗"
         ok_s = "✓" if np.allclose(s, ref_s, rtol=1e-3) else f"✗ {np.abs(s - ref_s).max()}"
         print(f"  {d.id:10} histogramme {th * 1e3:7.1f} ms ({n / th / 1e9:5.2f} G/s) {ok_h}   "
-              f"somme par case (f32) {ts * 1e3:7.1f} ms ({n / ts / 1e9:5.2f} G/s) {ok_s}")
+              f"sum per cell (f32) {ts * 1e3:7.1f} ms ({n / ts / 1e9:5.2f} G/s) {ok_s}")
 
 
 if __name__ == "__main__":

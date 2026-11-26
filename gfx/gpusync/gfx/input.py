@@ -1,4 +1,4 @@
-"""Entrées unifiées (`Input`) et résultat de picking 3D exact (`PickResult`)."""
+"""Unified input (`Input`) and exact 3D picking result (`PickResult`)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 
 @dataclass
 class PickResult:
-    """Résultat d'un picking 3D exact depuis le Visibility Buffer."""
+    """Result of an exact 3D picking from the Visibility Buffer."""
 
     object: Any  # Object3D
     triangle: int
@@ -20,7 +20,7 @@ class PickResult:
 
 
 class Input:
-    """État des entrées clavier / souris pour l'image courante, avec priorité UI et picking 3D."""
+    """Keyboard / mouse input state for the current frame, with UI priority and 3D picking."""
 
     def __init__(self) -> None:
         self.keys: set[str] = set()
@@ -84,7 +84,7 @@ class Input:
         return button in self.mouse_pressed and not self.ui_captured
 
     def pick(self, x: float | None = None, y: float | None = None) -> PickResult | None:
-        """Picking 3D exact à `(x, y)` (ou à la position souris courante) via le Visibility Buffer."""
+        """Exact 3D picking at `(x, y)` (or at the current mouse position) through the Visibility Buffer."""
         if self._picker is None:
             return None
         px = self.mouse_pos[0] if x is None else x
@@ -92,7 +92,7 @@ class Input:
         return self._picker(px, py)
 
     def clicked_object(self, button: str = "left") -> Any | None:
-        """Renvoie l'`Object3D` cliqué sur cette image (ou `None`)."""
+        """Returns the `Object3D` clicked in this frame (or `None`)."""
         if not self.mouse_clicked(button):
             return None
         hit = self.pick()

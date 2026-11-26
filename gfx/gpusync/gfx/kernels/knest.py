@@ -1,7 +1,7 @@
-"""Grille fine emboîtée dans une grille large : pression à parois de Neumann et raccords.
+"""Fine grid nested in a coarse grid: pressure with Neumann walls, and coupling.
 
-Transformée en cosinus (DCT-II et son inverse) en deux passes de Cooley-Tukey, d'après Makhoul (1980) : une
-transformée de Fourier complexe de même taille sur les valeurs réordonnées."""
+Cosine transform (DCT-II and its inverse) in two Cooley-Tukey passes, after Makhoul (1980): a
+complex Fourier transform of the same size on reordered values."""
 
 import gpusync as gs
 
@@ -209,9 +209,9 @@ def idct_x2(re: gs.f32["nz", "ny", "nx"], im: gs.f32["nz", "ny", "nx"], trig: gs
     return total / float(n)
 
 
-# ───────────────────────── Raccord des grilles ─────────────────────────
-# Composante `comp` : 0 = u, 1 = v, 2 = w, 3 = scalaire. Les `halo` premières et dernières mailles en x et y de la
-# grille fine sont imposées par la grille large.
+# ───────────────────────── Coupling the grids ─────────────────────────
+# Component `comp`: 0 = u, 1 = v, 2 = w, 3 = scalar. The first and last `halo` cells in x and y of the
+# fine grid are imposed by the coarse grid.
 
 
 @gs.kernel
@@ -227,9 +227,9 @@ def nest_fill(
     ry: gs.f32,
     rz: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Champ de la grille large interpolé (trilinéaire, et linéaire entre deux instants) sur la grille fine.
+    """Coarse-grid field interpolated (trilinearly, and linearly between two instants) on the fine grid.
 
-    `x0`, `y0` : position du coin de la grille fine, en mailles larges ; `rx`… : taille fine / taille large."""
+    `x0`, `y0`: position of the fine grid's corner, in coarse cells; `rx`…: fine size / coarse size."""
     k, j, i = gs.index()
     cz = old.shape[0]
     cy = old.shape[1]
@@ -280,7 +280,7 @@ def nest_fill(
 def nest_halo(
     field: gs.f32["nz", "ny", "nx"], target: gs.f32["nz", "ny", "nx"], comp: gs.i32, halo: gs.i32
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Impose `target` hors de l'intérieur (faces du bord comprises pour la composante normale)."""
+    """Imposes `target` outside the interior (boundary faces included for the normal component)."""
     k, j, i = gs.index()
     lo_i = halo
     lo_j = halo
@@ -302,7 +302,7 @@ def nest_relax(
     width: gs.f32,
     rate: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Ajoute un rappel vers la grille large, fort au bord et nul à `width` mailles (zone de Davies)."""
+    """Adds a relaxation toward the coarse grid, strong at the edge and zero at `width` cells (Davies zone)."""
     k, j, i = gs.index()
     d = gs.min(i - halo, field.shape[2] - 1 - halo - i, j - halo, field.shape[1] - 1 - halo - j)
     x = (float(d) + 0.5) / width
@@ -324,7 +324,7 @@ def nest_divergence(
     inv_dy: gs.f32,
     inv_dz: gs.f32,
 ) -> gs.f32["nz", "my", "mx"]:
-    """Divergence du flux de masse sur l'intérieur de la grille fine."""
+    """Divergence of the mass flux over the interior of the fine grid."""
     k, j, i = gs.index()
     jj = j + halo
     ii = i + halo
@@ -342,7 +342,7 @@ def nest_divergence(
 def nest_project(
     vel: gs.f32["nz", "ny", "nx"], phi: gs.f32["nz", "my", "mx"], comp: gs.i32, halo: gs.i32, inv_d: gs.f32
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Retire le gradient de pression sur les faces intérieures ; les faces du bord gardent la valeur imposée."""
+    """Removes the pressure gradient on the interior faces; boundary faces keep the imposed value."""
     k, j, i = gs.index()
     ii = i - halo
     jj = j - halo
@@ -371,7 +371,7 @@ def nest_shift(
     shift_x: gs.i32,
     shift_y: gs.i32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Déplace la grille fine d'un nombre entier de mailles ; les mailles nouvelles viennent de la grille large."""
+    """Moves the fine grid by a whole number of cells; the new cells come from the coarse grid."""
     k, j, i = gs.index()
     si = i + shift_x
     sj = j + shift_y

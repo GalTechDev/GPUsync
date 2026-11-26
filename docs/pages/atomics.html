@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Explicit mode and atomic writes — GPUsync</title>
+<meta name="description" content="">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0..1,0&display=block">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<aside class="side" aria-label="Navigation">
+<a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
+<nav class="nav">
+<a href="index.html"><span class="icon">home</span>Home</a>
+<div class="nav-group">Guide</div>
+<a href="installation.html"><span class="icon">download</span>Installation</a>
+<a href="kernels.html"><span class="icon">code</span>Writing a kernel</a>
+<a href="results.html"><span class="icon">database</span>Results and data</a>
+<a href="devices.html"><span class="icon">developer_board</span>Devices</a>
+<a href="atomics.html" aria-current="page"><span class="icon">scatter_plot</span>Atomics</a>
+<a href="groups.html"><span class="icon">hub</span>Thread groups</a>
+<a href="window.html"><span class="icon">desktop_windows</span>Window</a>
+<a href="errors.html"><span class="icon">bug_report</span>Errors and performance</a>
+<div class="nav-group">API</div>
+<a href="reference.html"><span class="icon">menu_book</span>Reference</a>
+</nav>
+<div class="side-foot">MIT licence · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Source code</a></div>
+</aside>
+<div class="scrim"></div>
+<div class="page">
+<header class="top">
+<button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
+<h1 class="top-title">Atomics</h1>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Theme"><span class="icon">dark_mode</span></button>
+<a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
+</header>
+<main class="content">
+<article class="doc"><h2 class="lead-title">Explicit mode and atomic writes</h2><hr class="rule"><h2 id="when-do-you-need-it"><a class="anchor" href="#when-do-you-need-it" aria-hidden="true">#</a>When do you need it?</h2>
+<p>In an ordinary kernel, each thread computes <strong>its own</strong> cell of the output, and nobody else touches it. Some computations do not work that way: the cell to modify <strong>depends on the data</strong>.</p>
+<ul><li>A histogram: each measurement adds 1 to the bin it falls in.</li><li>A per-cell accumulation: each raindrop adds its mass to the grid cell where it reaches the ground.</li><li>A per-zone extreme: each station keeps the lowest temperature of its zone.</li></ul>
+<p>Thousands of threads run at the same time on a GPU, and many will target the same cell. But "add 1" happens in three steps: read the value, add, write it back. If two threads do it together:</p>
+<div class="table-wrap"><table><thead><tr><th>Step</th><th>Thread A</th><th>Thread B</th><th>Value of the cell</th></tr></thead><tbody><tr><td>1</td><td>reads 7</td><td></td><td>7</td></tr><tr><td>2</td><td></td><td>reads 7</td><td>7</td></tr><tr><td>3</td><td>writes 8</td><td></td><td>8</td></tr><tr><td>4</td><td></td><td>writes 8</td><td><strong>8</strong> instead of 9</td></tr></tbody></table></div>
+<p>One measurement is lost, and not always the same one from run to run. An <strong>atomic write</strong> does the three steps as one block: the hardware guarantees that no other thread gets in between. If two threads arrive together, one waits for the other, and the cell does end up at 9.</p>
+<h2 id="start-from-plain-python"><a class="anchor" href="#start-from-plain-python" aria-hidden="true">#</a>Start from plain Python</h2>
+<p>Here is a histogram of temperatures, in 10 °C bins from −20 to +40 °C, written in plain Python:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
+<span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
+
+<span class="tk-kw">def</span> histo_python(t):
+    counts = np.zeros(<span class="tk-num">6</span>, np.int32)              <span class="tk-com"># 1. create the output, zero-filled</span>
+    <span class="tk-kw">for</span> i <span class="tk-kw">in</span> range(len(t)):                     <span class="tk-com"># 2. go through the measurements</span>
+        bin_ = int((t[i] + <span class="tk-num">20.0</span>) / <span class="tk-num">10.0</span>)        <span class="tk-com"># 3. compute the bin</span>
+        bin_ = min(max(bin_, <span class="tk-num">0</span>), <span class="tk-num">5</span>)
+        counts[bin_] += <span class="tk-num">1</span>                       <span class="tk-com"># 4. add 1</span>
+    <span class="tk-kw">return</span> counts                               <span class="tk-com"># 5. return the result</span></code></pre></div>
+<p>And the same thing as a kernel:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(grid=<span class="tk-str">"t"</span>)
+<span class="tk-kw">def</span> histo(t: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], counts: <span class="tk-gs">gs.Out</span>[<span class="tk-gs">gs.i32</span>[<span class="tk-num">6</span>]]):
+    i = <span class="tk-gs">gs.index</span>()
+    bin_ = <span class="tk-gs">gs.min</span>(<span class="tk-gs">gs.max</span>(int((t[i] + <span class="tk-num">20.0</span>) / <span class="tk-num">10.0</span>), <span class="tk-num">0</span>), <span class="tk-num">5</span>)
+    <span class="tk-gs">gs.atomic_add</span>(counts, bin_, <span class="tk-num">1</span>)
+
+temperatures = np.random.uniform(-<span class="tk-num">25.0</span>, <span class="tk-num">45.0</span>, <span class="tk-num">10_000</span>).astype(np.float32)
+counts = histo(temperatures)                    <span class="tk-com"># a single argument: see below</span>
+<span class="tk-kw">assert</span> np.array_equal(counts, histo_python(temperatures))</code></pre></div>
+<p>Line by line:</p>
+<div class="table-wrap"><table><thead><tr><th>Plain Python</th><th>Kernel</th><th>Explanation</th></tr></thead><tbody><tr><td><code>for i in range(len(t)):</code></td><td><code>grid="t"</code> and <code>i = gs.index()</code></td><td>there is no loop: <strong>each iteration becomes a thread</strong>. <code>grid="t"</code> asks for one thread per element of <code>t</code>; <code>gs.index()</code> gives each thread its number <code>i</code></td></tr><tr><td><code>counts = np.zeros(6, np.int32)</code></td><td><code>counts: gs.Out[gs.i32[6]]</code></td><td>the output is <strong>declared among the parameters</strong>: "an array of 6 integers, zero-filled". GPUsync creates it</td></tr><tr><td><code>min(...)</code>, <code>max(...)</code></td><td><code>gs.min(...)</code>, <code>gs.max(...)</code></td><td>inside a kernel, functions are written with <code>gs.</code></td></tr><tr><td><code>counts[bin_] += 1</code></td><td><code>gs.atomic_add(counts, bin_, 1)</code></td><td>same meaning, but safe against simultaneous writes. <code>+=</code> is rejected on an output</td></tr><tr><td><code>return counts</code></td><td>nothing</td><td>GPUsync returns the outputs itself at the end</td></tr><tr><td><code>histo_python(temperatures)</code></td><td><code>histo(temperatures)</code></td><td>when calling, you pass <strong>only the inputs</strong></td></tr></tbody></table></div>
+<h3 id="the-two-surprising-points"><a class="anchor" href="#the-two-surprising-points" aria-hidden="true">#</a>The two surprising points</h3>
+<p><strong>1. The output is a parameter you do not pass.</strong> The definition says <code>histo(t, counts)</code>, but you call <code>histo(temperatures)</code>, with a single argument. Every parameter of type <code>gs.Out[...]</code> is an output: it is left out of the call, and it is what the call returns. The other parameters are the inputs, in order.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-muted" title="Excerpt not run by the tests">Excerpt</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(grid=<span class="tk-str">"t"</span>)
+<span class="tk-kw">def</span> k(t: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], threshold: <span class="tk-gs">gs.f32</span>, counts: <span class="tk-gs">gs.Out</span>[<span class="tk-gs">gs.i32</span>[<span class="tk-num">6</span>]]): ...
+
+counts = k(temperatures, <span class="tk-num">0.5</span>)       <span class="tk-com"># inputs: t, threshold; returned: counts</span></code></pre></div>
+<p>**2. No <code>return</code> value.** The kernel does not compute a cell: it acts, through its atomic writes. A bare <code>return</code> stops the thread early ("this measurement does not count").</p>
+<h2 id="what-you-write-in-the-kernel"><a class="anchor" href="#what-you-write-in-the-kernel" aria-hidden="true">#</a>What you write in the kernel</h2>
+<p><strong>The grid</strong> says how many threads to launch:</p>
+<ul><li><code>grid="t"</code>: one thread per element of input <code>t</code> (for a 2-D array, one per cell, and <code>gs.index()</code> returns two numbers: <code>i, j = gs.index()</code>);</li><li><code>grid=("n",)</code>: one thread per value of dimension <code>n</code>, useful when the input has other axes (for instance <code>xy: gs.f32["n", 2]</code>, points with two coordinates: one thread per point, not one per coordinate).</li></ul>
+<p><strong>The three writes:</strong></p>
+<div class="table-wrap"><table><thead><tr><th></th><th>Effect</th><th>For</th></tr></thead><tbody><tr><td><code>gs.atomic_add(output, cell, value)</code></td><td><code>output[cell] += value</code></td><td>counting, accumulating</td></tr><tr><td><code>gs.atomic_min(output, cell, value)</code></td><td><code>output[cell] = min(output[cell], value)</code></td><td>the smallest per cell</td></tr><tr><td><code>gs.atomic_max(output, cell, value)</code></td><td><code>output[cell] = max(output[cell], value)</code></td><td>the largest per cell</td></tr></tbody></table></div>
+<ul><li>Allowed types: <code>gs.i32</code>, <code>gs.u32</code>, <code>gs.f32</code>.</li><li><code>cell</code> is an integer, or a tuple for a multi-dimensional output: <code>(row, column)</code>.</li><li>You do not <strong>read</strong> an output inside the kernel: a thread cannot know how far the others have got.</li></ul>
+<h2 id="two-complete-examples"><a class="anchor" href="#two-complete-examples" aria-hidden="true">#</a>Two complete examples</h2>
+<p><strong>Rain accumulated per grid cell.</strong> Each drop (position in [0, 1)², mass) adds its mass to its cell of a 4 × 4 grid. A two-dimensional output, so the cell is a tuple:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(grid=(<span class="tk-str">"n"</span>,))                                  <span class="tk-com"># one thread per drop</span>
+<span class="tk-kw">def</span> rain_map(xy: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>, <span class="tk-num">2</span>], mass: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], total: <span class="tk-gs">gs.Out</span>[<span class="tk-gs">gs.f32</span>[<span class="tk-num">4</span>, <span class="tk-num">4</span>]]):
+    i = <span class="tk-gs">gs.index</span>()
+    col = <span class="tk-gs">gs.min</span>(int(xy[i, <span class="tk-num">0</span>] * <span class="tk-num">4.0</span>), <span class="tk-num">3</span>)
+    row = <span class="tk-gs">gs.min</span>(int(xy[i, <span class="tk-num">1</span>] * <span class="tk-num">4.0</span>), <span class="tk-num">3</span>)
+    <span class="tk-gs">gs.atomic_add</span>(total, (row, col), mass[i])
+
+xy = np.random.rand(<span class="tk-num">5000</span>, <span class="tk-num">2</span>).astype(np.float32)
+mass = np.random.rand(<span class="tk-num">5000</span>).astype(np.float32)
+total = rain_map(xy, mass)
+
+expected = np.zeros((<span class="tk-num">4</span>, <span class="tk-num">4</span>), np.float32)
+np.add.at(expected, ((xy[:, <span class="tk-num">1</span>] * <span class="tk-num">4</span>).astype(int), (xy[:, <span class="tk-num">0</span>] * <span class="tk-num">4</span>).astype(int)), mass)
+<span class="tk-kw">assert</span> np.allclose(total, expected, rtol=<span class="tk-num">1e-4</span>)</code></pre></div>
+<p><strong>Lowest temperature per zone.</strong> For a minimum, the output must not start at 0 (the minimum would be wrong as soon as every value is positive) but at +∞: that is the <strong>start value</strong>, given second in <code>gs.Out[type, start]</code>.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(grid=<span class="tk-str">"t"</span>)
+<span class="tk-kw">def</span> coldest(t: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], zone: <span class="tk-gs">gs.i32</span>[<span class="tk-str">"n"</span>], low: <span class="tk-gs">gs.Out</span>[<span class="tk-gs">gs.f32</span>[<span class="tk-num">3</span>], <span class="tk-gs">gs.inf</span>]):
+    i = <span class="tk-gs">gs.index</span>()
+    <span class="tk-gs">gs.atomic_min</span>(low, zone[i], t[i])
+
+t = np.array([<span class="tk-num">12.0</span>, <span class="tk-num">3.5</span>, <span class="tk-num">8.0</span>, -<span class="tk-num">1.0</span>, <span class="tk-num">20.0</span>], np.float32)
+zone = np.array([<span class="tk-num">0</span>, <span class="tk-num">0</span>, <span class="tk-num">1</span>, <span class="tk-num">1</span>, <span class="tk-num">2</span>], np.int32)
+<span class="tk-kw">assert</span> np.array_equal(coldest(t, zone), [<span class="tk-num">3.5</span>, -<span class="tk-num">1.0</span>, <span class="tk-num">20.0</span>])</code></pre></div>
+<p>With several <code>gs.Out</code>, the call returns a tuple, in parameter order: <code>low, high = k(t, zone)</code>.</p>
+<h3 id="an-output-whose-size-depends-on-the-data"><a class="anchor" href="#an-output-whose-size-depends-on-the-data" aria-hidden="true">#</a>An output whose size depends on the data</h3>
+<p>Above, sizes are written as constants (<code>gs.f32[3]</code>). To make them follow the data, give them the name of an <strong>input</strong> dimension: the size is read from that input at each call. When there is no natural input of that size, add one that is only there for it:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(grid=<span class="tk-str">"t"</span>)
+<span class="tk-kw">def</span> coldest_n(t: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], zone: <span class="tk-gs">gs.i32</span>[<span class="tk-str">"n"</span>], zones: <span class="tk-gs">gs.i32</span>[<span class="tk-str">"m"</span>], low: <span class="tk-gs">gs.Out</span>[<span class="tk-gs">gs.f32</span>[<span class="tk-str">"m"</span>], <span class="tk-gs">gs.inf</span>]):
+    i = <span class="tk-gs">gs.index</span>()
+    <span class="tk-gs">gs.atomic_min</span>(low, zone[i], t[i])
+
+low = coldest_n(t, zone, np.zeros(<span class="tk-num">3</span>, np.int32))    <span class="tk-com"># `zones` is not read: its size gives m = 3</span>
+<span class="tk-kw">assert</span> np.array_equal(low, [<span class="tk-num">3.5</span>, -<span class="tk-num">1.0</span>, <span class="tk-num">20.0</span>])</code></pre></div>
+<h2 id="accumulating-over-several-calls-out"><a class="anchor" href="#accumulating-over-several-calls-out" aria-hidden="true">#</a>Accumulating over several calls: <code>out=</code></h2>
+<p>For data that arrives in batches, pass an existing array with <code>out=</code>: the output starts from its contents instead of zero, and successive calls add up.</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>acc = np.zeros(<span class="tk-num">6</span>, np.int32)
+<span class="tk-kw">for</span> _ <span class="tk-kw">in</span> range(<span class="tk-num">3</span>):                                   <span class="tk-com"># three batches of measurements</span>
+    batch = np.random.uniform(-<span class="tk-num">25.0</span>, <span class="tk-num">45.0</span>, <span class="tk-num">10_000</span>).astype(np.float32)
+    histo(batch, out=acc).numpy()                    <span class="tk-com"># .numpy(): wait for the end before the next batch</span>
+<span class="tk-kw">assert</span> acc.sum() == <span class="tk-num">30_000</span></code></pre></div>
+<h2 id="a-cell-outside-the-output"><a class="anchor" href="#a-cell-outside-the-output" aria-hidden="true">#</a>A cell outside the output</h2>
+<p>If a thread targets a cell that does not exist (bin 10 of a 10-bin histogram), the write <strong>is not done</strong>: nothing is written elsewhere in memory, and the other writes are done normally. Reading the result then raises <code>gs.OutOfBounds</code>, naming the output and the faulty cell:</p>
+<div class="code"><div class="code-head"><span>Python</span><span class="badge badge-ok" title="Run by tests/test_docs.py">Verified</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-dec">@gs.kernel</span>(grid=<span class="tk-str">"t"</span>)
+<span class="tk-kw">def</span> careless(t: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"n"</span>], counts: <span class="tk-gs">gs.Out</span>[<span class="tk-gs">gs.i32</span>[<span class="tk-num">6</span>]]):
+    i = <span class="tk-gs">gs.index</span>()
+    <span class="tk-gs">gs.atomic_add</span>(counts, int((t[i] + <span class="tk-num">20.0</span>) / <span class="tk-num">10.0</span>), <span class="tk-num">1</span>)     <span class="tk-com"># 45 °C gives bin 6: out of bounds</span>
+
+<span class="tk-kw">try</span>:
+    careless(np.array([<span class="tk-num">5.0</span>, <span class="tk-num">45.0</span>], np.float32)).numpy()
+    raised = <span class="tk-kw">False</span>
+<span class="tk-kw">except</span> <span class="tk-gs">gs.OutOfBounds</span> <span class="tk-kw">as</span> e:
+    print(e)                                                 <span class="tk-com"># … index 6 for counts of shape (6,) …</span>
+    raised = <span class="tk-kw">True</span>
+<span class="tk-kw">assert</span> raised</code></pre></div>
+<p>Clamp the cell (<code>gs.min(bin_, 5)</code>) or skip the data point with an <code>if</code> followed by a <code>return</code>.</p>
+<h2 id="cost-and-precision"><a class="anchor" href="#cost-and-precision" aria-hidden="true">#</a>Cost and precision</h2>
+<ul><li><strong>The more threads target the same cell, the slower it gets</strong>, since they go one at a time: six bins contend much more than a thousand. Integer writes are native everywhere; in <code>gs.f32</code>, OpenCL 1.2 and WGSL (Metal, Vulkan, DX12) emulate them with a loop, slower still when threads crowd in.</li><li>**In <code>gs.f32</code>, the last digit may vary from run to run**: the threads' arrival order changes, and (a + b) + c is not exactly a + (b + c) in floating point. For an identical result every time, accumulate in integers (for instance tenths of a millimetre instead of millimetres as floats).</li><li>Not allowed yet: 64-bit outputs (<code>gs.i64</code>, <code>gs.f64</code>), and <code>grid=</code> together with <code>group=</code>.</li></ul><nav class="pager"><a href="devices.html"><span class="dir">← Previous</span><span class="name">Devices</span></a><a class="next" href="groups.html"><span class="dir">Next →</span><span class="name">Thread groups</span></a></nav></article>
+<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#when-do-you-need-it">When do you need it?</a><a href="#start-from-plain-python">Start from plain Python</a><a href="#what-you-write-in-the-kernel">What you write in the kernel</a><a href="#two-complete-examples">Two complete examples</a><a href="#accumulating-over-several-calls-out">Accumulating over several calls: <code>out=</code></a><a href="#a-cell-outside-the-output">A cell outside the output</a><a href="#cost-and-precision">Cost and precision</a></aside>
+</main>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
+</div>
+</body>
+</html>

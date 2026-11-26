@@ -1,7 +1,7 @@
-"""Moteur de transferts (jalon M1.5, ARCHITECTURE.md §9).
+"""Transfer engine (milestone M1.5, ARCHITECTURE.md §9).
 
-Les réglages internes (taille de bloc, budget) sont réduits pour forcer, sur de petits tableaux,
-chaque mode et un découpage en de nombreux blocs dont le dernier est incomplet.
+The internal settings (chunk size, budget) are reduced to force, on small arrays,
+every mode and a split into many chunks whose last one is incomplete.
 """
 
 import warnings
@@ -32,7 +32,7 @@ def f64_axpy(x: gs.f64[:], s: gs.f64) -> gs.f64[:]:
     return x * s + 0.5
 
 
-# Réglages forcés : (taille de bloc, budget, taille de bloc Direct)
+# Forced settings: (chunk size, budget, Direct chunk size)
 CONFIGS = {
     "flux": dict(chunk_bytes=4000, budget_bytes=1, direct_chunk_bytes=12_000),
     "resident_by_blocks": dict(chunk_bytes=4000, budget_bytes=None, direct_chunk_bytes=12_000),
@@ -43,7 +43,7 @@ CONFIGS = {
 def config(request):
     _set_transfer_limits(**CONFIGS[request.param])
     yield request.param
-    _set_transfer_limits()  # valeurs par défaut
+    _set_transfer_limits()  # default values
 
 
 @pytest.fixture(params=DEVICES)
@@ -78,16 +78,16 @@ def test_modes_and_results(device, config):
 
 def test_f64_by_blocks(device, config):
     if not info(device).f64:
-        pytest.skip("pas de f64 sur ce périphérique")
+        pytest.skip("no f64 on this device")
     x = RNG.random(N)
     np.testing.assert_allclose(np.asarray(f64_axpy(x, 1.5, device=device)), x * 1.5 + 0.5, rtol=1e-15)
 
 
 def test_chaining_from_one_mode_to_another(device, config):
     x, y = RNG.random(N).astype(np.float32), RNG.random(N).astype(np.float32)
-    _set_transfer_limits()  # premier appel en mode par défaut (Résident ou Direct)
+    _set_transfer_limits()  # first call in the default mode (Resident or Direct)
     r1 = affine(x, y, 2.0, device=device)
-    _set_transfer_limits(**CONFIGS[config])  # second appel en mode forcé, avec r1 en entrée
+    _set_transfer_limits(**CONFIGS[config])  # second call in the forced mode, with r1 as input
     r2 = affine(r1, y, 0.5, device=device)
     np.testing.assert_allclose(np.asarray(r2), (x * 2 + y) * np.float32(0.5) + y, rtol=1e-6)
 
@@ -98,7 +98,7 @@ def test_out_and_memmap(device, config, tmp_path):
     src[:] = x
     dst = np.memmap(tmp_path / "y.f32", dtype=np.float32, mode="w+", shape=(N,))
     r = affine(src, y, 3.0, device=device, out=dst)
-    assert r.numpy() is dst  # le résultat est écrit dans la destination fournie
+    assert r.numpy() is dst  # the result is written into the given destination
     dst.flush()
     np.testing.assert_allclose(np.fromfile(tmp_path / "y.f32", dtype=np.float32), x * 3 + y, rtol=1e-6)
 
@@ -118,7 +118,7 @@ def test_invalid_out():
         affine(x, x, 1.0, device="cpu", out=np.empty(11, np.float32))
     with pytest.raises(gs.ShapeMismatch, match="out"):
         affine(x, x, 1.0, device="cpu", out=np.empty(10, np.float64))
-    with pytest.raises(gs.TypeMismatch, match="contigu"):
+    with pytest.raises(gs.TypeMismatch, match="contiguous"):
         affine(x, x, 1.0, device="cpu", out=np.empty(20, np.float32)[::2])
 
 
@@ -138,7 +138,7 @@ def test_public_budget():
     try:
         d = next((d for d in gs.devices() if not (d.backend == "opencl" and d.unified_memory) and d.backend not in ("cpu", "metal")), None)
         if d is None:
-            pytest.skip("aucun périphérique concerné par le budget")
+            pytest.skip("no device affected by the budget")
         x = RNG.random(N).astype(np.float32)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

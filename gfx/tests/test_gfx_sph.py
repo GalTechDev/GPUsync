@@ -1,4 +1,4 @@
-"""Solveur SPH sur grille triée : tri GPU, densités, incompressibilité, robustesse."""
+"""SPH solver on a sorted grid: GPU sort, densities, incompressibility, robustness."""
 
 import numpy as np
 import pytest
@@ -27,7 +27,7 @@ def test_sort_keys_with_duplicates_and_sorted_input(dev):
 
 
 def test_density_matches_direct_sum():
-    """Grille triée contre somme sur toutes les paires, loin et près des parois."""
+    """Sorted grid against a sum over all pairs, far from and near the walls."""
     fl = gfx.GpuFluid3D(gfx.Fluid3DConfig.water_sph(3000), layout="dam_break")
     for _ in range(40):
         fl.step(1.0 / 60.0)
@@ -45,7 +45,7 @@ def test_density_matches_direct_sum():
     q = np.sqrt(d2) / h
     spline = np.where(q < 0.5, 1.0 - 6.0 * q**2 * (1.0 - q), np.where(q < 1.0, 2.0 * (1.0 - q) ** 3, 0.0))
     w = spline.sum(1) * 8.0 / (np.pi * h**3) * m
-    # Demi-espace plein à la distance `dist` : masse de la spline sur le plan à la distance t, intégrée
+    # Full half-space at distance `dist`: mass of the spline on the plane at distance t, integrated
     t = (np.arange(400) + 0.5) / 400
     u = 1.0 - t
     plane = np.where(t < 0.5, 16.0 * (0.0875 - t**2 * (0.5 + t**2 * (1.2 * t - 1.5))), 32.0 * u**4 * (0.25 - 0.2 * u))
@@ -63,10 +63,10 @@ def test_sph_keeps_volume_and_settles():
     bx, by, bz = fl.config.bounds
     assert np.isfinite(p).all() and np.isfinite(v).all()
     assert np.all(np.abs(p[:, 0]) <= bx) and np.all(np.abs(p[:, 2]) <= bz) and p[:, 1].min() >= 0.0
-    # 28 % du bassin : hauteur moyenne de la moitié de 0,28 · by
+    # 28 % of the basin: mean height of half of 0.28 · by
     assert abs(p[:, 1].mean() - 0.14 * by) < 0.12
     assert np.linalg.norm(v[:, :3], axis=1).mean() < 0.03
-    # Symétrie latérale : rien ne pousse l'eau en z
+    # Lateral symmetry: nothing pushes the water along z
     assert abs(p[:, 2].mean()) < 0.06
 
 
@@ -84,5 +84,5 @@ def test_sph_particle_limits():
     fl = gfx.GpuFluid3D(gfx.Fluid3DConfig.water_sph(1), layout="dam_break")
     fl.step(1.0 / 60.0)
     assert np.isfinite(fl.pos_gpu.numpy()).all()
-    with pytest.raises(ValueError, match="262 144"):
+    with pytest.raises(ValueError, match="262,144"):
         gfx.GpuFluid3D(gfx.Fluid3DConfig.water_sph((1 << 18) + 1))

@@ -1,4 +1,4 @@
-"""`gpusync.gfx` — Framework graphique 3D / 2D / UI temps réel 100 % GPUsync."""
+"""`gpusync.gfx` — real-time 3D / 2D / UI graphics framework, 100 % GPUsync."""
 
 from .app import App
 from .atmosphere import Atmosphere, AtmosphereConfig

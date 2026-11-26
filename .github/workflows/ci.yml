@@ -1,10 +1,10 @@
-# Intégration continue : tests sur les trois systèmes, roues de gpusync (une par système, abi3 : Python ≥ 3.10)
-# et de gpusync-gfx (Python pur). Les machines de GitHub n'ont pas de GPU de calcul : les tests passent par
-# l'interpréteur cpu:0 (et par Metal sur macOS s'il est exposé) ; les tests GPU complets restent sur les machines
-# de test (tools/remote).
+# Continuous integration: tests on the three systems, wheels of gpusync (one per system, abi3: Python ≥ 3.10)
+# and of gpusync-gfx (pure Python). GitHub machines have no compute GPU: the tests go through the cpu:0
+# interpreter (and through Metal on macOS when it is exposed); the full GPU tests stay on the test machines
+# (tools/remote).
 #
-# Publication sur PyPI : seulement en poussant une étiquette `v*`, et seulement après avoir déclaré ce dépôt comme
-# « trusted publisher » des projets gpusync et gpusync-gfx sur pypi.org (environnement GitHub `pypi`).
+# Publishing to PyPI: only when pushing a `v*` tag, and only after declaring this repository as a
+# "trusted publisher" of the gpusync and gpusync-gfx projects on pypi.org (GitHub environment `pypi`).
 
 name: CI
 
@@ -34,9 +34,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Dépendances
+      - name: Dependencies
         run: python -m pip install "maturin>=1.16,<2" "flit_core>=3.10,<4" "pytest>=8" "numpy>=1.22"
-      - name: Compilation (bibliothèque et moteur, mode modifiable)
+      - name: Build (library and engine, editable mode)
         run: |
           python -m pip install --no-build-isolation -e .
           python -m pip install --no-build-isolation --no-deps -e gfx
@@ -44,12 +44,12 @@ jobs:
         run: python -m gpusync
       - name: cargo test
         run: cargo test --workspace -q
-      - name: Tests de la bibliothèque
+      - name: Library tests
         run: python -m pytest -q -ra tests
 
   gfx:
-    # Le moteur fait de grosses simulations : trop lent sur l'interpréteur, testé là où un GPU est exposé (Metal)
-    name: Tests du moteur (macOS)
+    # The engine runs large simulations: too slow on the interpreter, tested where a GPU is exposed (Metal)
+    name: Engine tests (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +66,7 @@ jobs:
       - run: python -m pytest -q -ra gfx/tests
 
   wheels:
-    name: Roue ${{ matrix.target }} (${{ matrix.os }})
+    name: Wheel ${{ matrix.target }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -87,7 +87,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --out dist
-      - name: La roue s'installe et trouve ses périphériques
+      - name: The wheel installs and finds its devices
         shell: bash
         run: |
           python -m pip install dist/*.whl
@@ -98,7 +98,7 @@ jobs:
           path: dist/*.whl
 
   sdist:
-    name: Archive des sources et roue du moteur
+    name: Source archive and engine wheel
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +109,7 @@ jobs:
         with:
           command: sdist
           args: --out dist
-      - name: gpusync-gfx (sources et roue)
+      - name: gpusync-gfx (sources and wheel)
         run: |
           python -m pip install build
           python -m build --outdir dist gfx
@@ -119,13 +119,13 @@ jobs:
           path: dist/*
 
   publish:
-    name: Publication sur PyPI
+    name: Publish to PyPI
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, gfx, wheels, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # « trusted publishing » : aucun jeton PyPI stocké dans le dépôt
+      id-token: write  # trusted publishing: no PyPI token stored in the repository
     steps:
       - uses: actions/download-artifact@v4
         with:

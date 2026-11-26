@@ -1,7 +1,7 @@
-"""Kernels `@gs.kernel` 100 % GPU pour les 3 moteurs fluides de `gpusync.gfx` :
-1. Surface d'eau 3D (équation des ondes 2D + normales lisses ou flat-shaded low-poly)
-2. Fluide particulaire 3D SPH (densité, pression, viscosité, cohésion → TRS GPU)
-3. Fluide 2D eulérien Navier-Stokes / Stable Fluids (advection, vorticité, Jacobi, teinture, cel-shading)
+"""100 % GPU `@gs.kernel` kernels for the 3 fluid engines of `gpusync.gfx`:
+1. 3D water surface (2D wave equation + smooth or flat-shaded low-poly normals)
+2. 3D SPH particle fluid (density, pressure, viscosity, cohesion → GPU TRS)
+3. 2D Eulerian Navier-Stokes / Stable Fluids (advection, vorticity, Jacobi, dye, cel-shading)
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import gpusync as gs
 
 
-# ───────────────────────── 1. Surface d'eau 3D (équation des ondes) ─────────────────────────
+# ───────────────────────── 1. 3D water surface (wave equation) ─────────────────────────
 
 
 @gs.kernel
@@ -21,10 +21,10 @@ def water_wave_step(
     smooth: gs.f32,
     absorb_border: gs.i32,
 ) -> gs.f32["gh", "gw"]:
-    """Équation des ondes 2D, un pas (`c2` = (vitesse · dt / cellule)², bords réfléchissants ou absorbants).
+    """2D wave equation, one step (`c2` = (speed · dt / cell)², reflecting or absorbing edges).
 
-    L'amortissement et le lissage agissent sur la vitesse (`h_curr - h_prev`) et non sur la hauteur : en bassin
-    fermé, le niveau moyen ne bouge pas."""
+    Damping and smoothing act on the velocity (`h_curr - h_prev`), not on the height: in a closed
+    basin, the mean level does not move."""
     y, x = gs.index()
     gh = h_curr.shape[0]
     gw = h_curr.shape[1]
@@ -38,7 +38,7 @@ def water_wave_step(
     hp = h_prev[y, x]
     lap = h_curr[y, xm] + h_curr[y, xp] + h_curr[ym, x] + h_curr[yp, x] - 4.0 * hc
     lap_p = h_prev[y, xm] + h_prev[y, xp] + h_prev[ym, x] + h_prev[yp, x] - 4.0 * hp
-    # `smooth` éteint d'abord les ondes de la taille d'une cellule
+    # `smooth` first damps waves of the size of one cell
     hn = hc + (hc - hp) * damping + c2 * lap + smooth * (lap - lap_p)
 
     if absorb_border != 0:
@@ -51,7 +51,7 @@ def water_wave_step(
 
 @gs.kernel
 def water_rescale_prev(h_curr: gs.f32["gh", "gw"], h_prev: gs.f32["gh", "gw"], ratio: gs.f32) -> gs.f32["gh", "gw"]:
-    """Multiplie la vitesse (`h_curr - h_prev`) par `ratio`."""
+    """Multiplies the velocity (`h_curr - h_prev`) by `ratio`."""
     y, x = gs.index()
     return h_curr[y, x] - (h_curr[y, x] - h_prev[y, x]) * ratio
 
@@ -65,7 +65,7 @@ def water_add_splash(
     strength: gs.f32,
     ring: gs.f32,
 ) -> gs.f32["gh", "gw"]:
-    """Creux (ou bosse) circulaire, entouré d'une couronne de signe opposé (`ring`) qui rend le même volume d'eau."""
+    """Circular trough (or bump), surrounded by a ring of opposite sign (`ring`) that gives back the same volume of water."""
     y, x = gs.index()
     dx = float(x) - cx
     dy = float(y) - cy
@@ -84,7 +84,7 @@ def water_build_smooth_mesh(
     amb_freq: gs.f32,
     amb_t: gs.f32,
 ) -> (gs.f32["nv", "c3"], gs.f32["nv", "c3"]):
-    """Écrit directement les sommets et normales lisses (style réaliste) dans `Object3D.gpu_positions/normals`."""
+    """Writes the vertices and smooth normals (realistic style) directly into `Object3D.gpu_positions/normals`."""
     v, c = gs.index()
     gh = h_grid.shape[0]
     gw = h_grid.shape[1]
@@ -108,7 +108,7 @@ def water_build_smooth_mesh(
     h_d = h_grid[ym, gx] * h_scale
     h_u = h_grid[yp, gx] * h_scale
 
-    # Houle procédurale ambiante optionnelle (mer / océan)
+    # Optional ambient procedural swell (sea / ocean)
     y_amb = 0.0
     dax = 0.0
     daz = 0.0
@@ -147,7 +147,7 @@ def water_build_flat_mesh(
     amb_freq: gs.f32,
     amb_t: gs.f32,
 ) -> (gs.f32["nv", "c3"], gs.f32["nv", "c3"]):
-    """Écrit un maillage non-indexé à facettes nettes (style low-poly / cristal) sur GPU."""
+    """Writes a non-indexed mesh with sharp facets (low-poly / crystal style) on the GPU."""
     v, c = gs.index()
     gh = h_grid.shape[0]
     gw = h_grid.shape[1]
@@ -182,7 +182,7 @@ def water_build_flat_mesh(
         y1 += amb_amp * (0.62 * gs.sin(x1 * amb_freq + z1 * amb_freq * 0.55 + amb_t) + 0.38 * gs.cos(-x1 * amb_freq * 0.72 + z1 * amb_freq * 1.15 - amb_t * 0.82))
         y2 += amb_amp * (0.62 * gs.sin(x2 * amb_freq + z2 * amb_freq * 0.55 + amb_t) + 0.38 * gs.cos(-x2 * amb_freq * 0.72 + z2 * amb_freq * 1.15 - amb_t * 0.82))
 
-    # Normale exacte de la facette triangulaire (garantie orientée vers le haut +Y)
+    # Exact normal of the triangular facet (guaranteed to point up, +Y)
     e1x = x1 - x0
     e1y = y1 - y0
     e1z = z1 - z0
@@ -201,7 +201,7 @@ def water_build_flat_mesh(
     ny = ny * inv_n
     nz = nz * inv_n
 
-    # Position du sommet courant v
+    # Position of the current vertex v
     px = x0
     py = y0
     pz = z0
@@ -238,7 +238,7 @@ def sph_to_trs(
     spin_rate: gs.f32,
     t: gs.f32,
 ) -> gs.f32["n", "c8"]:
-    """Convertit les particules SPH en matrices TRS `(N, 8)` directement en VRAM pour `InstancedMesh3D`."""
+    """Converts the SPH particles into TRS matrices `(N, 8)` directly in VRAM for `InstancedMesh3D`."""
     i, c = gs.index()
     val = pos[i, 0] + trs_tpl[i, c] * 0.0
     if c == 1:
@@ -259,7 +259,7 @@ def sph_to_trs(
     return val
 
 
-# ───────────────────────── 3. Fluide 2D Eulérien (Navier-Stokes / Stable Fluids) ─────────────────────────
+# ───────────────────────── 3. 2D Eulerian fluid (Navier-Stokes / Stable Fluids) ─────────────────────────
 
 
 @gs.kernel
@@ -273,7 +273,7 @@ def fluid2d_advect_vel(
     dissipation: gs.f32,
     buoyancy: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Advection semi-lagrangienne bilinéaire du champ de vitesse + flottabilité thermique optionnelle."""
+    """Bilinear semi-Lagrangian advection of the velocity field + optional thermal buoyancy."""
     y, x = gs.index()
     h = vx.shape[0]
     w = vx.shape[1]
@@ -307,7 +307,7 @@ def fluid2d_curl(
     vx: gs.f32["h", "w"],
     vy: gs.f32["h", "w"],
 ) -> gs.f32["h", "w"]:
-    """Calcule la vorticité scalaire (rotationnel 2D) pour le confinement de tourbillons."""
+    """Computes the scalar vorticity (2D curl) for vortex confinement."""
     y, x = gs.index()
     h = vx.shape[0]
     w = vx.shape[1]
@@ -326,7 +326,7 @@ def fluid2d_vorticity(
     strength: gs.f32,
     dt: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Injecte la force de confinement de vorticité (rend les volutes fines et vivantes)."""
+    """Injects the vorticity confinement force (makes the swirls fine and lively)."""
     y, x = gs.index()
     h = vx.shape[0]
     w = vx.shape[1]
@@ -357,7 +357,7 @@ def fluid2d_divergence(
     vx: gs.f32["h", "w"],
     vy: gs.f32["h", "w"],
 ) -> gs.f32["h", "w"]:
-    """Calcule la divergence du champ de vitesse."""
+    """Computes the divergence of the velocity field."""
     y, x = gs.index()
     h = vx.shape[0]
     w = vx.shape[1]
@@ -373,7 +373,7 @@ def fluid2d_pressure_jacobi(
     p: gs.f32["h", "w"],
     div: gs.f32["h", "w"],
 ) -> gs.f32["h", "w"]:
-    """Une itération de relaxation de Jacobi pour l'équation de Poisson de pression."""
+    """One Jacobi relaxation iteration for the pressure Poisson equation."""
     y, x = gs.index()
     h = p.shape[0]
     w = p.shape[1]
@@ -390,7 +390,7 @@ def fluid2d_subtract_grad(
     vy: gs.f32["h", "w"],
     p: gs.f32["h", "w"],
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Projette la vitesse sur un champ incompressible (∇·v = 0) avec bords étanches."""
+    """Projects the velocity onto an incompressible field (∇·v = 0) with sealed edges."""
     y, x = gs.index()
     h = vx.shape[0]
     w = vx.shape[1]
@@ -418,7 +418,7 @@ def fluid2d_advect_dye(
     dt: gs.f32,
     dissipation: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Advecte les 3 canaux d'encre/fumée RGB le long du champ de vitesse incompressible."""
+    """Advects the 3 RGB ink / smoke channels along the incompressible velocity field."""
     y, x = gs.index()
     h = dr.shape[0]
     w = dr.shape[1]
@@ -452,7 +452,7 @@ def fluid2d_splat_vel(
     fy: gs.f32,
     inv_r2: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Injecte une impulsion de vitesse gaussienne à `(cx, cy)`."""
+    """Injects a Gaussian velocity impulse at `(cx, cy)`."""
     y, x = gs.index()
     dx = float(x) - cx
     dy = float(y) - cy
@@ -472,7 +472,7 @@ def fluid2d_splat_dye(
     cb: gs.f32,
     inv_r2: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Injecte de l'encre / fumée colorée à `(cx, cy)`."""
+    """Injects coloured ink / smoke at `(cx, cy)`."""
     y, x = gs.index()
     dx = float(x) - cx
     dy = float(y) - cy
@@ -491,13 +491,13 @@ def fluid2d_render_u32(
     exposure: gs.f32,
     posterize: gs.f32,
 ) -> gs.u32["h", "w"]:
-    """Empaquette le champ de teinture RGB en texture `u32` RGBA8 (lisse ou cel-shaded / low-poly)."""
+    """Packs the RGB dye field into a `u32` RGBA8 texture (smooth or cel-shaded / low-poly)."""
     y, x = gs.index()
     r = (bg_r + dr[y, x]) * exposure
     g = (bg_g + dg[y, x]) * exposure
     b = (bg_b + db[y, x]) * exposure
 
-    # Tonemapping doux (Reinhard) pour éviter la saturation dure sur les croisements d'encre
+    # Soft tonemapping (Reinhard) to avoid hard saturation where inks cross
     r = r / (1.0 + r * 0.55)
     g = g / (1.0 + g * 0.55)
     b = b / (1.0 + b * 0.55)
@@ -517,7 +517,7 @@ def fluid2d_render_u32(
     return gs.u32(ri) | (gs.u32(gi) << gs.u32(8)) | (gs.u32(bi) << gs.u32(16)) | gs.u32(4278190080)
 
 
-# ───────────────────────── 4. Rendu Volumétrique Liquide Screen-Space (SSFR 100 % GPU) ─────────────────────────
+# ───────────────────────── 4. Screen-space volumetric liquid rendering (SSFR, 100 % GPU) ─────────────────────────
 
 EMPTY_FLUID_DEPTH = 4294967295
 
@@ -534,7 +534,7 @@ def fluid_splat_spheres(
     depth_out: gs.Out[gs.u32["h", "w"], EMPTY_FLUID_DEPTH],
     thick_out: gs.Out[gs.u32["h", "w"], 0],
 ):
-    """Projette chaque particule SPH en sphère analytique (profondeur minimale + épaisseur cumulée)."""
+    """Projects each SPH particle as an analytic sphere (minimum depth + accumulated thickness)."""
     i = gs.index()
     wx = pos[i, 0]
     wy = pos[i, 1]
@@ -587,7 +587,7 @@ def fluid_splat_spheres(
                             dn = gs.min(gs.max((z_front - near) * inv_dr, 0.0), 1.0)
                             d_u32 = gs.u32(dn * 4000000000.0)
                             gs.atomic_min(depth_out, (py, px), d_u32)
-                            # Épaisseur optique cumulée (corde traversée par le rayon)
+                            # Accumulated optical thickness (chord crossed by the ray)
                             t_u32 = gs.u32(rad * 2.0 * dz_s * 2048.0)
                             gs.atomic_add(thick_out, (py, px), t_u32)
 
@@ -599,7 +599,7 @@ def fluid_unpack_dt(
     near: gs.f32,
     far: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Convertit les buffers atomiques `u32` en profondeur linéaire (`0.0` = vide) et épaisseur `f32`."""
+    """Converts the atomic `u32` buffers into linear depth (`0.0` = empty) and `f32` thickness."""
     py, px = gs.index()
     du = depth_u32[py, px]
     d_out = 0.0
@@ -616,7 +616,7 @@ def fluid_curvature_flow(
     thick: gs.f32["h", "w"],
     max_dz: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Lissage par flux de courbure (van der Laan / NVIDIA FleX) : élimine 100 % des marches et bosses sphériques."""
+    """Curvature-flow smoothing (van der Laan / NVIDIA FleX): removes 100 % of the steps and spherical bumps."""
     py, px = gs.index()
     h = depth.shape[0]
     w = depth.shape[1]
@@ -634,7 +634,7 @@ def fluid_curvature_flow(
     sum_t = tc * 2.0
     sum_w = 2.0
 
-    # 4 voisins cardinaux (poids 1.0) + 4 diagonaux (poids 0.5) si dans la même nappe de profondeur
+    # 4 cardinal neighbours (weight 1.0) + 4 diagonal ones (weight 0.5) if in the same depth layer
     d_l = depth[py, xm]
     if d_l > 0.0 and gs.abs(d_l - zc) < max_dz:
         sum_d += d_l
@@ -688,7 +688,7 @@ def fluid_bilateral_blur_h(
     sigma_s: gs.f32,
     sigma_d: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Lissage bilatéral horizontal : fusionne les particules en surface liquide continue sans flouter les bords."""
+    """Horizontal bilateral smoothing: merges the particles into a continuous liquid surface without blurring the edges."""
     py, px = gs.index()
     w = depth.shape[1]
     dc = depth[py, px]
@@ -724,7 +724,7 @@ def fluid_bilateral_blur_v(
     sigma_s: gs.f32,
     sigma_d: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Lissage bilatéral vertical : complète la fusion en surface liquide lisse et continue."""
+    """Vertical bilateral smoothing: completes the merge into a smooth, continuous liquid surface."""
     py, px = gs.index()
     h = depth.shape[0]
     dc = depth[py, px]
@@ -796,7 +796,7 @@ def fluid_shade_volumetric(
     roughness: gs.f32,
     foam_strength: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Shading optique volumétrique : normales lissées, réfraction du décor, Beer-Lambert, Fresnel + HDRI."""
+    """Volumetric optical shading: smoothed normals, refraction of the scenery, Beer-Lambert, Fresnel + HDRI."""
     py, px = gs.index()
     h = depth.shape[0]
     w = depth.shape[1]
@@ -808,13 +808,13 @@ def fluid_shade_volumetric(
     inv_w = 1.0 / float(w)
     inv_h = 1.0 / float(h)
 
-    # Coordonnées vue du pixel courant
+    # View coordinates of the current pixel
     ux_c = ((float(px) + 0.5) * inv_w * 2.0 - 1.0) * aspect * tan_hfov
     uy_c = (1.0 - (float(py) + 0.5) * inv_h * 2.0) * tan_hfov
     dux = 2.0 * inv_w * aspect * tan_hfov
     duy = -2.0 * inv_h * tan_hfov
 
-    # Différences finies lisses (±2 pixels au cœur du liquide, ±1 aux bords) pour normales miroir sans bruit
+    # Smooth finite differences (±2 pixels inside the liquid, ±1 at the edges) for noise-free mirror normals
     xl1 = gs.max(px - 1, 0)
     xr1 = gs.min(px + 1, w - 1)
     yu1 = gs.max(py - 1, 0)
@@ -833,7 +833,7 @@ def fluid_shade_volumetric(
     zu2 = depth[yu2, px]
     zd2 = depth[yd2, px]
 
-    # Vecteur tangent dP/dx (centré large si dans la même nappe, sinon unilatéral net)
+    # Tangent vector dP/dx (wide centred if in the same layer, otherwise a sharp one-sided one)
     dx_x = dux * zc
     dx_y = 0.0
     dx_z = 0.0
@@ -873,7 +873,7 @@ def fluid_shade_volumetric(
         dy_y = uy_c * zc - (uy_c - duy) * zu
         dy_z = dz_u
 
-    # Produit vectoriel dP/dx × dP/dy (orienté vers la caméra : nv_z < 0)
+    # Cross product dP/dx × dP/dy (facing the camera: nv_z < 0)
     nv_x = dx_y * dy_z - dx_z * dy_y
     nv_y = dx_z * dy_x - dx_x * dy_z
     nv_z = dx_x * dy_y - dx_y * dy_x
@@ -886,7 +886,7 @@ def fluid_shade_volumetric(
     nv_y = nv_y * inv_nv
     nv_z = nv_z * inv_nv
 
-    # Normale et vecteur vue en espace monde
+    # Normal and view vector in world space
     nx = right_x * nv_x + up_x * nv_y + fwd_x * nv_z
     ny = right_y * nv_x + up_y * nv_y + fwd_y * nv_z
     nz = right_z * nv_x + up_z * nv_y + fwd_z * nv_z
@@ -905,13 +905,13 @@ def fluid_shade_volumetric(
 
     ndotv = gs.max(nx * vx + ny * vy + nz * vz, 0.02)
     th = gs.max(thick[py, px], 0.0)
-    # Découpe douce sur l'épaisseur optique : supprime les bords bosselés des sphères périphériques
+    # Soft cut on the optical thickness: removes the bumpy edges of the outer spheres
     edge_alpha = gs.min(gs.max((th - 0.14) / 0.22, 0.0), 1.0)
     if edge_alpha <= 0.001:
         return hdr_r[py, px], hdr_g[py, px], hdr_b[py, px]
     th = gs.max(th, 0.05)
 
-    # 1) Réfraction optique réaliste du décor derrière le liquide + absorption Beer-Lambert
+    # 1) Realistic optical refraction of the scenery behind the liquid + Beer-Lambert absorption
     refr_scale = refract_px * gs.min(th * 0.55, 1.0)
     rpx = gs.min(gs.max(int(float(px) + nv_x * refr_scale), 0), w - 1)
     rpy = gs.min(gs.max(int(float(py) - nv_y * refr_scale), 0), h - 1)
@@ -923,7 +923,7 @@ def fluid_shade_volumetric(
     tg = gs.exp(-th * abs_g)
     tb = gs.exp(-th * abs_b)
 
-    # Caustique douce sur le fond vu à travers l'eau peu profonde + diffusion sous-surface
+    # Soft caustic on the bottom seen through shallow water + subsurface scattering
     ndotl_wrap = gs.max((nx * sun_x + ny * sun_y + nz * sun_z) * 0.5 + 0.5, 0.0)
     caustic = 1.0 + 0.22 * gs.max(ny, 0.0) * gs.exp(-th * 0.35)
     scat = 0.18 + 0.55 * ndotl_wrap
@@ -931,7 +931,7 @@ def fluid_shade_volumetric(
     body_g = bg_g * tg * caustic + tint_g * (1.0 - tg) * scat
     body_b = bg_b * tb * caustic + tint_b * (1.0 - tb) * scat
 
-    # 2) Réflexion Fresnel + skybox HDRI (ou ciel procédural)
+    # 2) Fresnel reflection + HDRI skybox (or procedural sky)
     rx = 2.0 * ndotv * nx - vx
     ry = 2.0 * ndotv * ny - vy
     rz = 2.0 * ndotv * nz - vz
@@ -967,7 +967,7 @@ def fluid_shade_volumetric(
         env_g = 0.12 + 0.24 * (1.0 - r_sky)
         env_b = 0.22 + 0.36 * (1.0 - r_sky)
 
-    # Reflet spéculaire net du soleil (aspect mouillé / brillant)
+    # Sharp specular highlight of the sun (wet / shiny look)
     hx = vx + sun_x
     hy = vy + sun_y
     hz = vz + sun_z
@@ -986,19 +986,19 @@ def fluid_shade_volumetric(
     fg = f0g + (1.0 - f0g) * f_pow
     fb = f0b + (1.0 - f0b) * f_pow
 
-    # Écume subtile uniquement sur les crêtes supérieures très incurvées (jamais sur la vitre/sol !)
+    # Subtle foam only on very curved upper crests (never on the glass / floor!)
     foam = 0.0
     if foam_strength > 0.0 and ny > 0.65 and th > 0.35 and th < 1.15:
         crest = (1.15 - th) * (ny - 0.65)
         foam = gs.min(crest * crest * foam_strength * 1.4, 0.45)
 
-    # Émissif (lave / magma / plasma) modulant la croûte refroidie sur les zones plates
+    # Emissive (lava / magma / plasma) modulating the cooled crust on flat areas
     em_mod = 0.45 + 0.55 * gs.max(1.0 - ny, 0.0) + 0.35 * gs.min(th * 0.5, 1.0)
 
     out_r = body_r * (1.0 - fr) + env_r * fr + sun_r * spec + foam + em_r * em_mod
     out_g = body_g * (1.0 - fg) + env_g * fg + sun_g * spec + foam + em_g * em_mod
     out_b = body_b * (1.0 - fb) + env_b * fb + sun_b * spec + foam + em_b * em_mod
-    # Fondu anti-aliasé sur le contour lissé par l'épaisseur
+    # Anti-aliased fade on the outline smoothed by the thickness
     base_r = hdr_r[py, px]
     base_g = hdr_g[py, px]
     base_b = hdr_b[py, px]
@@ -1029,9 +1029,9 @@ def flip_p2g(
     g_vy: gs.Out[gs.u32["nc"], 0],
     g_vz: gs.Out[gs.u32["nc"], 0],
 ):
-    """P2G (Particle-to-Grid) trilinéaire O(N) : accumule masse et vitesse de milliers de gouttes sur la grille 3D."""
+    """Trilinear O(N) P2G (particle-to-grid): accumulates the mass and velocity of thousands of drops on the 3D grid."""
     i = gs.index()
-    # Utilise grid_tpl en lecture nulle uniquement pour fixer la dimension `nc`
+    # Uses grid_tpl only as a zero read to fix the `nc` dimension
     _unused = grid_tpl[0] * 0.0
     fx = (pos[i, 0] + bx) / gs.max(2.0 * bx, 1e-4) * float(gx_n - 1)
     fy = (pos[i, 1] - floor_y) / gs.max(by, 1e-4) * float(gy_n - 1)
@@ -1048,7 +1048,7 @@ def flip_p2g(
     ty = fy - float(iy0)
     tz = fz - float(iz0)
 
-    # Biais +20.0 pour stocker les vitesses signées sans débordement en u32 atomique
+    # +20.0 bias to store signed velocities without overflow in an atomic u32
     vx_b = gs.min(gs.max(vel[i, 0], -18.0), 18.0) + 20.0 + _unused
     vy_b = gs.min(gs.max(vel[i, 1], -18.0), 18.0) + 20.0
     vz_b = gs.min(gs.max(vel[i, 2], -18.0), 18.0) + 20.0
@@ -1065,7 +1065,7 @@ def flip_p2g(
                 w = wx * wy * wz * 1024.0
                 if w > 0.5:
                     cid = iz * stride_z + iy * gx_n + (ix0 + dx)
-                    # Poids entier commun aux sommes : sinon la moyenne est biaisée
+                    # Integer weight shared by the sums: otherwise the mean is biased
                     q = gs.u32(w + 0.5)
                     qf = float(q)
                     gs.atomic_add(g_mass, cid, q)
@@ -1090,7 +1090,7 @@ def flip_grid_forces(
     pulse_x: gs.f32,
     pulse_z: gs.f32,
 ) -> (gs.f32["nc"], gs.f32["nc"], gs.f32["nc"], gs.f32["nc"]):
-    """Normalise la grille 3D, applique gravité + impulsion de vague + conditions aux parois."""
+    """Normalizes the 3D grid, applies gravity + wave impulse + wall conditions."""
     cid = gs.index()
     stride_z = gx_n * gy_n
     iz = cid // stride_z
@@ -1129,7 +1129,7 @@ def flip_grid_divergence(
     rest_mass: gs.f32,
     density_push: gs.f32,
 ) -> gs.f32["nc"]:
-    """Calcule la divergence 3D + correction de volume (empêche le tassement du liquide)."""
+    """Computes the 3D divergence + volume correction (stops the liquid from compacting)."""
     cid = gs.index()
     m = mass_f[cid]
     if m <= 0.05:
@@ -1155,7 +1155,7 @@ def flip_grid_divergence(
     v_f = vz[zp * stride_z + iy * gx_n + ix] if iz < gz_n - 1 else 0.0
 
     div = 0.5 * ((v_r - v_l) + (v_u - v_d) + (v_f - v_b))
-    # Correction de dérive de densité (maintient le volume exact du liquide)
+    # Density drift correction (keeps the liquid's volume exact)
     excess = gs.max(m - rest_mass, 0.0)
     return div - density_push * excess
 
@@ -1169,7 +1169,7 @@ def flip_grid_pressure_jacobi(
     gy_n: gs.i32,
     gz_n: gs.i32,
 ) -> gs.f32["nc"]:
-    """Itération de Jacobi 3D pour l'équation de Poisson de pression (air = 0, parois = Neumann)."""
+    """3D Jacobi iteration for the pressure Poisson equation (air = 0, walls = Neumann)."""
     cid = gs.index()
     if mass_f[cid] <= 0.05:
         return 0.0
@@ -1201,7 +1201,7 @@ def flip_grid_project(
     gy_n: gs.i32,
     gz_n: gs.i32,
 ) -> (gs.f32["nc"], gs.f32["nc"], gs.f32["nc"]):
-    """Projette le champ de vitesse 3D sur un écoulement incompressible (∇·v = 0)."""
+    """Projects the 3D velocity field onto an incompressible flow (∇·v = 0)."""
     cid = gs.index()
     if mass_f[cid] <= 0.05:
         return 0.0, 0.0, 0.0
@@ -1260,7 +1260,7 @@ def flip_g2p(
     restitution: gs.f32,
     max_speed: gs.f32,
 ) -> (gs.f32["n", "c4"], gs.f32["n", "c4"]):
-    """G2P (Grid-to-Particle) : mélange PIC/FLIP trilinéaire + advection et rebonds parois."""
+    """G2P (grid-to-particle): trilinear PIC/FLIP blend + advection and wall bounces."""
     i, c = gs.index()
     px = pos[i, 0]
     py = pos[i, 1]
@@ -1306,7 +1306,7 @@ def flip_g2p(
                 dvy += (ny_v - vy_old[cid]) * w
                 dvz += (nz_v - vz_old[cid]) * w
 
-    # Δv FLIP complet = gravité/impulsion + correction de pression (v_new - v_star)
+    # Full FLIP Δv = gravity / impulse + pressure correction (v_new - v_star)
     flip_vx = vel[i, 0] + (grav_x + pulse_x) * dt + dvx
     flip_vy = vel[i, 1] + grav_y * dt + dvy
     flip_vz = vel[i, 2] + (grav_z + pulse_z) * dt + dvz
@@ -1325,7 +1325,7 @@ def flip_g2p(
     py += vy * dt
     pz += vz * dt
 
-    # Parois de l'aquarium
+    # Aquarium walls
     min_y = floor_y + prad
     max_y = floor_y + by - prad
     if py < min_y:

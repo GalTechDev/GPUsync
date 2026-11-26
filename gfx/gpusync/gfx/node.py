@@ -1,4 +1,4 @@
-"""Nœuds hiérarchiques (`Node`, `Object3D`) pour le graphe de scène `gpusync.gfx`."""
+"""Hierarchical nodes (`Node`, `Object3D`) for the `gpusync.gfx` scene graph."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .mesh import Mesh
 
 
 class Node:
-    """Nœud de transformation hiérarchique (parent/enfant, position, rotation, échelle, visibilité)."""
+    """Hierarchical transform node (parent/child, position, rotation, scale, visibility)."""
 
     def __init__(
         self,
@@ -37,7 +37,7 @@ class Node:
         self.parent: Node | None = None
         self.children: list[Node] = []
 
-    # ── Propriétés de transformation pratiques ──
+    # ── Convenient transform properties ──
 
     @property
     def pos(self) -> tuple[float, float, float]:
@@ -115,7 +115,7 @@ class Node:
         else:
             self._scale = [float(value[0]), float(value[1]), float(value[2])]
 
-    # ── Hiérarchie ──
+    # ── Hierarchy ──
 
     def add_child(self, child: Node) -> Node:
         if child.parent is not None:
@@ -149,7 +149,7 @@ class Node:
         return m.astype(np.float32)
 
     def iter_tree(self):
-        """Parcours en profondeur (parent avant enfants)."""
+        """Depth-first traversal (parent before children)."""
         yield self
         for ch in self.children:
             yield from ch.iter_tree()
@@ -192,11 +192,11 @@ class Node:
 
 
 class Object3D(Node):
-    """Objet 3D rendable : associe un `Mesh` et un `Material` à un nœud du graphe de scène.
+    """Renderable 3D object: ties a `Mesh` and a `Material` to a node of the scene graph.
 
-    Pont Compute↔Rendu : assignez `obj.gpu_positions` (et optionnellement `obj.gpu_normals`) à un
-    `gs.Array` `f32[num_vertices, 3]` produit par votre `@gs.kernel` pour déformer le maillage en
-    temps réel sans aucune copie CPU.
+    Compute↔render bridge: assign `obj.gpu_positions` (and optionally `obj.gpu_normals`) to a
+    `gs.Array` `f32[num_vertices, 3]` produced by your `@gs.kernel` to deform the mesh in
+    real time without any CPU copy.
     """
 
     def __init__(
@@ -216,23 +216,23 @@ class Object3D(Node):
         self.mesh = mesh
         self.material = material if material is not None else Material()
         self.cast_shadow = bool(cast_shadow)
-        self.gpu_positions: Any = None  # gs.Array f32[num_vertices, 3] optionnel (déformation GPU)
+        self.gpu_positions: Any = None  # optional gs.Array f32[num_vertices, 3] (GPU deformation)
         self.gpu_normals: Any = None  # gs.Array f32[num_vertices, 3] optionnel
-        self.gpu_transform: Any = None  # (gs.Array, ligne) : voir `bind_transform`
-        self.water: Any = None  # `GpuWaterSurface` : rendu transparent (posé par `apply_to`)
+        self.gpu_transform: Any = None  # (gs.Array, row): see `bind_transform`
+        self.water: Any = None  # `GpuWaterSurface`: transparent rendering (set by `apply_to`)
 
     def bind_transform(self, array: Any, row: int = 0) -> None:
-        """Lie la position de l'objet à un calcul GPU : l'objet est dessiné là où `array[row]` le place.
+        """Binds the object's position to a GPU computation: the object is drawn where `array[row]` puts it.
 
-        `array` est un `gs.Array` f32 `(N, 8)` ou plus large : `[px, py, pz, rx, ry, rz, échelle, visible, …]`,
-        en coordonnées du monde. Rien ne repasse par le CPU : `pos` et `rot` ne sont donc plus à jour, et les
-        enfants de l'objet ne le suivent pas. `array=None` rend la main au CPU."""
+        `array` is a `gs.Array` f32 `(N, 8)` or wider: `[px, py, pz, rx, ry, rz, scale, visible, …]`,
+        in world coordinates. Nothing goes back through the CPU: `pos` and `rot` are therefore no longer up to
+        date, and the object's children do not follow it. `array=None` hands control back to the CPU."""
         if array is not None and (len(array.shape) != 2 or array.shape[1] < 8 or not 0 <= row < array.shape[0]):
-            raise ValueError(f"bind_transform : tableau (N, 8) ou plus attendu et ligne valide, reçu {tuple(array.shape)}, ligne {row}")
+            raise ValueError(f"bind_transform: array (N, 8) or wider and a valid row expected, got {tuple(array.shape)}, row {row}")
         self.gpu_transform = None if array is None else (array, int(row))
 
     def base_positions_gpu(self, device: str | None = None):
-        """Charge une fois les sommets de repos en VRAM (`gs.Array` f32) pour vos `@gs.kernel`."""
+        """Uploads the rest vertices to VRAM once (`gs.Array` f32) for your `@gs.kernel`."""
         from .kernels.k3d import upload_f32
 
         return upload_f32(self.mesh.positions, device=device)
@@ -269,11 +269,11 @@ class Object3D(Node):
 
 
 class InstancedMesh3D(Object3D):
-    """Instancing GPU massif : rend `count` copies d'un même `Mesh` pilotées par un buffer GPU.
+    """Massive GPU instancing: renders `count` copies of the same `Mesh` driven by a GPU buffer.
 
-    Alimentez `inst.gpu_trs` (`gs.Array` `f32[count, 8]` : `[px, py, pz, rx, ry, rz, scale, visible]`)
-    ou `inst.gpu_matrices` (`gs.Array` `f32[count, 16]`) directement depuis un `@gs.kernel` :
-    les matrices `model`, `normal`, `MVP` et `light_MVP` sont calculées 100 % sur le GPU.
+    Feed `inst.gpu_trs` (`gs.Array` `f32[count, 8]`: `[px, py, pz, rx, ry, rz, scale, visible]`)
+    or `inst.gpu_matrices` (`gs.Array` `f32[count, 16]`) directly from a `@gs.kernel`:
+    the `model`, `normal`, `MVP` and `light_MVP` matrices are computed 100 % on the GPU.
     """
 
     def __init__(
@@ -301,7 +301,7 @@ class InstancedMesh3D(Object3D):
         self.gpu_matrices: Any = gpu_matrices
 
     def base_trs_gpu(self, device: str | None = None):
-        """Envoie le tableau initial `(count, 8)` TRS en VRAM pour un `@gs.kernel` d'animation."""
+        """Uploads the initial `(count, 8)` TRS array to VRAM for an animation `@gs.kernel`."""
         from .kernels.k3d import upload_f32
 
         return upload_f32(self.trs, device=device)

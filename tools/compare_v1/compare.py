@@ -1,10 +1,10 @@
-"""Prototype Python (v1) contre GPUsync Rust (v2), mêmes calculs sur le même GPU.
+"""Python prototype (v1) against Rust GPUsync (v2), same computations on the same GPU.
 
     python tools/compare_v1/compare.py PYTHON_V1 V1_BACKEND V2_DEVICE [V1_BACKEND V2_DEVICE ...]
 
-ex. Mac : `.venv-v1/bin/python opencl opencl:0` ; PC : `... cuda cuda:0 opencl/NVIDIA opencl:0`.
-PYTHON_V1 : interpréteur de l'environnement du prototype (numpy, pyopencl, llvmlite, cupy si CUDA).
-Chaque mesure tourne dans un processus neuf ; la tâche 1 Gio a le sien (pic mémoire par processus).
+e.g. Mac: `.venv-v1/bin/python opencl opencl:0`; PC: `... cuda cuda:0 opencl/NVIDIA opencl:0`.
+PYTHON_V1: interpreter of the prototype's environment (numpy, pyopencl, llvmlite, cupy for CUDA).
+Each measurement runs in a fresh process; the 1 GiB task has its own (peak memory per process).
 """
 
 import json
@@ -37,13 +37,13 @@ def measure(py, impl, backend):
 
 
 ROWS = [
-    ("import de la bibliothèque", "import_ms", "ms"),
-    ("1er appel (compilation comprise)", "first_call_ms", "ms"),
-    ("surcoût par appel, 1000 éléments", "call_ms", "ms"),
-    ("10 M éléments, aller-retour", "big_ms", "ms"),
+    ("library import", "import_ms", "ms"),
+    ("1st call (compilation included)", "first_call_ms", "ms"),
+    ("overhead per call, 1000 elements", "call_ms", "ms"),
+    ("10 M elements, round trip", "big_ms", "ms"),
     ("1 Gio, aller-retour", "huge_s", "s"),
-    ("1 Gio : mémoire en plus", "huge_extra_gib", "Gio"),
-    ("DTW 391 séries OXYGENE (w=5)", "dtw391_ms", "ms"),
+    ("1 GiB: extra memory", "huge_extra_gib", "Gio"),
+    ("DTW 391 OXYGENE series (w=5)", "dtw391_ms", "ms"),
     ("DTW 2000 × 64 (w=5)", "dtw2000_ms", "ms"),
 ]
 
@@ -59,7 +59,7 @@ def fmt(v, unit):
 
 
 def merge(path):
-    """Résultats mesurés tâche par tâche (lignes RESULT d'un fichier), fusionnés."""
+    """Results measured task by task (RESULT lines of a file), merged."""
     res = {}
     for line in open(path, encoding="utf-8"):
         if line.startswith("RESULT "):
@@ -70,7 +70,7 @@ def merge(path):
 
 
 def main():
-    if sys.argv[1] == "--from":  # tableau à partir de mesures faites ailleurs (une tâche par job)
+    if sys.argv[1] == "--from":  # table from measurements made elsewhere (one task per job)
         report(merge(sys.argv[2]), merge(sys.argv[3]), sys.argv[4], sys.argv[5])
         return
     py_v1, pairs = sys.argv[1], sys.argv[2:]
@@ -93,30 +93,30 @@ def report(v1, v2, b1, b2):
         checks = []
         for k in ("lat_ok", "big_ok", "huge_ok"):
             checks.append(f"{k[:-3]} v1 {'✓' if v1.get(k) else '✗'} v2 {'✓' if v2.get(k) else '✗'}")
-        checks.append(f"DTW 391 vs référence : v1 {v1.get('dtw391_err')}, v2 {v2.get('dtw391_err')}")
+        checks.append(f"DTW 391 vs reference: v1 {v1.get('dtw391_err')}, v2 {v2.get('dtw391_err')}")
         if v1.get("dtw2000_sum") and v2.get("dtw2000_sum"):
             rel = abs(v1["dtw2000_sum"] - v2["dtw2000_sum"]) / v2["dtw2000_sum"]
             corner = np.abs(np.array(v1["dtw2000_corner"]) - np.array(v2["dtw2000_corner"])).max()
-            checks.append(f"DTW 2000 v1 = v2 : somme écart relatif {rel:.1e}, coin 4×4 écart {corner:.1e}")
-        print("\nvérifications : " + " ; ".join(checks))
+            checks.append(f"DTW 2000 v1 = v2: sum relative difference {rel:.1e}, 4×4 corner difference {corner:.1e}")
+        print("\nchecks: " + " ; ".join(checks))
         report_1n(v1, v2)
 
 
 def report_1n(v1, v2):
-    """DTW 1 contre N (benchmark DTW du prototype) : temps par N et par variante, et accord des résultats."""
+    """DTW 1 against N (the prototype's DTW benchmark): time per N and per variant, and agreement of the results."""
     a, b = v1.get("dtw1n"), v2.get("dtw1n")
     if not (a or b):
         return
     variants = list((a or {}).keys()) + list((b or {}).keys())
     rows = {**(a or {}), **(b or {})}
     sizes = sorted({int(n) for v in rows.values() for n in v})
-    print("\nDTW 1 contre N (séries de 30 points complétées à 32, sans fenêtre) :\n")
+    print("\nDTW 1 against N (series of 30 points padded to 32, no window):\n")
     print("| N | " + " | ".join(f"v1 {k}" if k != "Rust" else "v2 Rust" for k in variants) + " | gain (meilleur v1 / v2) |")
     print("|---" * (len(variants) + 2) + "|")
     ref_rows = rows.get("Rust", {})
 
     def correct(k, n, c):
-        """Résultat d'accord avec v2 (et la variante manuelle du prototype) ? Sinon, temps non retenu."""
+        """Result in agreement with v2 (and the prototype's manual variant)? Otherwise, the time is not kept."""
         r = ref_rows.get(str(n), ref_rows.get(n))
         return k == "Rust" or r is None or abs(c["sum"] - r["sum"]) <= 1e-6 * abs(r["sum"])
 
@@ -127,7 +127,7 @@ def report_1n(v1, v2):
         v1_best = min((m for k, m, g in zip(variants, ms, ok) if k != "Rust" and m and g), default=None)
         v2_ms = next((m for k, m in zip(variants, ms) if k == "Rust"), None)
         gain = f"× {v1_best / v2_ms:.1f}" if v1_best and v2_ms else ""
-        txt = [fmt(m, "ms") + ("" if g or m is None else " ✗ faux") for m, g in zip(ms, ok)]
+        txt = [fmt(m, "ms") + ("" if g or m is None else " ✗ wrong") for m, g in zip(ms, ok)]
         print(f"| {n:,} | ".replace(",", " ") + " | ".join(txt) + f" | {gain} |")
     ref = rows.get("Rust", {})
     for k in variants:
@@ -139,7 +139,7 @@ def report_1n(v1, v2):
             if c and r:
                 diffs.append(abs(c["sum"] - r["sum"]) / max(abs(r["sum"]), 1e-30))
         if diffs:
-            print(f"accord v1 {k} / v2 : écart relatif des sommes ≤ {max(diffs):.1e}")
+            print(f"agreement v1 {k} / v2: relative difference of the sums ≤ {max(diffs):.1e}")
     errs = {k: v for k, v in {**v1, **v2}.items() if k == "dtw1n_error"}
     if errs:
         print(f"erreur : {errs['dtw1n_error'][:160]}")

@@ -1,19 +1,19 @@
-//! Interpréteur de référence de l'IR (§6.3) : oracle des tests, mode debug, backend « cpu ».
+//! Reference interpreter of the IR (§6.3): test oracle, debug mode, "cpu" backend.
 //!
-//! Exécute le kernel séquentiellement, élément par élément, sur les octets des tableaux (même
-//! représentation que sur le GPU). Lent, mais toujours disponible et sans ambiguïté.
+//! Runs the kernel sequentially, element by element, on the arrays' bytes (same
+//! representation as on the GPU). Slow, but always available and unambiguous.
 
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
 
 use crate::*;
 
-/// Argument d'un kernel : octets d'un tableau (ordre natif) ou valeur scalaire.
+/// Kernel argument: bytes of an array (native order) or scalar value.
 pub enum Arg<'a> {
     Array(&'a [u8]),
     Scalar(Const),
-    /// Tableau `gs.Out` (mode explicite) : écrit par les opérations atomiques. Pointeur brut :
-    /// l'interpréteur est séquentiel, et la mémoire appartient à l'appelant pendant `run`.
+    /// `gs.Out` array (explicit mode): written by atomic operations. Raw pointer:
+    /// the interpreter is sequential, and the memory belongs to the caller during `run`.
     Writable(*mut u8, usize),
 }
 
@@ -24,18 +24,18 @@ enum Flow {
     Return(Vec<Const>),
 }
 
-/// Exécute `kernel` sur une grille de `n` threads ; `outs[k]` reçoit `n` valeurs de la sortie `k`.
+/// Runs `kernel` over a grid of `n` threads; `outs[k]` receives `n` values of output `k`.
 pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> Result<(), String> {
     if args.len() != kernel.params.len() {
         return Err(format!(
-            "{} argument(s) attendu(s), {} reçu(s)",
+            "{} argument(s) expected, {} received",
             kernel.params.len(),
             args.len()
         ));
     }
     if outs.len() != kernel.outputs.len() {
         return Err(format!(
-            "{} sortie(s) attendue(s), {} reçue(s)",
+            "{} output(s) expected, {} received",
             kernel.outputs.len(),
             outs.len()
         ));
@@ -44,7 +44,7 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
         for (p, a) in kernel.params.iter().zip(args) {
             if let (ParamKind::Array, Arg::Array(bytes)) = (p.kind, a) {
                 if bytes.len() < n * p.ty.size() {
-                    return Err(format!("tableau '{}' trop court", p.name));
+                    return Err(format!("array '{}' too short", p.name));
                 }
             }
         }
@@ -56,7 +56,7 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
         },
         _ => 0,
     };
-    // Bloc de lignes (kernels avec index) : première ligne et décalage de la sortie.
+    // Block of rows (indexed kernels): first row and output offset.
     let (row0, obase) = match &kernel.grid {
         Grid::Indexed { row0, obase, .. } => (
             scalar(*row0),
@@ -72,10 +72,10 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
     };
     for (o, t) in outs.iter().zip(&kernel.outputs) {
         if o.len() < (obase + n) * t.size() {
-            return Err("tableau de sortie trop court".into());
+            return Err("output array too short".into());
         }
     }
-    // Taille des axes de la grille (kernels avec index).
+    // Size of the grid axes (indexed kernels).
     let axes: Vec<usize> = match &kernel.grid {
         Grid::Elementwise => vec![],
         Grid::Indexed { axes, .. } => axes
@@ -83,9 +83,9 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
             .map(|p| match args[*p] {
                 Arg::Scalar(c) => match convert(c, Scalar::I32) {
                     Const::I32(v) => Ok(v.max(0) as usize),
-                    _ => Err("dimension invalide".to_string()),
+                    _ => Err("invalid dimension".to_string()),
                 },
-                _ => Err("dimension invalide".to_string()),
+                _ => Err("invalid dimension".to_string()),
             })
             .collect::<Result<_, _>>()?,
     };
@@ -96,7 +96,7 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
     let mut arrays = private_arrays(kernel);
     for i in 0..n {
         for (a, l) in arrays.iter_mut().zip(&kernel.locals) {
-            a.fill(zero(l.ty)); // tableaux locaux remis à zéro pour chaque thread
+            a.fill(zero(l.ty)); // local arrays zero-filled again for each thread
         }
         let mut st = State {
             kernel,
@@ -111,10 +111,10 @@ pub fn run(kernel: &Kernel, n: usize, args: &[Arg], outs: &mut [&mut [u8]]) -> R
         };
         let values = match st.block(&kernel.body)? {
             Flow::Return(v) => v,
-            _ if kernel.outputs.is_empty() => vec![], // mode explicite : pas de return obligatoire
+            _ if kernel.outputs.is_empty() => vec![], // explicit mode: no return required
             _ => {
                 return Err(format!(
-                    "le kernel '{}' s'est terminé sans return",
+                    "kernel '{}' ended without a return",
                     kernel.name
                 ));
             }
@@ -134,14 +134,14 @@ struct State<'a, 'b> {
     coords: Vec<usize>,
     locals: &'b mut Vec<Const>,
     arrays: &'b mut Vec<Vec<Const>>,
-    /// Position dans le groupe et mémoire partagée du groupe (kernels avec `group=`).
+    /// Position in the group and shared memory of the group (kernels with `group=`).
     lane: usize,
     group: Option<&'b Group>,
-    /// `cells=` : sortie (adresse, octets) et première case du thread, pour `gs.store`.
+    /// `cells=`: output (address, bytes) and first cell of the thread, for `gs.store`.
     cell_out: Option<CellOut>,
 }
 
-/// Sortie écrite par `gs.store` : chaque thread n'écrit que ses propres cases.
+/// Output written by `gs.store`: each thread writes only its own cells.
 #[derive(Clone, Copy)]
 struct CellOut {
     ptr: usize,
@@ -151,7 +151,7 @@ struct CellOut {
     cells: usize,
 }
 
-/// Tableaux locaux propres à un thread (les tableaux partagés sont dans `Group`).
+/// Local arrays private to a thread (shared arrays are in `Group`).
 fn private_arrays(kernel: &Kernel) -> Vec<Vec<Const>> {
     kernel
         .locals
@@ -169,7 +169,7 @@ fn private_arrays(kernel: &Kernel) -> Vec<Vec<Const>> {
         .collect()
 }
 
-/// Coordonnées du thread `i` sur la grille (premier axe décalé de `row0`).
+/// Coordinates of thread `i` on the grid (first axis offset by `row0`).
 fn coords_of(i: usize, axes: &[usize], row0: usize) -> Vec<usize> {
     let mut coords = vec![0usize; axes.len()];
     let mut rest = i;
@@ -183,10 +183,10 @@ fn coords_of(i: usize, axes: &[usize], row0: usize) -> Vec<usize> {
     coords
 }
 
-// ───────────────────── groupes : mémoire partagée et barrières ─────────────────────
+// ───────────────────── groups: shared memory and barriers ─────────────────────
 
-/// Accès d'une phase (entre deux barrières) à une case de mémoire partagée : l'écrivain et les deux
-/// premiers lecteurs distincts (de quoi nommer un autre thread en cas de conflit).
+/// Access of a phase (between two barriers) to a shared-memory cell: the writer and the first two
+/// distinct readers (enough to name another thread on a conflict).
 #[derive(Default)]
 struct CellLog {
     writer: Option<usize>,
@@ -194,14 +194,14 @@ struct CellLog {
 }
 
 struct GroupMem {
-    /// Un tableau par locale (vide si elle n'est pas partagée).
+    /// One array per local (empty if it is not shared).
     arrays: Vec<Vec<Const>>,
-    /// Accès de la phase en cours, par (locale, indice).
+    /// Accesses of the current phase, by (local, index).
     log: HashMap<(usize, usize), CellLog>,
 }
 
-/// Barrière des threads d'un groupe, qui peut être interrompue (erreur d'un thread) et qui vérifie
-/// que tous l'atteignent au même endroit.
+/// Barrier of the threads of a group, which can be interrupted (a thread's error) and which checks
+/// that they all reach it at the same place.
 struct Group {
     size: usize,
     index: Mutex<usize>,
@@ -230,8 +230,8 @@ impl Group {
         self.cv.notify_all();
     }
 
-    /// Attend tous les threads du groupe à la barrière `site` (0 : fin du groupe) ; le dernier
-    /// arrivé exécute `last` avant de libérer les autres. `Err` si le groupe a été interrompu.
+    /// Waits for every thread of the group at barrier `site` (0: end of the group); the last
+    /// one to arrive runs `last` before releasing the others. `Err` if the group was interrupted.
     fn wait(&self, site: usize, last: impl FnOnce(&Group)) -> Result<(), ()> {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if st.stopped {
@@ -242,9 +242,9 @@ impl Group {
             Some(s) if s != site => {
                 drop(st);
                 self.fail(format!(
-                    "groupe {} : gs.barrier() atteinte par une partie des threads seulement (un thread du \
-                     groupe est ailleurs dans le kernel) — tous les threads d'un groupe doivent passer par les \
-                     mêmes barrières",
+                    "group {}: gs.barrier() reached by only some of the threads (a thread of the \
+                     group is elsewhere in the kernel) — every thread of a group must go through the \
+                     same barriers",
                     *self.index.lock().unwrap_or_else(|e| e.into_inner())
                 ));
                 return Err(());
@@ -267,8 +267,8 @@ impl Group {
         if st.stopped { Err(()) } else { Ok(()) }
     }
 
-    /// Lecture (ou écriture si `value`) de `local[idx]` par `lane`, avec détection des accès
-    /// concurrents de la phase.
+    /// Read (or write if `value`) of `local[idx]` by `lane`, detecting the phase's concurrent
+    /// accesses.
     fn access(
         &self,
         k: &Kernel,
@@ -282,7 +282,7 @@ impl Group {
         let name = &k.locals[local].name;
         if idx < 0 || idx as usize >= len {
             return Err(format!(
-                "indice {idx} hors limites pour le tableau partagé '{name}' ({len} éléments) — thread {lane} du groupe"
+                "index {idx} out of bounds for the shared array '{name}' ({len} elements) — thread {lane} of the group"
             ));
         }
         let i = idx as usize;
@@ -290,15 +290,15 @@ impl Group {
         let conflict = |writer: usize, other: usize, both_write: bool| {
             if both_write {
                 format!(
-                    "accès concurrent à {name}[{i}] : les threads {} et {} du groupe l'écrivent pendant la \
-                     même phase (résultat imprévisible sur GPU)",
+                    "concurrent access to {name}[{i}]: threads {} and {} of the group both write it during the \
+                     same phase (unpredictable result on a GPU)",
                     writer.min(other),
                     writer.max(other)
                 )
             } else {
                 format!(
-                    "accès concurrent à {name}[{i}] : le thread {writer} du groupe l'écrit et le thread {other} \
-                     le lit pendant la même phase — séparez l'écriture et la lecture par gs.barrier()"
+                    "concurrent access to {name}[{i}]: thread {writer} of the group writes it and thread {other} \
+                     reads it during the same phase — separate the write and the read with gs.barrier()"
                 )
             }
         };
@@ -330,13 +330,13 @@ impl Group {
     }
 }
 
-/// Pointeurs partagés entre les threads de l'interpréteur (chaque thread n'écrit que ses cases).
+/// Pointers shared between the interpreter's threads (each thread writes only its own cells).
 struct Shared<T>(T);
 unsafe impl<T> Sync for Shared<T> {}
 unsafe impl<T> Send for Shared<T> {}
 
-/// Kernel avec `group=` : un thread système par position du groupe ; les groupes s'exécutent l'un
-/// après l'autre, leurs threads ensemble (barrières réelles, mémoire partagée commune).
+/// Kernel with `group=`: one system thread per position in the group; groups run one
+/// after the other, their threads together (real barriers, common shared memory).
 #[allow(clippy::too_many_arguments)]
 fn run_groups(
     kernel: &Kernel,
@@ -351,7 +351,7 @@ fn run_groups(
     let c = kernel.cells.max(1) as usize;
     if g == 0 || !n.is_multiple_of(g * c) {
         return Err(format!(
-            "{n} cases : pas un multiple de la tuile d'un groupe ({g} threads × {c} cases)"
+            "{n} cells: not a multiple of a group's tile ({g} threads × {c} cells)"
         ));
     }
     let n = n / c; // threads
@@ -401,7 +401,7 @@ fn run_groups(
                 let mut locals: Vec<Const> = kernel.locals.iter().map(|l| zero(l.ty)).collect();
                 let mut arrays = private_arrays(kernel);
                 for gi in 0..n / g {
-                    // Première case du thread (cells= : tuile de g·c cases par groupe).
+                    // First cell of the thread (cells=: tile of g·c cells per group).
                     let i = gi * g * c + lane;
                     for (a, l) in arrays.iter_mut().zip(&kernel.locals) {
                         a.fill(zero(l.ty));
@@ -428,7 +428,7 @@ fn run_groups(
                         Ok(_) if kernel.outputs.is_empty() || c > 1 => vec![],
                         Ok(_) => {
                             group.fail(format!(
-                                "le kernel '{}' s'est terminé sans return",
+                                "kernel '{}' ended without a return",
                                 kernel.name
                             ));
                             return;
@@ -444,7 +444,7 @@ fn run_groups(
                     {
                         let j = (i + obase) * t.size();
                         if j + t.size() <= *len {
-                            // Cases distinctes pour chaque thread.
+                            // Distinct cells for each thread.
                             let o = unsafe {
                                 std::slice::from_raw_parts_mut((*p as *mut u8).add(j), t.size())
                             };
@@ -474,7 +474,7 @@ fn index_of(c: Const) -> i64 {
     }
 }
 
-/// Valeur exacte d'un entier (ou d'un booléen), pour les conversions entre entiers.
+/// Exact value of an integer (or a boolean), for conversions between integers.
 fn int_value(c: Const) -> Option<i128> {
     Some(match c {
         Const::Bool(b) => b as i128,
@@ -521,9 +521,9 @@ impl State<'_, '_> {
                 step,
                 body,
             } => {
-                // Comme en Python : un compteur caché mène la boucle ; la variable reçoit sa valeur
-                // à chaque tour (la modifier dans le corps ne change pas l'itération) et garde la
-                // dernière après la boucle (inchangée si aucun tour).
+                // As in Python: a hidden counter drives the loop; the variable gets its value
+                // on each iteration (changing it in the body does not change the iteration) and keeps the
+                // last one after the loop (unchanged if there was no iteration).
                 let (start, stop, step) = (self.eval(start)?, self.eval(stop)?, self.eval(step)?);
                 let mut it = start;
                 loop {
@@ -554,23 +554,23 @@ impl State<'_, '_> {
             }
             Stmt::Barrier => {
                 let Some(g) = self.group else {
-                    return Err("gs.barrier() hors d'un kernel avec group=".into());
+                    return Err("gs.barrier() outside a kernel with group=".into());
                 };
                 let site = s as *const Stmt as usize;
                 g.wait(site, |g| {
                     g.mem.lock().unwrap_or_else(|e| e.into_inner()).log.clear()
                 })
-                .map_err(|_| String::new())?; // interrompu : l'erreur est déjà enregistrée
+                .map_err(|_| String::new())?; // interrupted: the error is already recorded
                 Ok(Flow::Normal)
             }
             Stmt::MatMul { c, a, b, m, n, k } => {
                 let Some(g) = self.group else {
-                    return Err("gs.matmul_u8 hors d'un kernel avec group=".into());
+                    return Err("gs.matmul_u8 outside a kernel with group=".into());
                 };
                 let site = s as *const Stmt as usize;
                 let (c, a, b) = (*c, *a, *b);
                 let (m, n, k) = (*m as usize, *n as usize, *k as usize);
-                // Collectif : le dernier thread arrivé calcule tout le produit, puis tous repartent.
+                // Collective: the last thread to arrive computes the whole product, then all resume.
                 g.wait(site, |g| {
                     let mut mem = g.mem.lock().unwrap_or_else(|e| e.into_inner());
                     let word = |v: Const| match v {
@@ -602,12 +602,12 @@ impl State<'_, '_> {
             }
             Stmt::Store { k, value } => {
                 let Some(co) = self.cell_out else {
-                    return Err("gs.store hors d'un kernel avec cells=".into());
+                    return Err("gs.store outside a kernel with cells=".into());
                 };
                 let kk = index_of(self.eval(k)?);
                 if kk < 0 || kk as usize >= co.cells {
                     return Err(format!(
-                        "gs.store : case {kk} hors de 0…{} (cells={})",
+                        "gs.store: cell {kk} outside 0…{} (cells={})",
                         co.cells - 1,
                         co.cells
                     ));
@@ -616,7 +616,7 @@ impl State<'_, '_> {
                 let v = convert(self.eval(value)?, t);
                 let j = (co.first + kk as usize * co.stride) * t.size();
                 if j + t.size() <= co.len {
-                    // Cases propres à ce thread.
+                    // Cells belonging to this thread.
                     let o = unsafe {
                         std::slice::from_raw_parts_mut((co.ptr as *mut u8).add(j), t.size())
                     };
@@ -633,14 +633,14 @@ impl State<'_, '_> {
             } => {
                 let (idx, v) = (index_of(self.eval(index)?), self.eval(value)?);
                 if self.kernel.locals[*local].shared {
-                    let g = self.group.ok_or("gs.shared hors d'un kernel avec group=")?;
+                    let g = self.group.ok_or("gs.shared outside a kernel with group=")?;
                     g.access(self.kernel, *local, idx, self.lane, Some(v))?;
                     return Ok(Flow::Normal);
                 }
                 let len = self.arrays[*local].len();
                 if idx < 0 || idx as usize >= len {
                     return Err(format!(
-                        "indice {idx} hors limites pour le tableau local '{}' ({len} éléments)",
+                        "index {idx} out of bounds for the local array '{}' ({len} elements)",
                         self.kernel.locals[*local].name
                     ));
                 }
@@ -665,7 +665,7 @@ impl State<'_, '_> {
                         Arg::Writable(p, bytes) if (i + 1) * size <= *bytes => {
                             Ok(unsafe { p.add(i * size) })
                         }
-                        _ => Err("tableau gs.Out invalide".into()),
+                        _ => Err("invalid gs.Out array".into()),
                     }
                 };
                 if ok && idx >= 0 {
@@ -678,7 +678,7 @@ impl State<'_, '_> {
                     };
                     store(new, unsafe { std::slice::from_raw_parts_mut(c, ty.size()) });
                 } else {
-                    // Rien n'est écrit ; l'écriture refusée est signalée (comme sur GPU).
+                    // Nothing is written; the rejected write is reported (as on a GPU).
                     let e0 = cell(&self.args[*err], 0, 4)?;
                     let e1 = cell(&self.args[*err], 1, 4)?;
                     unsafe {
@@ -701,8 +701,8 @@ impl State<'_, '_> {
         }
     }
 
-    /// Indice aplati d'un tableau, calculé en 64 bits (sommes et produits d'indices et de
-    /// dimensions) : jamais de débordement, même au-delà de 2³¹ éléments.
+    /// Flattened index of an array, computed in 64 bits (sums and products of indices and
+    /// dimensions): never overflows, even beyond 2³¹ elements.
     fn eval_index(&mut self, e: &Expr) -> Result<i64, String> {
         Ok(match &e.kind {
             ExprKind::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), a, b) => {
@@ -723,13 +723,13 @@ impl State<'_, '_> {
             ExprKind::Load(p, index) => {
                 let idx = self.eval_index(index)?;
                 let Arg::Array(bytes) = &self.args[*p] else {
-                    return Err("lecture indexée d'un scalaire".into());
+                    return Err("indexed read of a scalar".into());
                 };
                 let ty = self.kernel.params[*p].ty;
                 let len = bytes.len() / ty.size();
                 if idx < 0 || idx as usize >= len {
                     return Err(format!(
-                        "indice {idx} hors limites pour '{}' ({len} éléments) — thread {}",
+                        "index {idx} out of bounds for '{}' ({len} elements) — thread {}",
                         self.kernel.params[*p].name, self.i
                     ));
                 }
@@ -738,7 +738,7 @@ impl State<'_, '_> {
             }
             ExprKind::LocalLoad(l, index) if self.kernel.locals[*l].shared => {
                 let idx = index_of(self.eval(index)?);
-                let g = self.group.ok_or("gs.shared hors d'un kernel avec group=")?;
+                let g = self.group.ok_or("gs.shared outside a kernel with group=")?;
                 g.access(self.kernel, *l, idx, self.lane, None)?
             }
             ExprKind::Lane => Const::I32(self.lane as i32),
@@ -747,7 +747,7 @@ impl State<'_, '_> {
                 let len = self.arrays[*l].len();
                 if idx < 0 || idx as usize >= len {
                     return Err(format!(
-                        "indice {idx} hors limites pour le tableau local '{}' ({len} éléments)",
+                        "index {idx} out of bounds for the local array '{}' ({len} elements)",
                         self.kernel.locals[*l].name
                     ));
                 }
@@ -761,7 +761,7 @@ impl State<'_, '_> {
                     let ty = self.kernel.params[*p].ty;
                     load(ty, &bytes[self.i * ty.size()..(self.i + 1) * ty.size()])
                 }
-                Arg::Writable(..) => return Err("lecture d'un tableau gs.Out".into()),
+                Arg::Writable(..) => return Err("read of a gs.Out array".into()),
             },
             ExprKind::Unary(op, a) => {
                 let a = self.eval(a)?;
@@ -773,12 +773,12 @@ impl State<'_, '_> {
                     (UnOp::Neg, Const::F64(v)) => Const::F64(-v),
                     (UnOp::Neg, Const::I64(v)) => Const::I64(v.wrapping_neg()),
                     (UnOp::Neg, Const::U64(v)) => Const::U64(v.wrapping_neg()),
-                    (UnOp::Neg, Const::Bool(_)) => return Err("négation d'un booléen".into()),
+                    (UnOp::Neg, Const::Bool(_)) => return Err("negation of a boolean".into()),
                     (UnOp::BitNot, Const::I32(v)) => Const::I32(!v),
                     (UnOp::BitNot, Const::U32(v)) => Const::U32(!v),
                     (UnOp::BitNot, Const::I64(v)) => Const::I64(!v),
                     (UnOp::BitNot, Const::U64(v)) => Const::U64(!v),
-                    (UnOp::BitNot, _) => return Err("~ sur une valeur non entière".into()),
+                    (UnOp::BitNot, _) => return Err("~ on a non-integer value".into()),
                 }
             }
             ExprKind::Binary(op, a, b) => {
@@ -840,8 +840,8 @@ fn as_bool(c: Const) -> bool {
     }
 }
 
-/// Conversion de type, comme en C : entier → entier par troncature des bits (exacte, aussi en 64 bits) ;
-/// flottant → entier : troncature vers 0, saturée.
+/// Type conversion, as in C: integer → integer by bit truncation (exact, also in 64 bits);
+/// float → integer: truncation toward 0, saturated.
 pub fn convert(c: Const, to: Scalar) -> Const {
     if c.ty() == to {
         return c;
@@ -950,12 +950,12 @@ fn arith(op: BinOp, a: Const, b: Const) -> Const {
             BinOp::Pow => x.powf(y),
             _ => 0.0,
         }),
-        _ => a, // types incohérents : refusés par le frontend
+        _ => a, // inconsistent types: rejected by the frontend
     }
 }
 
-/// Opérations entières communes aux types signés et non signés, sur les bits (largeur `w`), le
-/// résultat étant tronqué par l'appelant : +, −, ×, &, |, ^, << (et >> logique).
+/// Integer operations shared by signed and unsigned types, on the bits (width `w`), the
+/// result being truncated by the caller: +, −, ×, &, |, ^, << (and logical >>).
 fn int_op(op: BinOp, x: u64, y: u64, w: u32) -> u64 {
     match op {
         BinOp::Add => x.wrapping_add(y),
@@ -974,7 +974,7 @@ fn mask(w: u32) -> u64 {
     if w == 64 { u64::MAX } else { (1u64 << w) - 1 }
 }
 
-/// `>>` arithmétique : au-delà de la largeur, 0 ou −1 selon le signe (comme en Python).
+/// Arithmetic `>>`: beyond the width, 0 or −1 depending on the sign (as in Python).
 fn shr_signed(x: i64, y: u64, w: u32) -> i64 {
     if y < w as u64 {
         x >> y
@@ -985,7 +985,7 @@ fn shr_signed(x: i64, y: u64, w: u32) -> i64 {
     }
 }
 
-/// Partie haute du produit complet (`gs.mulhi`).
+/// High half of the full product (`gs.mulhi`).
 fn mulhi(a: Const, b: Const) -> Const {
     match (a, b) {
         (Const::I32(x), Const::I32(y)) => Const::I32(((x as i64 * y as i64) >> 32) as i32),
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn range_like_python() {
-        // range(5, 0, -2) → 5, 3, 1 ; pas nul → aucune itération (au lieu d'une boucle infinie).
+        // range(5, 0, -2) → 5, 3, 1; zero step → no iteration (instead of an infinite loop).
         for (start, stop, step, expected) in
             [(5, 0, -2, 3), (0, 5, 1, 5), (0, 5, 0, 0), (3, 3, 1, 0)]
         {

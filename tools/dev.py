@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Tâches de développement, identiques sur macOS, Linux et Windows.
+"""Development tasks, identical on macOS, Linux and Windows.
 
-    python tools/dev.py setup     # crée .venv, installe maturin et pytest, puis `pip install -e .` et `-e gfx`
-    python tools/dev.py build     # recompile l'extension Rust dans .venv, réinstalle le moteur gfx
-    python tools/dev.py test      # build + cargo test + pytest (bibliothèque et moteur)
-    python tools/dev.py info      # python -m gpusync (diagnostic des périphériques)
-    python tools/dev.py run SCRIPT [ARGS…]   # lance un script avec le Python de .venv
+    python tools/dev.py setup     # creates .venv, installs maturin and pytest, then `pip install -e .` and `-e gfx`
+    python tools/dev.py build     # rebuilds the Rust extension in .venv, reinstalls the gfx engine
+    python tools/dev.py test      # build + cargo test + pytest (library and engine)
+    python tools/dev.py info      # python -m gpusync (device diagnostic)
+    python tools/dev.py run SCRIPT [ARGS…]   # runs a script with the Python of .venv
 
-Avec gs-remote, sur toutes les machines de test :
+With gs-remote, on every test machine:
 
     python3 tools/remote/gs_remote.py run all -- @python tools/dev.py test
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VENV = ROOT / ".venv"
 PY = VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-DEV_DEPS = ["maturin>=1.16,<2", "flit_core>=3.10,<4", "pytest>=8", "numpy>=1.22", "nbclient>=0.10", "ipykernel>=6"]  # Jupyter : test M4
+DEV_DEPS = ["maturin>=1.16,<2", "flit_core>=3.10,<4", "pytest>=8", "numpy>=1.22", "nbclient>=0.10", "ipykernel>=6"]  # Jupyter: M4 test
 
 
 def step(title: str) -> None:
@@ -32,7 +32,7 @@ def step(title: str) -> None:
 
 
 def venv_env() -> dict:
-    """Environnement équivalent à un venv activé (maturin cherche son binaire dans le PATH)."""
+    """Environment equivalent to an activated venv (maturin looks for its binary on the PATH)."""
     env = os.environ.copy()
     env["VIRTUAL_ENV"] = str(VENV)
     env["PATH"] = str(PY.parent) + os.pathsep + env.get("PATH", "")
@@ -44,16 +44,16 @@ def run(cmd: list[str], **kw) -> None:
     t = time.perf_counter()
     r = subprocess.run(cmd, cwd=ROOT, env=venv_env(), **kw)
     if r.returncode != 0:
-        print(f"ÉCHEC ({r.returncode}) : {' '.join(map(str, cmd))}", flush=True)
+        print(f"FAILED ({r.returncode}): {' '.join(map(str, cmd))}", flush=True)
         sys.exit(r.returncode)
     print(f"   ({time.perf_counter() - t:.1f} s)", flush=True)
 
 
 def setup() -> None:
     if not PY.exists():
-        step(f"création de {VENV.name} (Python {sys.version.split()[0]})")
+        step(f"creating {VENV.name} (Python {sys.version.split()[0]})")
         venv.create(VENV, with_pip=True)
-    step("dépendances de développement")
+    step("development dependencies")
     run([str(PY), "-m", "pip", "install", "-q", "--upgrade", "pip", *DEV_DEPS])
     build()
 
@@ -61,9 +61,9 @@ def setup() -> None:
 def build() -> None:
     if not PY.exists():
         return setup()
-    step("compilation de l'extension Rust (pip install -e .)")
+    step("building the Rust extension (pip install -e .)")
     run([str(PY), "-m", "pip", "install", "-q", "--no-build-isolation", "-e", "."])
-    step("moteur graphique gpusync-gfx (pip install -e gfx)")
+    step("gpusync-gfx graphics engine (pip install -e gfx)")
     run([str(PY), "-m", "pip", "install", "-q", "--no-build-isolation", "--no-deps", "-e", "gfx"])
 
 

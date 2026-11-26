@@ -1,7 +1,7 @@
-"""Couche UI 100 % GPU (`UILayer`, `Panel`, `Label`, `Button`, `ProgressBar`, `FPSOverlay`).
+"""100 % GPU UI layer (`UILayer`, `Panel`, `Label`, `Button`, `ProgressBar`, `FPSOverlay`).
 
-Tous les widgets sont empaquetés dans deux petits buffers GPU (`boxes` i32 et `glyphs` u32) mis en
-cache en VRAM tant que rien ne change, puis rendus en 1 seul dispatch `ui_composite`.
+Every widget is packed into two small GPU buffers (`boxes` i32 and `glyphs` u32), cached
+in VRAM as long as nothing changes, then rendered in a single `ui_composite` dispatch.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import numpy as np
 
 from .kernels.k3d import upload_i32, upload_u32
 
-# Police bitmap 5×6 (6 lignes × 5 bits → 30 bits empaquetés dans un u32)
+# 5×6 bitmap font (6 rows × 5 bits → 30 bits packed into a u32)
 _FONT_ROWS: dict[str, tuple[str, ...]] = {
     " ": (".....", ".....", ".....", ".....", ".....", "....."),
     "0": (".###.", "#..##", "#.#.#", "##..#", "#...#", ".###."),
@@ -107,7 +107,7 @@ def _normalize_text(text: str) -> str:
 
 
 def pack_rgba_i32(color: tuple[int, int, int] | tuple[int, int, int, int] | None) -> int:
-    """Empaquette `(r, g, b[, a])` dans le motif binaire d'un `int32` pour `ui_composite`."""
+    """Packs `(r, g, b[, a])` into the bit pattern of an `int32` for `ui_composite`."""
     if color is None:
         return 0
     r = max(0, min(255, int(color[0])))
@@ -155,7 +155,7 @@ class Widget:
 
 @dataclass
 class Panel(Widget):
-    """Panneau rectangulaire translucide avec bordure optionnelle."""
+    """Translucent rectangular panel with an optional border."""
 
     bg: tuple[int, int, int, int] = (12, 16, 26, 190)
     border: tuple[int, int, int, int] | None = (55, 135, 185, 255)
@@ -167,7 +167,7 @@ class Panel(Widget):
 
 @dataclass
 class Label(Widget):
-    """Texte bitmap GPU (avec fond/bordure optionnels)."""
+    """GPU bitmap text (with optional background / border)."""
 
     text: str = ""
     color: tuple[int, int, int, int] = (238, 246, 255, 255)
@@ -202,7 +202,7 @@ class Label(Widget):
 
 @dataclass
 class Button(Widget):
-    """Bouton interactif GPU avec états survol/clic et callback `on_click()`."""
+    """Interactive GPU button with hover / click states and an `on_click()` callback."""
 
     text: str = "BUTTON"
     on_click: Callable[[], Any] | None = None
@@ -244,7 +244,7 @@ class Button(Widget):
 
 @dataclass
 class ProgressBar(Widget):
-    """Barre de progression / vie 100 % GPU (2 boîtes : fond + remplissage)."""
+    """Progress / health bar, 100 % GPU (2 boxes: background + fill)."""
 
     value: float = 0.5  # [0.0, 1.0]
     bg: tuple[int, int, int, int] = (14, 18, 28, 200)
@@ -274,7 +274,7 @@ class ProgressBar(Widget):
 
 
 class FPSOverlay(Widget):
-    """Panneau HUD prêt à l'emploi affichant FPS GPU, FPS écran et infos scène."""
+    """Ready-made HUD panel showing GPU FPS, screen FPS and scene info."""
 
     def __init__(self, x: int = 10, y: int = 10, scale: int = 2, anchor: str = "top_left") -> None:
         super().__init__(x=x, y=y, w=0, h=0, anchor=anchor, visible=True)
@@ -331,7 +331,7 @@ class FPSOverlay(Widget):
 
 
 class UILayer:
-    """Gestionnaire de widgets écran : interception des clics souris + compilation GPU mise en cache."""
+    """Screen widget manager: intercepts mouse clicks + cached GPU compilation."""
 
     def __init__(self) -> None:
         self.widgets: list[Widget] = []
@@ -363,7 +363,7 @@ class UILayer:
         return self.visible and any(w.visible for w in self.widgets)
 
     def handle_event(self, event: dict[str, Any], fb_w: int, fb_h: int) -> bool:
-        """Traite les événements souris sur les boutons UI. Renvoie `True` si l'UI consomme l'événement."""
+        """Handles mouse events on the UI buttons. Returns `True` if the UI consumes the event."""
         if not self.visible:
             return False
         t = event.get("type")
@@ -379,7 +379,7 @@ class UILayer:
             return False
         if t == "mouse_down" and event.get("button") == "left":
             mx, my = float(event.get("x", -1)), float(event.get("y", -1))
-            # Tester du dernier widget dessiné (au-dessus) vers le premier
+            # Test from the last widget drawn (on top) down to the first
             for w in reversed(self.widgets):
                 if isinstance(w, Button) and w.visible:
                     x0, y0, x1, y1 = w.rect(fb_w, fb_h)
@@ -405,7 +405,7 @@ class UILayer:
         return False
 
     def compile(self, fb_w: int, fb_h: int, device: str | None) -> tuple[Any, Any, int] | None:
-        """Construit et met en cache les buffers GPU `(boxes_gpu, glyphs_gpu, n_boxes)`."""
+        """Builds and caches the GPU buffers `(boxes_gpu, glyphs_gpu, n_boxes)`."""
         if not self.has_visible():
             return None
 

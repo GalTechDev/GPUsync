@@ -1,8 +1,8 @@
-//! Liaisons minimales, chargées dynamiquement, vers le driver CUDA (`nvcuda.dll`, `libcuda.so.1`) et
-//! NVRTC. Aucune bibliothèque CUDA n'est nécessaire à la compilation ; absentes à l'exécution, le
-//! backend est simplement indisponible, avec la raison (jamais de panique).
+//! Minimal bindings, loaded dynamically, to the CUDA driver (`nvcuda.dll`, `libcuda.so.1`) and
+//! NVRTC. No CUDA library is needed at build time; when they are missing at run time, the
+//! backend is simply unavailable, with the reason (never a panic).
 
-#![allow(non_snake_case)] // noms des fonctions de l'API C
+#![allow(non_snake_case)] // names of the C API functions
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::path::{Path, PathBuf};
@@ -96,7 +96,7 @@ api!(Nvrtc {
     nvrtcGetSupportedArchs: fn(*mut c_int) -> c_int,
 });
 
-// Les pointeurs de fonction et la bibliothèque sont utilisables depuis tous les threads.
+// The function pointers and the library can be used from every thread.
 unsafe impl Send for Driver {}
 unsafe impl Sync for Driver {}
 unsafe impl Send for Nvrtc {}
@@ -119,14 +119,14 @@ impl Driver {
     }
 }
 
-/// Driver CUDA, chargé et initialisé une fois.
+/// CUDA driver, loaded and initialized once.
 pub fn driver() -> Result<&'static Driver, BackendError> {
     static D: OnceLock<Result<Driver, String>> = OnceLock::new();
     D.get_or_init(|| {
         let names: &[&str] = if cfg!(windows) {
             &["nvcuda.dll"]
         } else if cfg!(target_os = "macos") {
-            return Err("pas de driver CUDA sous macOS (aucun GPU NVIDIA)".into());
+            return Err("no CUDA driver on macOS (no NVIDIA GPU)".into());
         } else {
             &["libcuda.so.1", "libcuda.so"]
         };
@@ -146,9 +146,9 @@ pub fn driver() -> Result<&'static Driver, BackendError> {
     .map_err(|e| BackendError(e.clone()))
 }
 
-/// Dossiers où chercher NVRTC : `GPUSYNC_NVRTC` (fichier), puis `GPUSYNC_NVRTC_DIRS` (renseigné par
-/// le package Python : roues pip `nvidia-cuda-nvrtc-cu12` / `-cu13`), puis le toolkit CUDA
-/// (`CUDA_PATH`, `CUDA_PATH_V*`, /usr/local/cuda) et le PATH.
+/// Folders where NVRTC is looked for: `GPUSYNC_NVRTC` (file), then `GPUSYNC_NVRTC_DIRS` (filled in by
+/// the Python package: pip wheels `nvidia-cuda-nvrtc-cu12` / `-cu13`), then the CUDA toolkit
+/// (`CUDA_PATH`, `CUDA_PATH_V*`, /usr/local/cuda) and the PATH.
 fn nvrtc_candidates() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(v) = std::env::var("GPUSYNC_NVRTC_DIRS") {
@@ -192,21 +192,21 @@ fn nvrtc_candidates() -> Vec<PathBuf> {
             })
             .collect();
         found.sort();
-        out.extend(found.into_iter().rev()); // version la plus récente d'abord
+        out.extend(found.into_iter().rev()); // most recent version first
     }
     out
 }
 
-/// Message quand NVRTC manque (driver présent).
-pub const NVRTC_MISSING: &str = "NVRTC introuvable : le driver NVIDIA est présent, mais il manque la bibliothèque \
-     qui compile les kernels CUDA. Installez-la avec `pip install nvidia-cuda-nvrtc-cu12` (ou le toolkit CUDA)";
+/// Message when NVRTC is missing (driver present).
+pub const NVRTC_MISSING: &str = "NVRTC not found: the NVIDIA driver is present, but the library that compiles CUDA kernels \
+     is missing. Install it with `pip install nvidia-cuda-nvrtc-cu12` (or the CUDA toolkit)";
 
-/// NVRTC est-il présent (recherche des fichiers seulement, sans le charger) ?
+/// Is NVRTC present (only looks for the files, without loading it)?
 pub fn nvrtc_present() -> bool {
     !nvrtc_candidates().is_empty()
 }
 
-/// NVRTC (compilateur CUDA C → PTX, une bibliothèque) chargé une fois.
+/// NVRTC (CUDA C → PTX compiler, a library) loaded once.
 pub fn nvrtc() -> Result<&'static Nvrtc, BackendError> {
     static N: OnceLock<Result<Nvrtc, String>> = OnceLock::new();
     N.get_or_init(|| {
@@ -224,7 +224,7 @@ pub fn nvrtc() -> Result<&'static Nvrtc, BackendError> {
             if tried.is_empty() {
                 String::new()
             } else {
-                format!(" ; essayé : {}", tried.join(", "))
+                format!("; tried: {}", tried.join(", "))
             }
         ))
     })
@@ -232,8 +232,8 @@ pub fn nvrtc() -> Result<&'static Nvrtc, BackendError> {
     .map_err(|e| BackendError(e.clone()))
 }
 
-/// Charge une bibliothèque en laissant ses dépendances (ex. `nvrtc-builtins`) se trouver dans son
-/// propre dossier.
+/// Loads a library so that its dependencies (e.g. `nvrtc-builtins`) can be found in its
+/// own folder.
 unsafe fn open_beside(path: &Path) -> Option<Library> {
     #[cfg(windows)]
     {
@@ -242,7 +242,7 @@ unsafe fn open_beside(path: &Path) -> Option<Library> {
         };
         let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
         let lib = unsafe { WinLib::load_with_flags(path, flags) }.ok()?;
-        // NVRTC charge nvrtc-builtins à la demande, par son nom : son dossier doit être cherché.
+        // NVRTC loads nvrtc-builtins on demand, by name: its folder must be searched.
         if let Some(dir) = path.parent() {
             let p = std::env::var_os("PATH").unwrap_or_default();
             if !std::env::split_paths(&p).any(|x| x == dir) {
@@ -279,7 +279,7 @@ impl Nvrtc {
         (a, b)
     }
 
-    /// Architectures virtuelles acceptées par ce NVRTC (ex. 89 pour compute_89).
+    /// Virtual architectures accepted by this NVRTC (e.g. 89 for compute_89).
     pub fn archs(&self) -> Vec<i32> {
         let mut n = 0;
         unsafe {

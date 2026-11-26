@@ -1,5 +1,5 @@
-"""Plusieurs cases de sortie par thread (`@gs.kernel(group=g, cells=c)`, `gs.store`) : chaque groupe
-possède une tuile de g·c cases ; comparé à NumPy sur chaque périphérique."""
+"""Several output cells per thread (`@gs.kernel(group=g, cells=c)`, `gs.store`): each group
+owns a tile of g·c cells; compared with NumPy on every device."""
 
 import importlib.util
 
@@ -16,7 +16,7 @@ RNG = np.random.default_rng(12)
 
 @gs.kernel(group=64, cells=4)
 def reverse_tile(x: gs.f32["b", "n"]) -> gs.f32["b", "n"]:
-    """Chaque tuile de 256 cases est renversée, en mémoire partagée (4 cases par thread)."""
+    """Each tile of 256 cells is reversed, in shared memory (4 cells per thread)."""
     i, j = gs.index()
     r = gs.lane()
     t = gs.shared(gs.f32, 256)
@@ -29,7 +29,7 @@ def reverse_tile(x: gs.f32["b", "n"]) -> gs.f32["b", "n"]:
 
 @gs.kernel(group=32, cells=8)
 def positions(x: gs.i32["n"]) -> gs.i32["n"]:
-    """Chaque case reçoit son propre indice, calculé depuis gs.index() et k."""
+    """Each cell receives its own index, computed from gs.index() and k."""
     j = gs.index()
     for k in range(8):
         gs.store(k, j + 32 * k)
@@ -57,7 +57,7 @@ def test_many_tiles_chained(dev):
 
 
 def test_tile_size_check():
-    with pytest.raises(gs.ShapeMismatch, match="tuiles complètes de 256"):
+    with pytest.raises(gs.ShapeMismatch, match="whole tiles of 256"):
         reverse_tile(np.zeros((2, 100), np.float32), device="cpu")
 
 
@@ -70,7 +70,7 @@ def test_errors(tmp_path):
 
     with pytest.raises(gs.KernelSyntaxError, match="group="):
         load('@gs.kernel(cells=4)\ndef k(x: gs.f32["n"]) -> gs.f32["n"]:\n    i = gs.index()\n    gs.store(0, x[i])\n', "c1")
-    with pytest.raises(gs.KernelSyntaxError, match="return sans valeur"):
+    with pytest.raises(gs.KernelSyntaxError, match="return without a value"):
         load('@gs.kernel(group=32, cells=4)\ndef k(x: gs.f32["n"]) -> gs.f32["n"]:\n    i = gs.index()\n    return x[i]\n', "c2")
     with pytest.raises(gs.KernelSyntaxError, match="cells="):
         load('@gs.kernel(group=32)\ndef k(x: gs.f32["n"]) -> gs.f32["n"]:\n    i = gs.index()\n    gs.store(0, x[i])\n    return x[i]\n', "c3")

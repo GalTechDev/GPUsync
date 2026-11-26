@@ -1,10 +1,10 @@
-"""Atmosphère de grande échelle : équations primitives hydrostatiques, coordonnée sigma, pression au sol pronostique.
+"""Large-scale atmosphere: hydrostatic primitive equations, sigma coordinate, prognostic surface pressure.
 
-Grille C : `u` sur les faces ouest, `v` sur les faces sud de la cellule `(k, j, i)`, le reste au centre. `k = 0` est
-la couche du sommet. x est périodique, y est bordé de deux parois glissantes. `pi = p_sol - p_sommet` vaut
-`pi0 + pip` : la valeur de référence `pi0` (relief) reste fixe, l'écart `pip` garde la précision du simple.
+C grid: `u` on the west faces, `v` on the south faces of cell `(k, j, i)`, the rest at the centre. `k = 0` is
+the top layer. x is periodic, y is bounded by two free-slip walls. `pi = p_surface - p_top` equals
+`pi0 + pip`: the reference value `pi0` (terrain) stays fixed, the deviation `pip` keeps single-precision accuracy.
 
-Les colonnes sont rangées `(j, bloc, c, rang)` avec `i = bloc · groupe + rang` (un thread par colonne)."""
+Columns are stored `(j, block, c, rank)` with `i = block · group + rank` (one thread per column)."""
 
 import gpusync as gs
 
@@ -13,10 +13,10 @@ RD = 287.04
 LV = 2.501e6
 GRAVITY = 9.81
 KAPPA = RD / CP
-T_REF = 288.0  # atmosphère de référence du gradient de pression : T = T_REF (p / 1000 hPa)^BETA
+T_REF = 288.0  # reference atmosphere of the pressure gradient: T = T_REF (p / 1000 hPa)^BETA
 BETA = 0.1902
 P_TOP = 5000.0
-GROUP = 16  # threads par groupe : la largeur du domaine en est un multiple
+GROUP = 16  # threads per group: the domain width is a multiple of it
 LEVELS_MAX = 64
 
 
@@ -36,7 +36,7 @@ def _dyn_columns(
     inv_dy: gs.f32,
     tpl: gs.f32["ny", "nb", "cc", "g"],
 ) -> gs.f32["ny", "nb", "cc", "g"]:
-    """Par colonne : écart de géopotentiel, vitesse verticale `pi · dσ/dt` au bas de chaque couche, tendance de `pi`."""
+    """Per column: geopotential deviation, vertical velocity `pi · dσ/dt` at the bottom of each layer, tendency of `pi`."""
     j, b, c0, r = gs.index()
     i = b * 16 + r
     nz = u.shape[0]
@@ -63,7 +63,7 @@ def _dyn_columns(
         acc += div[k] * lev[k, 2]
         gs.store(nz + k, lev[k + 1, 0] * total - acc if k < nz - 1 else 0.0)
     gs.store(2 * nz, -total)
-    # Hydrostatique en écart à l'atmosphère de référence : série de ((1 + x)^β - 1), x = écart relatif de p au sol
+    # Hydrostatics as a deviation from the reference atmosphere: series of ((1 + x)^β - 1), x = relative deviation of p at the ground
     p_s0 = pi0[j, i] + 5000.0
     x = pip[j, i] / p_s0
     grow = 0.1902 * x * (1.0 - 0.4049 * x * (1.0 - 0.6032667 * x * (1.0 - 0.70245 * x)))
@@ -103,14 +103,14 @@ def wx_momentum(
     dt: gs.f32,
     damp: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Vent à l'étage suivant (forme flux, amont d'ordre 5 à l'horizontale et 3 à la verticale) : `comp` 0 pour u, 1 pour v."""
+    """Wind at the next stage (flux form, order-5 upwind horizontally and order-3 vertically): `comp` 0 for u, 1 for v."""
     k, j, i = gs.index()
     nz = u.shape[0]
     ny = u.shape[1]
     nx = u.shape[2]
     if comp == 1 and j == 0:
         return 0.0
-    # L'autre cellule de la face
+    # The other cell of the face
     jo = j
     io = i
     if comp == 0:
@@ -126,7 +126,7 @@ def wx_momentum(
     total = 0.0
     for ax in range(2):
         for side in range(2):
-            # Flux de masse à travers la face de la cellule décalée : moyenne des deux cellules
+            # Mass flux through the face of the staggered cell: mean of the two cells
             fi = i
             fj = j
             flow = 0.0
@@ -169,7 +169,7 @@ def wx_momentum(
             else:
                 total -= f
     for side in range(2):
-        kk = k - 1 + side  # bas de la couche kk
+        kk = k - 1 + side  # bottom of layer kk
         if kk >= 0 and kk < nz - 1:
             om = 0.5 * (col[j, i // 16, nz + kk, i % 16] + col[jo, io // 16, nz + kk, io % 16])
             for m in range(4):
@@ -182,7 +182,7 @@ def wx_momentum(
                 total += f
             else:
                 total -= f
-    # Gradient de pression, en écart à l'atmosphère de référence
+    # Pressure gradient, as a deviation from the reference atmosphere
     inv_d = inv_dx if comp == 0 else inv_dy
     sg = lev[k, 1]
     p_a = 5000.0 + sg * pa
@@ -193,7 +193,7 @@ def wx_momentum(
     grad = col[j, i // 16, k, i % 16] - col[jo, io // 16, k, io % 16]
     grad += 0.5 * 287.04 * (ta / p_a + tb / p_b) * sg * dpi
     acc = -grad * inv_d
-    # Coriolis (moyenne des quatre vents voisins) et amortissement de la divergence
+    # Coriolis (mean of the four neighbouring winds) and divergence damping
     if comp == 0:
         jn = j + 1
         vn = 0.0
@@ -208,7 +208,7 @@ def wx_momentum(
         da += v[k, j + 1, i] * inv_dy
     db = (u[k, jo, (io + 1) % nx] - u[k, jo, io]) * inv_dx + (v[k, jo + 1, io] * inv_dy if jo < ny - 1 else 0.0) - v[k, jo, io] * inv_dy
     acc += damp * (da - db) * inv_d
-    # Couche éponge au sommet : diffusion horizontale
+    # Sponge layer at the top: horizontal diffusion
     sponge = lev[k, 3]
     if sponge > 0.0:
         if comp == 0:
@@ -236,8 +236,8 @@ def wx_scalar(
     dt: gs.f32,
     limit: gs.i32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Scalaire à l'étage suivant (forme flux). Horizontal : amont d'ordre 5, borné (MP) si `limit`. Vertical : amont
-    d'ordre 3, ou van Leer si `limit`."""
+    """Scalar at the next stage (flux form). Horizontal: order-5 upwind, bounded (MP) if `limit`. Vertical: order-3
+    upwind, or van Leer if `limit`."""
     k, j, i = gs.index()
     nz = phi.shape[0]
     ny = phi.shape[1]
@@ -248,7 +248,7 @@ def wx_scalar(
         for side in range(2):
             fi = i
             fj = j
-            fk = k + side  # haut de la couche fk
+            fk = k + side  # top of layer fk
             flow = 0.0
             scale = inv_dx
             if ax == 0:
@@ -283,7 +283,7 @@ def wx_scalar(
                     if limit == 0:
                         f = (2.0 * p1 - m1) * 0.16666667
                     elif m1 * p1 < 0.0:
-                        f = -m1 * p1 / (p1 - m1)  # van Leer : moyenne harmonique des pentes / 2
+                        f = -m1 * p1 / (p1 - m1)  # van Leer: harmonic mean of the slopes / 2
                 else:
                     m2 = q[0] - up
                     p2 = q[4] - up
@@ -332,7 +332,7 @@ def wx_pressure(
 
 @gs.kernel
 def wx_unpack(col: gs.f32["ny", "nb", "cc", "g"], tpl: gs.f32["nz", "ny", "nx"], field: gs.i32) -> gs.f32["nz", "ny", "nx"]:
-    """Champ numéro `field` d'un paquet de colonnes."""
+    """Field number `field` of a packet of columns."""
     k, j, i = gs.index()
     return col[j, i // 16, field * tpl.shape[0] + k, i % 16]
 
@@ -347,7 +347,7 @@ _CACHE: dict = {}
 
 
 def column_kernel(func, cells: int):
-    """Noyau `func` à un thread par colonne et `cells` valeurs par colonne (compilé une fois par taille)."""
+    """Kernel `func` with one thread per column and `cells` values per column (compiled once per size)."""
     key = (func.__name__, cells)
     if key not in _CACHE:
         _CACHE[key] = gs.kernel(func, group=GROUP, cells=cells)

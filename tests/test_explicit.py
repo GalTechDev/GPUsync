@@ -1,7 +1,7 @@
-"""Jalon M5 : mode explicite (grid=, gs.Out, opérations atomiques), sur chaque périphérique.
+"""Milestone M5: explicit mode (grid=, gs.Out, atomic operations), on every device.
 
-Cas réels (décision D7) : histogramme, histogramme 2D, somme pondérée par case (scatter-add en
-f32, atomiques émulés par comparaison-échange), minimum et maximum par case, comptage de paires.
+Real cases (decision D7): histogram, 2-D histogram, weighted sum per cell (scatter-add in
+f32, atomics emulated by compare-and-swap), minimum and maximum per cell, pair counting.
 """
 
 import math
@@ -19,8 +19,8 @@ RNG = np.random.default_rng(55)
 BINS = 16
 
 CONFIGS = {
-    "défaut": None,
-    "blocs": dict(chunk_bytes=4000, budget_bytes=200_000, direct_chunk_bytes=12_000),
+    "default": None,
+    "chunks": dict(chunk_bytes=4000, budget_bytes=200_000, direct_chunk_bytes=12_000),
 }
 
 
@@ -41,7 +41,7 @@ def histogram(data: gs.f32["n"], counts: gs.Out[gs.i32[BINS]]):
 
 @gs.kernel(grid=("n",))
 def histogram2d(xy: gs.f32["n", 2], h: gs.Out[gs.u32[8, 8]]):
-    i = gs.index()  # grille : la dimension « n » de `xy` (un thread par point)
+    i = gs.index()  # grid: dimension "n" of `xy` (one thread per point)
     a = gs.min(int(xy[i, 0] * 8.0), 7)
     b = gs.min(int(xy[i, 1] * 8.0), 7)
     gs.atomic_add(h, (a, b), 1)
@@ -107,7 +107,7 @@ def test_per_cell_floats(dev, limits):
     np.maximum.at(ref_hi, idx, w)
     ref_top = np.full(m, -1, np.int32)
     np.maximum.at(ref_top, idx, np.arange(n, dtype=np.int32))
-    check(lo, ref_lo)  # min et max sont exacts (pas d'arrondi d'ordre)
+    check(lo, ref_lo)  # min and max are exact (no ordering rounding)
     check(hi, ref_hi)
     check(top, ref_top)
 
@@ -135,11 +135,11 @@ def test_accumulate_with_out(dev):
 @pytest.mark.parametrize("dev", DEVICES)
 def test_index_out_of_bounds(dev):
     data = RNG.random(5000, dtype=np.float32)
-    data[[10, 20, 30]] = [1.0, 1.5, -0.5]  # cases 16, 24 et -8 : hors de [0, 16)
+    data[[10, 20, 30]] = [1.0, 1.5, -0.5]  # cells 16, 24 and -8: outside [0, 16)
     c = unbounded(data, device=dev)
-    with pytest.raises(gs.OutOfBounds, match=r"gs.atomic_\*\(counts.*hors limites.*forme \(16,\)"):
+    with pytest.raises(gs.OutOfBounds, match=r"gs.atomic_\*\(counts.*out-of-bounds.*shape \(16,\)"):
         np.asarray(c)
-    assert int(c._host.sum()) == 5000 - 3  # les écritures valides ont été faites
+    assert int(c._host.sum()) == 5000 - 3  # the valid writes were done
 
 
 @pytest.mark.parametrize("dev", DEVICES)
@@ -176,15 +176,15 @@ def compile_error(src, tmp_path):
 
 ERRORS = [
     ("@gs.kernel\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    pass\n", ["gs.Out", "grid="]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n']) -> gs.f32['n']:\n    i = gs.index()\n    return x[i]\n", ["retirez le type de retour"]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n']):\n    pass\n", ["au moins une sortie"]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    c[0] = 1\n", ["sortie gs.Out", "gs.atomic_add(c"]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    gs.atomic_add(c, 0, c[1])\n", ["écriture seule"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n']) -> gs.f32['n']:\n    i = gs.index()\n    return x[i]\n", ["remove the return type"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n']):\n    pass\n", ["at least one output"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    c[0] = 1\n", ["gs.Out output", "gs.atomic_add(c"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    gs.atomic_add(c, 0, c[1])\n", ["write-only"]),
     ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.f64[4]]):\n    i = gs.index()\n    gs.atomic_add(c, 0, 1.0)\n", ["f64"]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4, 4]]):\n    i = gs.index()\n    gs.atomic_add(c, i, 1)\n", ["2 dimension(s), 1 indice(s)"]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    gs.atomic_add(x, 0, 1.0)\n", ["sortie gs.Out du kernel"]),
-    ("@gs.kernel(grid='y')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    gs.atomic_add(c, 0, 1)\n", ["grid=\"y\"", "pas un tableau"]),
-    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    return 1\n", ["return sans valeur"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4, 4]]):\n    i = gs.index()\n    gs.atomic_add(c, i, 1)\n", ["2 dimension(s), 1 index(es)"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    gs.atomic_add(x, 0, 1.0)\n", ["gs.Out output of the kernel"]),
+    ("@gs.kernel(grid='y')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    gs.atomic_add(c, 0, 1)\n", ["grid=\"y\"", "not an input array"]),
+    ("@gs.kernel(grid='x')\ndef k(x: gs.f32['n'], c: gs.Out[gs.i32[4]]):\n    i = gs.index()\n    return 1\n", ["return without a value"]),
     ("@gs.kernel\ndef k(x: gs.f32['n']) -> gs.f32['n']:\n    i = gs.index()\n    gs.atomic_add(x, 0, 1.0)\n    return x[i]\n", ["grid="]),
 ]
 
@@ -202,13 +202,13 @@ def test_unknown_output_dimension():
         i = gs.index()
         gs.atomic_add(c, 0, 1)
 
-    with pytest.raises(gs.ShapeMismatch, match="'m'.*'c' inconnue"):
+    with pytest.raises(gs.ShapeMismatch, match="'m'.*'c' unknown"):
         k(np.zeros(4, np.float32))
 
 
 @gs.kernel(grid="x")
 def flag_multiples(x: gs.i32["n"], flags: gs.Out[gs.i32["w"], 1]):
-    """La largeur `w` de la sortie n'apparaît dans aucune entrée : elle vient de `out=`."""
+    """The width `w` of the output appears in no input: it comes from `out=`."""
     i = gs.index()
     k = x[i]
     while k < flags.shape[0]:
@@ -222,5 +222,5 @@ def test_output_dimension_given_by_out(dev):
     flags = np.ones(100, np.int32)
     flag_multiples(steps, device=dev, out=flags).numpy()
     want = np.array([int(all(i % s for s in (3, 5, 7)) or i == 0) for i in range(100)], np.int32)
-    want[0] = 1  # k part de x[i] : l'indice 0 n'est jamais effacé
+    want[0] = 1  # k starts at x[i]: index 0 is never cleared
     check(flags, want)

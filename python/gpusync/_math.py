@@ -1,7 +1,7 @@
-"""Fonctions mathématiques utilisables dans un kernel (`gs.sqrt(x)`…).
+"""Math functions usable in a kernel (`gs.sqrt(x)`…).
 
-Dans un kernel, elles sont traduites en fonctions natives du GPU. Hors kernel, ce sont les
-fonctions NumPy correspondantes : la fonction Python d'origine reste exécutable telle quelle.
+Inside a kernel they are translated to native GPU functions. Outside a kernel they are the matching
+NumPy functions: the original Python function stays runnable as is.
 """
 
 import functools as _functools
@@ -26,19 +26,19 @@ abs = _np.abs
 
 
 def min(*values):
-    """Minimum élément par élément de 2 valeurs ou plus (np.minimum n'en prend que 2)."""
+    """Element-wise minimum of 2 values or more (np.minimum takes only 2)."""
     return _functools.reduce(_np.minimum, values)
 
 
 def max(*values):
-    """Maximum élément par élément de 2 valeurs ou plus (np.maximum n'en prend que 2)."""
+    """Element-wise maximum of 2 values or more (np.maximum takes only 2)."""
     return _functools.reduce(_np.maximum, values)
 
 
 
 def mulhi(a, b):
-    """Partie haute du produit complet de deux entiers de même type (32 ou 64 bits) : pour des u32,
-    (a * b) >> 32 calculé sans débordement. Dans un kernel : instruction native du GPU si elle existe."""
+    """High half of the full product of two integers of the same type (32 or 64 bits): for u32,
+    (a * b) >> 32 computed without overflow. In a kernel: native GPU instruction when there is one."""
     a, b = _np.asarray(a), _np.asarray(b)
     bits = a.dtype.itemsize * 8
     full = a.astype(object) * b.astype(object)
@@ -46,45 +46,45 @@ def mulhi(a, b):
 
 
 def index():
-    """Dans un kernel avec index : coordonnées de la case de sortie calculée (`i, j = gs.index()`).
+    """In an indexed kernel: coordinates of the output cell being computed (`i, j = gs.index()`).
 
-    Hors kernel, il n'y a pas de case courante : appelez le kernel, pas la fonction Python.
+    Outside a kernel there is no current cell: call the kernel, not the Python function.
     """
-    raise RuntimeError("gs.index() n'a de sens que dans un kernel (@gs.kernel) avec des dimensions nommées")
+    raise RuntimeError("gs.index() only makes sense inside a kernel (@gs.kernel) with named dimensions")
 
 
 def local(dtype, n):
-    """Tableau local à chaque case (`buf = gs.local(gs.f32, 64)`), mis à zéro, de taille constante."""
+    """Array local to each cell (`buf = gs.local(gs.f32, 64)`), zero-filled, of constant size."""
     return _np.zeros(n, dtype=dtype.np)
 
 
 def shared(dtype, n):
-    """Dans un kernel avec group= : tableau commun aux threads du groupe (`t = gs.shared(gs.f32, 256)`),
-    mis à zéro, de taille constante. Écrire puis lire une case d'un autre thread demande gs.barrier()."""
+    """In a kernel with group=: array shared by the group's threads (`t = gs.shared(gs.f32, 256)`),
+    zero-filled, of constant size. Writing then reading a cell of another thread needs gs.barrier()."""
     return _np.zeros(n, dtype=dtype.np)
 
 
 def lane():
-    """Dans un kernel avec group= : position du thread dans son groupe, de 0 à group − 1."""
-    raise RuntimeError("gs.lane() n'a de sens que dans un kernel avec group= (@gs.kernel(group=256))")
+    """In a kernel with group=: position of the thread in its group, from 0 to group − 1."""
+    raise RuntimeError("gs.lane() only makes sense inside a kernel with group= (@gs.kernel(group=256))")
 
 
 def barrier():
-    """Dans un kernel avec group= : attend tous les threads du groupe ; leurs écritures dans gs.shared
-    sont ensuite visibles. Tous les threads du groupe doivent atteindre la même barrière."""
-    raise RuntimeError("gs.barrier() n'a de sens que dans un kernel avec group= (@gs.kernel(group=256))")
+    """In a kernel with group=: waits for every thread of the group; their writes to gs.shared
+    are visible afterwards. Every thread of the group must reach the same barrier."""
+    raise RuntimeError("gs.barrier() only makes sense inside a kernel with group= (@gs.kernel(group=256))")
 
 
 def store(k, value):
-    """Dans un kernel avec cells= : écrit la k-ième case de sortie du thread (cases début + r + k·group)."""
-    raise RuntimeError("gs.store() n'a de sens que dans un kernel avec cells= (@gs.kernel(group=1024, cells=8))")
+    """In a kernel with cells=: writes the thread's k-th output cell (cells start + r + k·group)."""
+    raise RuntimeError("gs.store() only makes sense inside a kernel with cells= (@gs.kernel(group=1024, cells=8))")
 
 
 def matmul_u8(c, a, b, m, n, k):
-    """Dans un kernel avec group= : produit de matrices d'octets, collectif (tout le groupe, barrière
-    avant et après). a : m lignes de k octets, b : n colonnes de k octets (4 octets par mot u32, octet de
-    poids faible en premier) ; c[i·n + j] += Σ_t a[i, t]·b[j, t], sommes modulo 2³². Tensor Cores en CUDA
-    (Ampere et suivants), boucle portable ailleurs."""
+    """In a kernel with group=: byte matrix product, collective (the whole group, barrier
+    before and after). a: m rows of k bytes, b: n columns of k bytes (4 bytes per u32 word, least
+    significant byte first); c[i·n + j] += Σ_t a[i, t]·b[j, t], sums modulo 2³². Tensor Cores with CUDA
+    (Ampere and later), a portable loop elsewhere."""
     ab = _np.asarray(a, dtype=_np.uint32)[: m * k // 4].view(_np.uint8).reshape(m, k).astype(_np.uint64)
     bb = _np.asarray(b, dtype=_np.uint32)[: n * k // 4].view(_np.uint8).reshape(n, k).astype(_np.uint64)
     prod = (ab @ bb.T) & 0xFFFFFFFF
@@ -93,17 +93,17 @@ def matmul_u8(c, a, b, m, n, k):
 
 
 def atomic_add(out, index, value):
-    """Dans un kernel avec grid= : out[index] += value, sans conflit entre cases de la grille."""
+    """In a kernel with grid=: out[index] += value, without conflicts between grid cells."""
     _np.add.at(out, index, value)
 
 
 def atomic_min(out, index, value):
-    """Dans un kernel avec grid= : out[index] = min(out[index], value), sans conflit."""
+    """In a kernel with grid=: out[index] = min(out[index], value), without conflicts."""
     _np.minimum.at(out, index, value)
 
 
 def atomic_max(out, index, value):
-    """Dans un kernel avec grid= : out[index] = max(out[index], value), sans conflit."""
+    """In a kernel with grid=: out[index] = max(out[index], value), without conflicts."""
     _np.maximum.at(out, index, value)
 
 

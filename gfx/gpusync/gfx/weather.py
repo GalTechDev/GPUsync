@@ -1,7 +1,7 @@
-"""Météo de grande échelle sur GPU : dépressions, fronts, vent, humidité, pression au sol et QNH.
+"""Large-scale weather on the GPU: lows, fronts, wind, humidity, surface pressure and QNH.
 
-Équations primitives hydrostatiques (coordonnée sigma, relief, pression au sol pronostique), Runge-Kutta 3 explicite.
-Les nuages convectifs, plus petits que la maille, sont représentés par des panaches (voir `kernels/kwxphys.py`)."""
+Hydrostatic primitive equations (sigma coordinate, terrain, prognostic surface pressure), explicit Runge-Kutta 3.
+Convective clouds, smaller than a cell, are represented by plumes (see `kernels/kwxphys.py`)."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ from .kernels.kweather import (
     wx_unpack_surface,
 )
 
-from .kernels.kwxphys import (  # noqa: F401 (les CNV_* et SFC_* sont réexportés)
+from .kernels.kwxphys import (  # noqa: F401 (the CNV_* and SFC_* names are re-exported)
     CNV_BASE,
     CNV_CAPE,
     CNV_CIN,
@@ -74,18 +74,18 @@ OMEGA = 7.292e-5
 
 
 def sea_level_pressure_isa(pressure, height):
-    """QNH (Pa) : pression ramenée au niveau de la mer en atmosphère standard OACI (6,5 K/km, 15 °C)."""
+    """QNH (Pa): pressure reduced to sea level in the ICAO standard atmosphere (6.5 K/km, 15 °C)."""
     n = RD * 0.0065 / 9.80665
     return 101325.0 * ((pressure / 101325.0) ** n + 0.0065 * height / 288.15) ** (1.0 / n)
 
 
 def parcel_ascent(p, t, qv, *, source: str = "surface") -> dict:
-    """CAPE, CIN (J/kg) et niveaux d'une particule non diluée : ascension pseudo-adiabatique (eau seule, Bolton 1980), avec
-    la température virtuelle.
+    """CAPE, CIN (J/kg) and levels of an undiluted parcel: pseudo-adiabatic ascent (water only, Bolton 1980), with
+    virtual temperature.
 
-    `p` (Pa), `t` (K), `qv` (humidité spécifique) du sol vers le haut. `source` : "surface" (premier niveau), "mixed"
-    (moyenne de θ et de r sur 100 hPa) ou "unstable" (niveau de plus forte CAPE sous 300 hPa du sol). Les altitudes sont
-    au-dessus du premier niveau ; `lfc`, `el` et `cin` valent `nan` si la particule n'est jamais flottante."""
+    `p` (Pa), `t` (K), `qv` (specific humidity) from the ground upward. `source`: "surface" (first level), "mixed"
+    (mean of θ and r over 100 hPa) or "unstable" (level of highest CAPE within 300 hPa of the ground). Altitudes are
+    above the first level; `lfc`, `el` and `cin` are `nan` if the parcel is never buoyant."""
     p, t, qv = (np.asarray(a, dtype=np.float64) for a in (p, t, qv))
     grid = np.exp(np.arange(math.log(p[0]), math.log(max(p[-1], 1.0e4)), -0.004))
     logp = -np.log(p)
@@ -113,7 +113,7 @@ def parcel_ascent(p, t, qv, *, source: str = "surface") -> dict:
                 tp[m] = theta * (grid[m] / 1.0e5) ** KAPPA
                 if mixing(tp[m], grid[m]) <= r0:
                     wet = True
-                    # Niveau de condensation exact : dichotomie entre ce niveau et le précédent
+                    # Exact condensation level: bisection between this level and the previous one
                     lo, hi = math.log(grid[m]), math.log(grid[max(m - 1, start)])
                     for _ in range(40):
                         mid = 0.5 * (lo + hi)
@@ -130,7 +130,7 @@ def parcel_ascent(p, t, qv, *, source: str = "surface") -> dict:
                 tp[m] = a - 0.004 * k
         rp = np.array([r0 if not np.isfinite(x) or lcl is None or q > lcl else mixing(x, q) for x, q in zip(tp, grid)])
         tvp = tp * (1.0 + rp / 0.62197) / (1.0 + rp)
-        area = RD * (tvp - tve) * 0.004  # J/kg par niveau
+        area = RD * (tvp - tve) * 0.004  # J/kg per level
         out = dict(cape=0.0, cin=math.nan, lcl=math.nan, lfc=math.nan, el=math.nan, pressure=float(grid[start]))
         if lcl is None:
             return out
@@ -139,7 +139,7 @@ def parcel_ascent(p, t, qv, *, source: str = "surface") -> dict:
         positive[start:] = (area[start:] > 0.0) & (grid[start:] <= lcl)
         if not positive.any():
             return out
-        # Couches flottantes au-dessus du niveau de condensation : celle de plus grande aire donne le niveau d'équilibre
+        # Buoyant layers above the condensation level: the one with the largest area gives the equilibrium level
         edges = np.flatnonzero(np.diff(np.concatenate([[0], positive.astype(int), [0]])))
         layers = [(a, b, area[a:b].sum()) for a, b in zip(edges[::2], edges[1::2])]
         best = max(layers, key=lambda q: q[2])
@@ -159,86 +159,86 @@ def parcel_ascent(p, t, qv, *, source: str = "surface") -> dict:
     if source == "unstable":
         starts = np.flatnonzero(grid >= grid[0] - 3.0e4)
         return max((lift(int(m), float(te[m]), float(r_env[m])) for m in starts[::4]), key=lambda q: q["cape"])
-    raise ValueError(f"parcel_ascent : source inconnue {source!r} (surface, mixed, unstable)")
+    raise ValueError(f"parcel_ascent: unknown source {source!r} (surface, mixed, unstable)")
 
 
 @dataclass
 class WeatherConfig:
-    """Domaine et état initial d'une `Weather`."""
+    """Domain and initial state of a `Weather`."""
 
     nx: int = 256
     ny: int = 192
     nz: int = 36
     dx: float = 20_000.0
-    dt: float | None = None  # pas dynamique (s) ; None : 0,9 × la limite des ondes de gravité
-    latitude: float = 45.0  # au centre du domaine
-    beta: bool = True  # variation de f avec la latitude
-    terrain: np.ndarray | None = None  # altitude du sol (m), (ny, nx)
-    temperature: Callable | None = None  # T(y, p), K ; y en m depuis le centre
-    relative_humidity: Callable | None = None  # HR(y, p), 0 à 1
+    dt: float | None = None  # dynamics step (s); None: 0.9 × the gravity-wave limit
+    latitude: float = 45.0  # at the domain centre
+    beta: bool = True  # variation of f with latitude
+    terrain: np.ndarray | None = None  # ground altitude (m), (ny, nx)
+    temperature: Callable | None = None  # T(y, p), K; y in m from the centre
+    relative_humidity: Callable | None = None  # RH(y, p), 0 to 1
     sea_level_pressure: float = 101_325.0
-    surface_wind: float = 0.0  # vent zonal géostrophique au niveau de la mer (m/s)
+    surface_wind: float = 0.0  # geostrophic zonal wind at sea level (m/s)
     sponge_layers: int = 4
     divergence_damping: float = 0.01  # en dx² / dt
-    perturbation: float = 0.0  # K : ondes qui amorcent les dépressions
+    perturbation: float = 0.0  # K: waves that seed the lows
     seed: int = 1
-    physics: bool = False  # sol, soleil, couche limite, convection, pluie
+    physics: bool = False  # ground, sun, boundary layer, convection, rain
     convection: bool = True
     physics_step: float = 120.0  # s
-    land: np.ndarray | None = None  # 1 terre, 0 mer ; None : partout où le relief dépasse zéro
-    roughness: np.ndarray | float = 0.1  # sur terre (m)
+    land: np.ndarray | None = None  # 1 land, 0 sea; None: wherever the terrain is above zero
+    roughness: np.ndarray | float = 0.1  # over land (m)
     albedo: np.ndarray | float = 0.2
-    wetness: np.ndarray | float = 0.35  # disponibilité en eau du sol, 0 à 1
-    sea_temperature: np.ndarray | Callable | None = None  # K ; None : air du premier niveau + 1 K
-    day: int = 172  # jour de l'année
-    start_hour: float = 6.0  # heure solaire au bord ouest
-    cooling: float = 1.5  # refroidissement radiatif de la troposphère (K/jour)
-    cold_pool_refine: int = 4  # mailles fines d'air froid par maille large ; 0 : sans
-    front_lift: float = 0.5  # soulèvement au bord de l'air froid / vitesse de propagation
-    resolved_lift: float = 5.0  # facteur de l'ascendance résolue (variabilité sous la maille)
-    plume: dict | None = None  # réglages du panache, voir `PLUME`
+    wetness: np.ndarray | float = 0.35  # soil water availability, 0 to 1
+    sea_temperature: np.ndarray | Callable | None = None  # K; None: air of the first level + 1 K
+    day: int = 172  # day of the year
+    start_hour: float = 6.0  # solar time at the west edge
+    cooling: float = 1.5  # radiative cooling of the troposphere (K/day)
+    cold_pool_refine: int = 4  # fine cold-air cells per coarse cell; 0: none
+    front_lift: float = 0.5  # lifting at the edge of the cold air / propagation speed
+    resolved_lift: float = 5.0  # factor of the resolved ascent (subgrid variability)
+    plume: dict | None = None  # plume settings, see `PLUME`
 
 
-# Réglages du panache convectif, dans l'ordre de la table lue par le noyau. Calés sur deux journées d'orages 3D
-# (maille 250 m, sans glace), vérifiés sur deux autres
+# Settings of the convective plume, in the order of the table read by the kernel. Calibrated on two days of 3D
+# thunderstorms (250 m mesh, no ice), checked on two others
 PLUME = {
-    "entrainment": 0.00168,  # 1/m, profond : × (1,3 - HR) (qs / qs base)³, forme de Bechtold et al. 2008 ; calé sur le 3D
-    "entrainment_shallow": 8e-4,  # 1/m, calé sur le cas BOMEX 3D
-    "buoyancy": 0.54,  # part de la flottabilité qui accélère l'air ; calée sur le 3D
-    "drag": 1.0,  # freinage par entraînement
+    "entrainment": 0.00168,  # 1/m, deep: × (1.3 - RH) (qs / qs base)³, form of Bechtold et al. 2008; calibrated on the 3D runs
+    "entrainment_shallow": 8e-4,  # 1/m, calibrated on the 3D BOMEX case
+    "buoyancy": 0.54,  # share of buoyancy that accelerates the air; calibrated on the 3D runs
+    "drag": 1.0,  # braking by entrainment
     "rain_rate": 0.000592,  # 1/m
     "rain_threshold": 0.000946,  # kg/kg
-    "downdraft": 0.383,  # flux descendant / flux à la base
-    "ice": 1.0,  # 1 : saturation mixte eau-glace sous 0 °C ; 0 : eau seule
-    "dissipation": 1880.0,  # s (Pan & Randall 1998, forme de mémoire)
+    "downdraft": 0.383,  # downdraft flux / flux at the base
+    "ice": 1.0,  # 1: mixed water-ice saturation below 0 °C; 0: water only
+    "dissipation": 1880.0,  # s (Pan & Randall 1998, form from memory)
     "inertia": 1.17e+07,  # m⁴/kg
     "w_min": 0.5,  # m/s
     "rain_evaporation": 3.09e-05,
-    "downdraft_rh": 0.816,  # humidité relative des courants descendants
+    "downdraft_rh": 0.816,  # relative humidity of downdrafts
     "mass_max": 0.5,  # kg/m²/s
-    "downdraft_mix": 0.1,  # part d'air du nuage au départ des descentes
-    "growth": 8.79e-06,  # croissance du flux de masse (1/m)
-    "excess": 2.0,  # excès des thermiques, en flux / w*
-    "thermal": 0.6,  # vitesse des thermiques, en w*
-    "sustain": 5.0,  # soulèvement entretenu par les orages en place (m/s)
-    "narrow": 3.52,  # dilution en plus avant organisation
-    "organized": 0.013,  # flux de masse d'organisation (kg/m²/s)
+    "downdraft_mix": 0.1,  # share of cloud air at the start of downdrafts
+    "growth": 8.79e-06,  # growth of the mass flux (1/m)
+    "excess": 2.0,  # excess of the thermals, in flux / w*
+    "thermal": 0.6,  # speed of the thermals, in w*
+    "sustain": 5.0,  # lifting sustained by existing storms (m/s)
+    "narrow": 3.52,  # extra dilution before organization
+    "organized": 0.013,  # organization mass flux (kg/m²/s)
     "rain_evaporation_cloud": 2.61e-05,
 }
 
 
 def plume_table(**kw) -> np.ndarray:
-    """Table des réglages du panache (`PLUME` modifié par `kw`)."""
+    """Table of the plume settings (`PLUME` modified by `kw`)."""
     unknown = set(kw) - set(PLUME)
     if unknown:
-        raise ValueError(f"panache : réglage inconnu {sorted(unknown)}")
+        raise ValueError(f"plume: unknown setting {sorted(unknown)}")
     out = np.zeros(24)
     out[: len(PLUME)] = list({**PLUME, **kw}.values())
     return out
 
 
 def jet_temperature(y, p, *, south=297.0, north=271.0, width=1.1e6, lapse=0.0065, stratosphere=215.0):
-    """Température zonale d'un courant-jet : contraste nord-sud en tanh dans la troposphère, stratosphère isotherme."""
+    """Zonal temperature of a jet stream: tanh north-south contrast in the troposphere, isothermal stratosphere."""
     surface = 0.5 * (south + north) - 0.5 * (south - north) * np.tanh(y / width)
     tropo = surface * (p / 1.0e5) ** (RD * lapse / GRAVITY)
     soft = 4.0
@@ -246,7 +246,7 @@ def jet_temperature(y, p, *, south=297.0, north=271.0, width=1.1e6, lapse=0.0065
 
 
 def fictional_geography(nx: int, ny: int, dx: float, *, seed: int = 3, land_fraction: float = 0.5, mountains: float = 2500.0):
-    """Géographie inventée, périodique en x : `(relief en m, masque de terre, disponibilité en eau du sol)`."""
+    """Invented geography, periodic in x: `(terrain in m, land mask, soil water availability)`."""
     rng = np.random.default_rng(seed)
     kx = np.fft.fftfreq(nx, dx)[None, :]
     ky = np.fft.fftfreq(2 * ny, dx)[:, None]
@@ -263,7 +263,7 @@ def fictional_geography(nx: int, ny: int, dx: float, *, seed: int = 3, land_frac
     inland = np.clip((base - sea) / 1.0, 0.0, 1.0)
     ridge = np.clip(1.0 - np.abs(field(1.0e6, 4.0)) * 2.2, 0.0, 1.0)
     terrain = land * (30.0 + 350.0 * inland + mountains * ridge**1.5 * np.clip(inland * 2.5, 0.0, 1.0))
-    # Deux passes de lissage : pas de marche d'une maille
+    # Two smoothing passes: no one-cell step
     for _ in range(2):
         pad = np.pad(terrain, ((1, 1), (0, 0)), mode="edge")
         terrain = 0.5 * terrain + 0.125 * (pad[2:] + pad[:-2] + np.roll(terrain, 1, 1) + np.roll(terrain, -1, 1))
@@ -271,15 +271,15 @@ def fictional_geography(nx: int, ny: int, dx: float, *, seed: int = 3, land_frac
 
 
 class Weather:
-    """Atmosphère de grande échelle (canal périodique en x)."""
+    """Large-scale atmosphere (channel periodic in x)."""
 
     def __init__(self, config: WeatherConfig | None = None, *, device: str | None = None) -> None:
         self.config = cfg = config or WeatherConfig()
         self.device = device
         if cfg.nx % GROUP or cfg.nx < GROUP:
-            raise ValueError(f"Weather : nx doit être un multiple de {GROUP}, reçu {cfg.nx}")
+            raise ValueError(f"Weather: nx must be a multiple of {GROUP}, got {cfg.nx}")
         if not 4 <= cfg.nz <= LEVELS_MAX:
-            raise ValueError(f"Weather : nz entre 4 et {LEVELS_MAX}, reçu {cfg.nz}")
+            raise ValueError(f"Weather: nz between 4 and {LEVELS_MAX}, got {cfg.nz}")
         self.time, self.steps = 0.0, 0
         self._levels()
         self.dt = cfg.dt or 0.9 * 1.73 / (2.0 * math.sqrt(2.0)) * cfg.dx / 350.0
@@ -311,7 +311,7 @@ class Weather:
 
     def _levels(self) -> None:
         cfg = self.config
-        zeta = (np.arange(cfg.nz) + 0.5) / cfg.nz  # 0 au sol
+        zeta = (np.arange(cfg.nz) + 0.5) / cfg.nz  # 0 at the ground
         w = np.minimum(1.0, 0.1 + 2.6 * zeta) * (1.0 - 0.55 * zeta**2)
         d = (w / w.sum())[::-1]
         half = np.concatenate([[0.0], np.cumsum(d)])
@@ -326,7 +326,7 @@ class Weather:
         self.lev_np, self.lev = table, self._up(table)
 
     def _initial(self) -> None:
-        """Équilibre hydrostatique et géostrophique d'une température `T(y, p)` et d'une pression au niveau de la mer."""
+        """Hydrostatic and geostrophic balance of a temperature `T(y, p)` and a sea-level pressure."""
         cfg = self.config
         temp = cfg.temperature or jet_temperature
         rh = cfg.relative_humidity
@@ -339,7 +339,7 @@ class Weather:
             return t, (t if rh is None else t * (1.0 + 0.608 * self._vapor(t, pg[None, :], rh(y[:, None], pg[None, :]))))
 
         def geopotential(y):
-            """Φ(y, p) avec Φ = 0 à la pression du niveau de la mer."""
+            """Φ(y, p) with Φ = 0 at the sea-level pressure."""
             tv = tv_of(y)[1]
             up = np.concatenate([np.zeros((len(y), 1)), np.cumsum(0.5 * (tv[:, 1:] + tv[:, :-1]) * np.diff(lnp), axis=1)], axis=1) * RD
             slp = self._slp(y)
@@ -347,7 +347,7 @@ class Weather:
             return at[:, None] - up
 
         phi_c = geopotential(self.y)
-        # Pression au sol : Φ(y, p_sol) = g · relief
+        # Surface pressure: Φ(y, p_surface) = g · terrain
         ps = np.empty((cfg.ny, cfg.nx))
         for j in range(cfg.ny):
             ps[j] = np.exp(np.interp(GRAVITY * self.terrain[j], phi_c[j, ::-1], lnp[::-1]))
@@ -367,7 +367,7 @@ class Weather:
             )[None, :] * shape  # fmt: skip
             t = t + cfg.perturbation * wave * np.exp(-(((self.sigma - 0.75) / 0.3) ** 2))[:, None, None]
             th = t * (1.0e5 / p) ** KAPPA
-        # Vent géostrophique sur les surfaces isobares
+        # Geostrophic wind on isobaric surfaces
         phi_f = geopotential(yf)
         ug = -(phi_f[1:] - phi_f[:-1]) / cfg.dx / self.f[:, None]
         pu = 0.5 * (p + np.roll(p, 1, axis=2))
@@ -390,7 +390,7 @@ class Weather:
         return 0.62197 * e / (p - 0.37803 * e)
 
     def set_state(self, **fields) -> None:
-        """Remplace des champs : `u`, `v`, `theta`, `qv`, `qc` (nz, ny, nx) et `surface_pressure` (ny, nx, Pa)."""
+        """Replaces fields: `u`, `v`, `theta`, `qv`, `qc` (nz, ny, nx) and `surface_pressure` (ny, nx, Pa)."""
         names = {"u": "u", "v": "v", "theta": "th", "qv": "qv", "qc": "qc"}
         for key, value in fields.items():
             if key == "surface_pressure":
@@ -399,7 +399,7 @@ class Weather:
                 setattr(self, names[key], self._up(value))
 
     def save(self, path) -> None:
-        """Écrit l'état complet (npz), à reprendre plus tard par `load` avec la même configuration."""
+        """Writes the full state (npz), to be resumed later by `load` with the same configuration."""
         data = {n: getattr(self, n).numpy() for n in ("u", "v", "th", "qv", "qc", "pip")}
         data["time"] = self.time
         if self.config.physics:
@@ -408,10 +408,10 @@ class Weather:
         np.savez(path, **data)
 
     def load(self, path) -> None:
-        """Reprend un état écrit par `save` (même grille, même relief)."""
+        """Resumes a state written by `save` (same grid, same terrain)."""
         with np.load(path) as d:
             if d["th"].shape != self.th.shape or (self.config.physics and "ts" not in d):
-                raise ValueError(f"Weather.load : {path} vient d'une autre configuration")
+                raise ValueError(f"Weather.load: {path} comes from another configuration")
             for n in ("u", "v", "th", "qv", "qc", "pip"):
                 setattr(self, n, self._up(d[n]))
             self.time = float(d["time"])
@@ -422,7 +422,7 @@ class Weather:
                 self.pool = [self._up(d[f"pool{n}"]) for n in range(4)]
                 self._dyn_start = (self.th, self.qv, self.qc)
                 self._dyn_pair = (self._dyn_start, self._dyn_start)
-                # Diagnostics (carte, flux) disponibles tout de suite : un passage de physique dont on ne garde que cela
+                # Diagnostics (map, fluxes) available right away: one physics pass, of which only that is kept
                 names = ("u", "v", "th", "qv", "qc", "ts", "rain", "cover", "lift", "memory", "pool")
                 kept = {n: getattr(self, n) for n in names}
                 with gs.batch(self.device):
@@ -430,10 +430,10 @@ class Weather:
                 for n, value in kept.items():
                     setattr(self, n, value)
 
-    # ── Lecture ──
+    # ── Reading ──
 
     def surface_pressure(self) -> np.ndarray:
-        """Pression au sol, QFE (Pa)."""
+        """Surface pressure, QFE (Pa)."""
         return self.pi0_np + P_TOP + self.pip.numpy().astype(np.float64)
 
     def qnh(self) -> np.ndarray:
@@ -441,13 +441,13 @@ class Weather:
         return sea_level_pressure_isa(self.surface_pressure(), self.terrain)
 
     def pressure(self) -> np.ndarray:
-        """Pression au milieu de chaque couche (Pa)."""
+        """Pressure in the middle of each layer (Pa)."""
         return P_TOP + self.sigma[:, None, None] * (self.surface_pressure() - P_TOP)
 
     def temperature(self) -> np.ndarray:
         return self.th.numpy() * (self.pressure() / 1.0e5) ** KAPPA
 
-    # ── Un pas ──
+    # ── One step ──
 
     def _dynamics(self, dt: float) -> None:
         cfg, dev = self.config, self.device
@@ -514,8 +514,8 @@ class Weather:
         self._dyn_start = (self.th, self.qv, self.qc)
         self._dyn_pair = (self._dyn_start, self._dyn_start)
         self.surface_out = self.convection_out = None
-        self.fixed_fluxes = None  # (K m/s, m/s, vitesse de frottement) : remplace le bilan du sol
-        self.memory = self._up(np.zeros(shape))  # flux de masse convectif, gardé d'un pas à l'autre
+        self.fixed_fluxes = None  # (K m/s, m/s, friction velocity): replaces the soil budget
+        self.memory = self._up(np.zeros(shape))  # convective mass flux, kept from one step to the next
 
     def _physics(self, dt: float) -> None:
         cfg, dev, nz = self.config, self.device, self.config.nz
@@ -570,7 +570,7 @@ class Weather:
         return wx_unpack_surface(self.convection_out, self._tpl2, 4 * self.config.nz + c, device=self.device).numpy()
 
     def sounding(self, x: float, y: float) -> dict:
-        """Sondage au-dessus du sol au point `(x, y)` (m) : maille la plus proche, du sol vers le haut."""
+        """Sounding above the ground at point `(x, y)` (m): nearest cell, from the ground upward."""
         cfg = self.config
         i = int(x / cfg.dx) % cfg.nx
         j = min(max(int(y / cfg.dx + 0.5 * cfg.ny), 0), cfg.ny - 1)
@@ -583,7 +583,7 @@ class Weather:
         layer = RD * tv / GRAVITY * np.log(half[1:] / half[:-1])
         z = layer[::-1].cumsum()[::-1] - layer + RD * tv / GRAVITY * np.log(half[1:] / p)
         col = self._dyn(self.u, self.v, self.th, self.qv, self.qc, self.pip, self.pi0, self.lev, 1 / cfg.dx, 1 / cfg.dx, self._dyn_tpl, device=self.device)
-        om = col.numpy()[j, i // GROUP, cfg.nz : 2 * cfg.nz, i % GROUP].astype(np.float64)  # pi dσ/dt au bas des couches
+        om = col.numpy()[j, i // GROUP, cfg.nz : 2 * cfg.nz, i % GROUP].astype(np.float64)  # pi dσ/dt at the bottom of the layers
         w = -0.5 * (om + np.concatenate([[0.0], om[:-1]])) / (GRAVITY * p / (RD * tv))
         out = dict(z=z, p=p, t=t, theta=th, qv=qv, qc=qc, u=u, v=v, w=w)
         out = {k: a[::-1] for k, a in out.items()}
@@ -595,13 +595,13 @@ class Weather:
         return out
 
     def sample(self, x: float, y: float, *, width: float = 0.75) -> dict:
-        """Colonne lissée autour de `(x, y)` (gaussienne de `width` mailles), du sol vers le haut, pour la simulation 3D.
+        """Smoothed column around `(x, y)` (Gaussian of `width` cells), from the ground upward, for the 3D simulation.
 
-        Profils : `z` (au-dessus du sol), `p`, `t`, `theta`, `qv`, `qc`, `u`, `v`, `w`, et les tendances d'advection
-        horizontale `theta_adv` (K/s), `q_adv` (1/s) du dernier intervalle de physique. Sol : pression, flux, pluie…"""
+        Profiles: `z` (above the ground), `p`, `t`, `theta`, `qv`, `qc`, `u`, `v`, `w`, and the horizontal advection
+        tendencies `theta_adv` (K/s), `q_adv` (1/s) of the last physics interval. Ground: pressure, fluxes, rain…"""
         cfg, dev = self.config, self.device
         if self.surface_out is None or self.convection_out is None:
-            raise RuntimeError("Weather.sample : avancer d'abord d'un pas de physique (physics=True, convection=True)")
+            raise RuntimeError("Weather.sample: first advance by one physics step (physics=True, convection=True)")
         gx, gy = (x / cfg.dx) % cfg.nx, min(max(y / cfg.dx + 0.5 * cfg.ny, 0.5), cfg.ny - 0.5)
         if getattr(self, "_tpl9", None) is None:
             self._tpl9, self._tpl10 = self._up(np.zeros((cfg.nz, 9))), self._up(np.zeros(10))
@@ -623,7 +623,7 @@ class Weather:
         z = layer[::-1].cumsum()[::-1] - layer + RD * tv / GRAVITY * np.log(half[1:] / p)
         w = -om / (GRAVITY * p / (RD * tv))
         span = self.dt * self.physics_every
-        # Advection totale vue par la dynamique, moins la part verticale (que la simulation 3D refait elle-même)
+        # Total advection seen by the dynamics, minus the vertical part (which the 3D simulation redoes itself)
         grad = lambda f: np.gradient(f, z)
         out = dict(z=z, p=p, t=t, theta=th, qv=qv, qc=qc, u=u, v=v, w=w)
         out["theta_adv"] = prof[:, 6] / span + w * grad(th)
@@ -635,7 +635,7 @@ class Weather:
         return out
 
     def sun_position(self, x: float, y: float) -> tuple[float, float]:
-        """Hauteur et azimut du soleil (degrés ; 0 = nord, 90 = est) au point `(x, y)`."""
+        """Elevation and azimuth of the sun (degrees; 0 = north, 90 = east) at point `(x, y)`."""
         cfg = self.config
         lat = math.radians(cfg.latitude) + y / 6.371e6
         hour = cfg.start_hour + self.time / 3600.0 + (x % (cfg.nx * cfg.dx)) / (6.371e6 * math.cos(math.radians(cfg.latitude))) * 12.0 / math.pi
@@ -647,8 +647,8 @@ class Weather:
         return math.degrees(math.asin(up)), math.degrees(math.atan2(east, north)) % 360.0
 
     def local_config(self, x: float, y: float, *, size: float = 40e3, dx: float = 250.0, dz: float = 200.0, top: float = 18e3, noise: float = 0.3, seed: int = 1):
-        """`AtmosphereConfig` de la simulation 3D des nuages au point `(x, y)` : sondage, vent, flux de surface et
-        mouvement vertical de grande échelle ; un bruit de `noise` K dans le premier kilomètre rompt la symétrie."""
+        """`AtmosphereConfig` of the 3D cloud simulation at point `(x, y)`: sounding, wind, surface fluxes and
+        large-scale vertical motion; a `noise` K noise in the first kilometre breaks the symmetry."""
         from .atmosphere import AtmosphereConfig
 
         s = self.sounding(x, y)
@@ -672,9 +672,9 @@ class Weather:
         )  # fmt: skip
 
     def map(self, width: int, height: int, *, mode: int = 0, isobars: bool = True) -> gs.Array:
-        """Carte RGBA (h, w, u32) : mode 0 nuages, 1 température à 2 m ; pluie, isobares du QNH tous les 4 hPa."""
+        """RGBA map (h, w, u32): mode 0 clouds, 1 2-m temperature; rain, QNH isobars every 4 hPa."""
         if self.surface_out is None or self.convection_out is None:
-            raise RuntimeError("Weather.map : avancer d'abord d'un pas de physique (physics=True, convection=True)")
+            raise RuntimeError("Weather.map: first advance by one physics step (physics=True, convection=True)")
         if getattr(self, "_map_tpl", None) is None or self._map_tpl.shape != (height, width):
             self._map_tpl = upload_u32(np.zeros((height, width), dtype=np.uint32), device=self.device)
         q = wx_qnh(self.pip, self.pi0, self.terrain_gpu, device=self.device)
@@ -684,7 +684,7 @@ class Weather:
         )  # fmt: skip
 
     def water(self) -> float:
-        """Eau de l'atmosphère (kg/m², moyenne du domaine)."""
+        """Water of the atmosphere (kg/m², domain mean)."""
         mass = np.diff(self.sigma_half)[:, None, None] * (self.surface_pressure() - P_TOP) / GRAVITY
         q = self.qv.numpy().astype(np.float64) + self.qc.numpy()
         return float((q * mass).sum(0).mean())

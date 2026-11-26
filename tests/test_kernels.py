@@ -1,7 +1,7 @@
-"""Tests différentiels (jalon M1) : chaque kernel, sur chaque périphérique présent, comparé à NumPy.
+"""Differential tests (milestone M1): each kernel, on every available device, compared with NumPy.
 
-La fonction Python d'un kernel s'exécute telle quelle sur des tableaux NumPy (gs.sqrt = np.sqrt…) :
-c'est la référence quand le kernel est vectorisable ; sinon une référence NumPy est écrite à côté.
+A kernel's Python function runs as is on NumPy arrays (gs.sqrt = np.sqrt…):
+it is the reference when the kernel is vectorizable; otherwise a NumPy reference is written next to it.
 """
 
 import math
@@ -13,7 +13,7 @@ import pytest
 import gpusync as gs
 
 DEVICES = [d.id for d in gs.devices()]
-N = 4099  # pas un multiple de la taille de groupe
+N = 4099  # not a multiple of the group size
 RNG = np.random.default_rng(1234)
 
 
@@ -29,10 +29,10 @@ def check(y, ref, rtol=2e-6, atol=1e-6):
         bad = np.flatnonzero(got != ref)
     else:
         bad = np.flatnonzero(~np.isclose(got, ref, rtol=rtol, atol=atol, equal_nan=True))
-    assert bad.size == 0, f"{bad.size} écart(s), ex. indice {bad[0]} : {got.flat[bad[0]]} au lieu de {ref.flat[bad[0]]}"
+    assert bad.size == 0, f"{bad.size} mismatch(es), e.g. index {bad[0]}: {got.flat[bad[0]]} instead of {ref.flat[bad[0]]}"
 
 
-# ───────────────────────────── kernels de test ─────────────────────────────
+# ───────────────────────────── test kernels ─────────────────────────────
 
 
 @gs.kernel
@@ -42,7 +42,7 @@ def normalize(x: gs.f32[:], mean: gs.f32, std: gs.f32) -> gs.f32[:]:
 
 @gs.kernel
 def horner(x: gs.f32[:], degree: gs.i32) -> gs.f32[:]:
-    acc = 0  # devient f32 : affecté plus bas avec un flottant
+    acc = 0  # becomes f32: assigned a float further down
     for _ in range(degree):
         acc = acc * x + 1.0
     return acc
@@ -89,7 +89,7 @@ def negative_pow(x: gs.f32[:]) -> gs.f32[:]:
 
 @gs.kernel
 def casts(x: gs.f32[:], k: gs.i32[:]) -> gs.i32[:]:
-    t = int(x * 10.0)  # troncature vers zéro, comme Python
+    t = int(x * 10.0)  # truncation toward zero, as in Python
     return t + gs.i32(float(k) * 0.5) + int(-2.7)
 
 
@@ -116,7 +116,7 @@ def precise(x: gs.f64[:]) -> gs.f64[:]:
 
 @gs.kernel
 def f64_ops(x: gs.f64[:], s: gs.f64) -> gs.f64[:]:
-    """Opérations f64 disponibles sur Vulkan : arithmétique, //, %, sqrt, floor, abs, min, max, comparaisons."""
+    """f64 operations available on Vulkan: arithmetic, //, %, sqrt, floor, abs, min, max, comparisons."""
     y = (x % 0.7) + (x // 0.3) * s + gs.sqrt(x) + gs.floor(x * 3.0) + abs(x - 0.5) + max(x, 0.2)
     return y if x > 0.5 else -y
 
@@ -136,7 +136,7 @@ def f64_math_strict(x: gs.f64[:]) -> gs.f64[:]:
     return gs.exp(x) + gs.log(1.0 + x * x)
 
 
-# ───────────────────────────── tests différentiels ─────────────────────────────
+# ───────────────────────────── differential tests ─────────────────────────────
 
 
 @pytest.fixture(params=DEVICES)
@@ -169,7 +169,7 @@ def test_branches_and_or_not_chained_comparisons(device):
 def test_integers_like_python(device):
     a = RNG.integers(-1000, 1000, N).astype(np.int32)
     b = RNG.integers(-50, 50, N).astype(np.int32)
-    b[::17] = 0  # division par zéro : 0, comme NumPy
+    b[::17] = 0  # division by zero: 0, like NumPy
     with np.errstate(divide="ignore", invalid="ignore"):
         ref = a // b + 1000 * (a % b) - np.abs(a) + np.minimum(a, b) * 3
     check(int_ops(a, b, device=device), ref.astype(np.int32))
@@ -219,17 +219,17 @@ def test_while_break_continue(device):
 
 
 def test_f64(device):
-    """f64 arithmétique : exact là où c'est disponible ; sinon erreur (strict) ou repli averti (auto)."""
+    """f64 arithmetic: exact where available; otherwise an error (strict) or a warned fallback (auto)."""
     x = RNG.random(N)
     dev = next(d for d in gs.devices() if d.id == device)
     if dev.f64:
         with warnings.catch_warnings():
-            warnings.simplefilter("error")  # aucun repli attendu
+            warnings.simplefilter("error")  # no fallback expected
             check(precise(x, device=device), x * 1e-12 + 1.0, rtol=1e-15, atol=0)
         return
-    with pytest.raises(gs.UnsupportedFeature, match="f64.*compatibles"):
+    with pytest.raises(gs.UnsupportedFeature, match="f64.*Compatible devices"):
         precise_strict(x, device=device)
-    with pytest.warns(gs.CompatibilityWarning, match=f"f64 n'est pas disponible sur {device}"):
+    with pytest.warns(gs.CompatibilityWarning, match=f"f64 is not available on {device}"):
         y = precise(x, device=device)
     assert y.device != device
     check(y, x * 1e-12 + 1.0, rtol=1e-15, atol=0)
@@ -247,7 +247,7 @@ def test_f64_ops_without_transcendental_functions(device):
 
 
 def test_f64_math_functions(device):
-    """exp / log en f64 : jamais sur Vulkan (précision f32 silencieuse ou plantage du pilote, mesuré)."""
+    """exp / log in f64: never on Vulkan (silent f32 precision or a driver crash, measured)."""
     x = RNG.random(N)
     ref = np.exp(x) + np.log(1.0 + x * x)
     dev = next(d for d in gs.devices() if d.id == device)
@@ -263,7 +263,7 @@ def test_f64_math_functions(device):
 
 
 def test_automatic_choice_by_requirements():
-    """Sans device= : premier du classement s'il convient, sinon repli averti vers un périphérique capable."""
+    """Without device=: first of the ranking if suitable, otherwise a warned fallback to a capable device."""
     from gpusync._device import capable, ranked
 
     first = ranked()[0]
@@ -293,7 +293,7 @@ def test_arbitrary_shapes_and_empty_array(device):
 
 def test_chaining_and_non_contiguous_view(device):
     x = f32(RNG.random((64, 64)))
-    view = x[:, ::2]  # non contigu : copié en contigu
+    view = x[:, ::2]  # non-contiguous: copied to contiguous memory
     y = normalize(normalize(view, 1.0, 2.0, device=device), -0.5, 0.5, device=device)
     check(y, ((view - np.float32(1)) / np.float32(2) + np.float32(0.5)) / np.float32(0.5))
 
@@ -308,17 +308,17 @@ def test_chaining_across_devices():
 def test_zero_copy_opencl_unified_memory():
     unified = [d for d in gs.devices() if d.backend == "opencl" and d.unified_memory]
     if not unified:
-        pytest.skip("pas de périphérique OpenCL à mémoire unifiée")
+        pytest.skip("no OpenCL device with unified memory")
     x = f32(RNG.random(1 << 20))
     y = normalize(x, 0.0, 1.0, device=unified[0])
-    assert y.zero_copy, "la sortie devrait être calculée directement dans le tableau NumPy"
+    assert y.zero_copy, "the output should be computed directly in the NumPy array"
     out = np.asarray(y)
-    assert np.asarray(y) is out  # pas de copie à la lecture
+    assert np.asarray(y) is out  # no copy on read
     check(out, x)
 
 
 def test_unused_result_and_released_inputs(device):
-    # Le résultat est abandonné et l'entrée libérée avant la fin du calcul : rien ne doit planter.
+    # The result is dropped and the input freed before the computation ends: nothing must crash.
     for _ in range(20):
         normalize(f32(RNG.random(1 << 16)), 0.0, 1.0, device=device)
     y = normalize(f32(np.ones(8)), 0.0, 1.0, device=device)
@@ -333,36 +333,36 @@ def test_device_choice():
         assert d.id == "cpu:0"
         assert normalize(f32([2.0]), 0.0, 2.0).device == "cpu:0"
     assert normalize(f32([2.0]), 0.0, 2.0).device == ranked()[0].id
-    with pytest.raises(gs.DeviceError, match="introuvable"):
+    with pytest.raises(gs.DeviceError, match="not found"):
         normalize(f32([1.0]), 0.0, 1.0, device="opencl:42")
 
 
 def test_array_larger_than_a_wgpu_buffer():
-    # Sur l'UHD 770 en Vulkan, un buffer lié est limité à 1 Gio − 4 o. Avant M1.5 : résultat faux sans
-    # erreur, puis erreur claire ; depuis M1.5 : traité par blocs (mode Flux), sans limite.
+    # On the UHD 770 with Vulkan, a bound buffer is limited to 1 GiB − 4 B. Before M1.5: wrong result without
+    # error, then a clear error; since M1.5: processed chunk by chunk (Flux mode), without limit.
     small = [d for d in gs.devices() if d.backend in ("metal", "vulkan", "dx12")
              and d.max_buffer_bytes is not None and d.max_buffer_bytes < (1 << 30) + 4096]
     if not small:
-        pytest.skip("aucun périphérique wgpu limité à ~1 Gio par buffer")
+        pytest.skip("no wgpu device limited to ~1 GiB per buffer")
     n = small[0].max_buffer_bytes // 4 + 1
     x = np.arange(n, dtype=np.float32)
     y = normalize(x, 1.0, 2.0, device=small[0])
     assert y.mode == "flux"
     out = np.asarray(y)
-    for i in (0, 1, n // 2, n - 2, n - 1):  # extrémités et frontières de blocs
+    for i in (0, 1, n // 2, n - 2, n - 1):  # ends and chunk boundaries
         assert out[i] == (np.float32(i) - 1) / 2
 
 
 @gs.kernel
 def loop_var(x: gs.f32["n", "t"], m: gs.i32) -> (gs.i32["n"], gs.i32["n"], gs.i32["n"]):
-    """Variable de boucle comme en Python : dernière valeur après la boucle, inchangée si aucun tour,
-    et la réaffecter dans le corps ne change pas l'itération."""
+    """Loop variable as in Python: last value after the loop, unchanged if no iteration,
+    and reassigning it in the body does not change the iteration."""
     i = gs.index()
     k = -1
     for k in range(x.shape[1]):
         pass
     j = -1
-    for j in range(m, 0):  # aucun tour si m >= 0
+    for j in range(m, 0):  # no iteration if m >= 0
         pass
     count = 0
     for q in range(x.shape[1]):

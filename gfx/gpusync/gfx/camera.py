@@ -1,4 +1,4 @@
-"""Caméras (`Camera3D`, `Camera2D`) et zones d'affichage normalisées (`Viewport`)."""
+"""Cameras (`Camera3D`, `Camera2D`) and normalized display areas (`Viewport`)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .math3d import cross3, mat4_look_at, mat4_ortho, mat4_perspective, normaliz
 
 @dataclass
 class Viewport:
-    """Rectangle normalisé `[0, 1] × [0, 1]` sur l'écran (origine en haut à gauche)."""
+    """Normalized rectangle `[0, 1] × [0, 1]` on the screen (origin at the top left)."""
 
     x: float = 0.0
     y: float = 0.0
@@ -30,7 +30,7 @@ class Viewport:
         )
 
     def pixel_rect(self, fb_w: int, fb_h: int) -> tuple[int, int, int, int]:
-        """Convertit le viewport en `(px, py, pw, ph)` dans le framebuffer `(fb_w, fb_h)`."""
+        """Converts the viewport into `(px, py, pw, ph)` in the framebuffer `(fb_w, fb_h)`."""
         px = max(0, min(fb_w - 1, int(round(self.x * fb_w))))
         py = max(0, min(fb_h - 1, int(round(self.y * fb_h))))
         pw = max(16, min(fb_w - px, int(round(self.w * fb_w))))
@@ -53,7 +53,7 @@ class Viewport:
 
 @dataclass
 class Camera3D:
-    """Caméra 3D (perspective ou orthographique, contrôle orbit/free-fly/fixe, viewport & post-process)."""
+    """3D camera (perspective or orthographic, orbit / free-fly / fixed control, viewport & post-processing)."""
 
     name: str = "main"
     pos: np.ndarray = field(default_factory=lambda: np.array([0.0, 3.4, 8.8], dtype=np.float32))
@@ -65,19 +65,19 @@ class Camera3D:
     ortho: bool = False
     ortho_size: float = 8.0
 
-    # Contrôleur intégré
+    # Built-in controller
     mode: str = "orbit"  # "orbit" | "free" | "fixed"
     yaw: float = 0.35
     pitch: float = 0.30
     distance: float = 9.2
 
-    # Multi-caméras / affichage écran
+    # Multiple cameras / screen display
     viewport: Viewport = field(default_factory=Viewport)
     order: int = 0
     enabled: bool = True
     border_color: tuple[int, int, int] | None = None
 
-    # Options de rendu par caméra
+    # Rendering options per camera
     shadows: bool = True
     bloom: bool = True
     bloom_threshold: float = 0.95
@@ -91,7 +91,7 @@ class Camera3D:
     effects: list[Any] = field(default_factory=list)
 
     def add_effect(self, effect: Any, *, stage: str | None = None) -> Any:
-        """Ajoute un effet post-traitement (`PostEffect` ou `@gs.kernel` utilisateur) sur cette caméra."""
+        """Adds a post-processing effect (`PostEffect` or user `@gs.kernel`) to this camera."""
         if stage is not None and not hasattr(effect, "stage"):
             self.effects.append((stage, effect))
         else:
@@ -319,7 +319,7 @@ class Camera3D:
 
 @dataclass
 class Camera2D:
-    """Caméra 2D (pan, zoom, rotation, viewport) — prête pour la couche 2D dédiée (Jalon 2)."""
+    """2D camera (pan, zoom, rotation, viewport) — ready for the dedicated 2D layer (milestone 2)."""
 
     name: str = "cam2d"
     pos: tuple[float, float] = (0.0, 0.0)

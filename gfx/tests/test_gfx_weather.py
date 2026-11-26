@@ -1,4 +1,4 @@
-"""Météo de grande échelle : comparée à des solutions exactes (repos sur relief, équilibre, ondes, bilans)."""
+"""Large-scale weather: compared with exact solutions (rest over terrain, balance, waves, budgets)."""
 
 import numpy as np
 import pytest
@@ -17,7 +17,7 @@ def _hill(ny, nx, height, radius):
 
 @pytest.mark.parametrize("profile", ["reference", "tropopause"])
 def test_rest_over_a_mountain(profile):
-    """Air au repos sur une montagne de 2 500 m : le vent parasite reste sous 2 cm/s (référence) ou 20 cm/s."""
+    """Air at rest over a 2,500 m mountain: the spurious wind stays below 2 cm/s (reference) or 20 cm/s."""
     temp = (lambda y, p: wx.T_REF * (p / 1e5) ** wx.BETA + 0 * y) if profile == "reference" else (lambda y, p: wx.jet_temperature(0 * y, p))
     w = gfx.Weather(gfx.WeatherConfig(nx=48, ny=40, nz=24, dx=20e3, terrain=_hill(40, 48, 2500.0, 4.0), temperature=temp))
     m0 = w.surface_pressure().mean()
@@ -38,7 +38,7 @@ def test_balanced_jet_is_steady():
 
 
 def test_external_wave_speed():
-    """Mode externe d'une atmosphère isotherme de 280 K sous un toit à 50 hPa : 308,95 m/s (valeur propre exacte)."""
+    """External mode of a 280 K isothermal atmosphere under a lid at 50 hPa: 308.95 m/s (exact eigenvalue)."""
     t, n, dx = 280.0, 64, 20e3
     w = gfx.Weather(
         gfx.WeatherConfig(nx=n, ny=4, dx=dx, beta=False, latitude=0.01, temperature=lambda y, p: t + 0 * p * y, sponge_layers=0, divergence_damping=0.0)
@@ -61,13 +61,13 @@ def test_external_wave_speed():
 
 
 def test_isa_qnh():
-    """Atmosphère standard : le QNH d'un terrain à 1 000 m sous 898,75 hPa vaut 1013,25 hPa."""
+    """Standard atmosphere: the QNH of a field at 1,000 m under 898.75 hPa is 1013.25 hPa."""
     assert wx.sea_level_pressure_isa(89874.6, 1000.0) == pytest.approx(101325.0, abs=15.0)
     assert wx.sea_level_pressure_isa(100000.0, 0.0) == pytest.approx(100000.0)
 
 
 def _stormy(nz=48):
-    """Seize fois le même air instable (type Weisman & Klemp), prêt pour le noyau de convection."""
+    """Sixteen times the same unstable air (Weisman & Klemp type), ready for the convection kernel."""
     w = gfx.Weather(gfx.WeatherConfig(nx=16, ny=1, nz=nz))
     p = wx.P_TOP + w.sigma * 95000.0
     z = np.interp(-p, -1e5 * (1 - 0.0065 * np.linspace(0, 2e4, 500) / 288.15).clip(1e-3) ** 5.2559, np.linspace(0, 2e4, 500))
@@ -93,7 +93,7 @@ def _convect(w, th, q, lift=8.0, dt=120.0, mass=0.05, **kw):
 
 
 def test_convection_budgets_close():
-    """Eau et énergie statique humide de la colonne : conservées, à la pluie au sol près."""
+    """Water and moist static energy of the column: conserved, up to the rain on the ground."""
     w, p, _, th, q = _stormy()
     out = _convect(w, th, q)
     nz, dt = w.config.nz, 120.0
@@ -111,7 +111,7 @@ def test_convection_budgets_close():
 
 
 def test_organized_plume_matches_the_3d_storm():
-    """Orage 3D du même sondage (maille 500 m, sans glace) : sommet 14,6 km, air froid -6,8 K, w max 58 m/s."""
+    """3D storm from the same sounding (500 m mesh, no ice): top 14.6 km, cold air -6.8 K, max w 58 m/s."""
     w, _, _, th, q = _stormy()
     out = _convect(w, th, q, ice=0.0, mass=0.2)
     o = 4 * w.config.nz
@@ -121,7 +121,7 @@ def test_organized_plume_matches_the_3d_storm():
 
 
 def test_mass_flux_has_memory():
-    """Flux de masse : il naît, grandit tant que l'air est instable, puis s'éteint quand il ne l'est plus."""
+    """Mass flux: it is born, grows as long as the air is unstable, then dies out when it no longer is."""
     w, _, _, th, q = _stormy()
     o = 4 * w.config.nz
     small = _convect(w, th, q, mass=0.0)[o + kp.CNV_MASS, 0]
@@ -151,8 +151,8 @@ def _storm_sounding(q0, rh_factor):
 
 @pytest.mark.parametrize(("q0", "rh_factor", "flux", "rain_3d", "start"), [(0.014, 1.0, 1.0, 4.48, 3.25), (0.0125, 0.85, 1.2, 2.53, 4.25)])
 def test_stormy_day_rains_like_the_3d_simulation(q0, rh_factor, flux, rain_3d, start):
-    """Journée d'orages à flux imposés : pluie totale et heure du début, face à la simulation 3D (maille 250 m).
-    Le premier cas a servi au réglage, pas le second."""
+    """Thunderstorm day with imposed fluxes: total rain and start time, against the 3D simulation (250 m mesh).
+    The first case was used for calibration, not the second."""
     nz = 36
     w = gfx.Weather(gfx.WeatherConfig(nx=16, ny=8, nz=nz, dx=20e3, physics=True, land=np.ones((8, 16)), plume={"ice": 0.0}))
     p, theta, q = _storm_sounding(q0, rh_factor)
@@ -170,7 +170,7 @@ def test_stormy_day_rains_like_the_3d_simulation(q0, rh_factor, flux, rain_3d, s
             first = w.time / 3600.0
     assert w.rain.numpy().mean() == pytest.approx(rain_3d, rel=0.25)
     assert first == pytest.approx(start, abs=0.8)
-    assert w.convection_field(kp.CNV_MASS).max() < 0.4  # loin de la limite de sécurité
+    assert w.convection_field(kp.CNV_MASS).max() < 0.4  # far from the safety limit
 
 
 def test_dry_air_does_not_convect():
@@ -184,7 +184,7 @@ def test_dry_air_does_not_convect():
 def test_condensation_conserves_water_and_energy():
     w, p, _, th, q = _stormy()
     nz, dt = w.config.nz, 120.0
-    q = 1.6 * q  # sursaturé
+    q = 1.6 * q  # supersaturated
     pip = np.full((1, 16), 95000.0) - w.pi0_np
     cells = 3 * nz + 1
     out = column_kernel(kp._condensation_columns, cells)(w._up(th), w._up(q), w._up(0 * q), w._up(pip), w.pi0, w.lev, dt, w._columns(cells))
@@ -199,7 +199,7 @@ def test_condensation_conserves_water_and_energy():
 
 
 def test_day_heats_the_land_and_water_budget_closes():
-    """Une journée d'été sur terre : sol chaud l'après-midi, et variation de l'eau = évaporation - pluie."""
+    """A summer day over land: warm ground in the afternoon, and water change = evaporation - rain."""
     rh = lambda y, p: np.where(p > 2e4, np.clip(0.7 - 0.5 * (1e5 - p) / 8e4, 0.15, 0.7), 0.02)
     w = gfx.Weather(
         gfx.WeatherConfig(
@@ -221,7 +221,7 @@ def test_day_heats_the_land_and_water_budget_closes():
 
 
 def test_cold_pool_spreads_at_the_gravity_current_speed():
-    """Masse et flottabilité de la couche froide : le front avance, la masse ne fait que se diluer (3 h)."""
+    """Mass and buoyancy of the cold layer: the front advances, the mass only dilutes (3 h)."""
     n = 96
     h = np.zeros((n, n))
     j, i = np.mgrid[:n, :n]
@@ -247,7 +247,7 @@ def test_sounding_feeds_the_3d_simulation():
     w = gfx.Weather(gfx.WeatherConfig(nx=32, ny=64, nz=30, dx=40e3, physics=True, relative_humidity=rh))
     w.run(1800.0)
     s = w.sounding(5e5, 2e5)
-    # Hydrostatique : l'épaisseur entre deux niveaux suit la température virtuelle
+    # Hydrostatics: the thickness between two levels follows the virtual temperature
     tv = s["t"] * (1 + 0.608 * s["qv"])
     dz = wx.RD / wx.GRAVITY * 0.5 * (tv[1:] + tv[:-1]) * np.log(s["p"][:-1] / s["p"][1:])
     assert np.abs(np.diff(s["z"]) / dz - 1.0).max() < 0.02
@@ -265,7 +265,7 @@ def test_map_and_stability():
     assert land.min() == 0.0 and land.max() == 1.0 and terrain.max() > 500.0 and (terrain[land < 0.5] == 0.0).all()
     rh = lambda y, p: np.where(p > 2e4, 0.6, 0.02)
     w = gfx.Weather(gfx.WeatherConfig(nx=64, ny=48, nz=30, dx=40e3, terrain=terrain, land=land, wetness=wet, physics=True, perturbation=1.0, relative_humidity=rh))
-    with pytest.raises(RuntimeError, match="physique"):
+    with pytest.raises(RuntimeError, match="physics"):
         w.map(64, 48)
     w.run(6 * 3600.0)
     for mode in (0, 1):
@@ -281,19 +281,19 @@ def test_bad_config_is_refused():
         gfx.Weather(gfx.WeatherConfig(nx=50))
     with pytest.raises(ValueError, match="nz"):
         gfx.Weather(gfx.WeatherConfig(nx=16, nz=100))
-    with pytest.raises(ValueError, match="inconnu"):
+    with pytest.raises(ValueError, match="unknown"):
         wx.plume_table(bidule=1.0)
 
 
 def test_parcel_ascent_on_the_storm_sounding():
-    """Sondage de Weisman & Klemp : niveau de condensation exact, pseudo-adiabatique à énergie presque constante, et CAPE
-    recalculée par une intégration indépendante au pas de 5 m."""
+    """Weisman & Klemp sounding: exact condensation level, pseudo-adiabat at nearly constant energy, and CAPE
+    recomputed by an independent integration with a 5 m step."""
     p, theta, q = _storm_sounding(0.014, 1.0)
     t = theta * (p / 1e5) ** wx.KAPPA
     out = wx.parcel_ascent(p[:900], t[:900], q[:900])
     p_lcl = lifting_condensation_pressure(t[0], q[0], p[0])
     assert out["lcl"] == pytest.approx(np.interp(-p_lcl, -p, _HEIGHT), abs=15.0)
-    # Intégration indépendante en altitude (pas de 5 m, particule qui suit dT/dz)
+    # Independent integration in altitude (5 m step, parcel following dT/dz)
     z = np.arange(0.0, 17e3, 5.0)
     pe, te, re = (np.interp(z, _HEIGHT, f) for f in (p, t, q / (1 - q)))
     tve = te * (1 + re / 0.62197) / (1 + re)
@@ -320,7 +320,7 @@ def test_parcel_ascent_on_the_storm_sounding():
 
 
 def test_parcel_ascent_limits():
-    """Air stable : aucune CAPE. Air réchauffé en surface : CAPE plus forte, CIN plus faible. Source inconnue refusée."""
+    """Stable air: no CAPE. Air warmed at the surface: stronger CAPE, weaker CIN. Unknown source rejected."""
     p, theta, q = _storm_sounding(0.014, 1.0)
     t = theta * (p / 1e5) ** wx.KAPPA
     dry = wx.parcel_ascent(p[:900], t[:900], 0.1 * q[:900])
@@ -330,5 +330,5 @@ def test_parcel_ascent_limits():
     warm[:3] += 2.0
     hot = wx.parcel_ascent(p[:900], warm[:900], q[:900])
     assert hot["cape"] > base["cape"] + 200.0 and hot["cin"] > base["cin"]
-    with pytest.raises(ValueError, match="inconnue"):
-        wx.parcel_ascent(p[:900], t[:900], q[:900], source="bidule")
+    with pytest.raises(ValueError, match="unknown"):
+        wx.parcel_ascent(p[:900], t[:900], q[:900], source="bogus")

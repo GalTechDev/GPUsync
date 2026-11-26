@@ -1,4 +1,4 @@
-//! Liaison PyO3 de la fenêtre native GPU (`_core._Window` → `gs.Window`).
+//! PyO3 binding of the native GPU window (`_core._Window` → `gs.Window`).
 
 use gpusync_core::{Window, WindowEvent};
 use pyo3::prelude::*;
@@ -6,7 +6,7 @@ use pyo3::types::{PyDict, PyList, PySet};
 
 use crate::kernel::{DeviceArrayPy, to_py};
 
-/// Fenêtre native winit + wgpu (non `Send` : doit être utilisée depuis le thread principal).
+/// Native winit + wgpu window (not `Send`: must be used from the main thread).
 #[pyclass(name = "_Window", module = "gpusync._core", unsendable)]
 pub struct PyWindow {
     inner: Window,
@@ -141,14 +141,14 @@ impl PyWindow {
         Ok(list)
     }
 
-    /// Affiche un `DeviceArray` (zéro copie CPU s'il est déjà sur le même périphérique wgpu).
+    /// Shows a `DeviceArray` (no CPU copy if it is already on the same wgpu device).
     fn present_array(&mut self, arr: &DeviceArrayPy, width: u32, height: u32) -> PyResult<bool> {
         self.inner
             .present_array(&arr.array, width, height)
             .map_err(to_py)
     }
 
-    /// Affiche des octets hôte `(ptr, nbytes)` (RGBA8 / u32 empaqueté).
+    /// Shows host bytes `(ptr, nbytes)` (RGBA8 / packed u32).
     fn present_host(&mut self, ptr: usize, nbytes: usize, width: u32, height: u32) -> PyResult<()> {
         let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, nbytes) };
         self.inner

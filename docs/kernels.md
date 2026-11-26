@@ -1,21 +1,20 @@
-# Écrire un kernel
+# Writing a kernel
 
-Un kernel est une fonction Python décorée par `@gs.kernel`. On n'y écrit pas de boucle sur les données : on
-écrit le calcul **d'une case du résultat**, et le GPU l'exécute pour toutes les cases à la fois, chacune sur
-son propre fil d'exécution (thread).
+A kernel is a Python function decorated with `@gs.kernel`. You do not write a loop over the data: you write how
+**one cell of the result** is computed, and the GPU runs it for every cell at once, each on its own thread.
 
-Il y a trois formes de kernel :
+There are three kinds of kernel:
 
-| Forme | On écrit | Pour |
+| Kind | You write | For |
 |---|---|---|
-| élément par élément | une formule sur des tableaux de même forme | transformations point à point |
-| avec index (`gs.index()`) | le calcul de la case `(i, j…)` de la sortie, en lisant où l'on veut dans les entrées | distances, convolutions, réductions par ligne, tout le reste |
-| explicite (`grid=`) | ce que fait un thread par **entrée**, avec des écritures atomiques | histogrammes, dispersion : voir [Mode explicite](atomiques.md) |
+| element-wise | a formula over arrays of the same shape | point-wise transformations |
+| indexed (`gs.index()`) | how cell `(i, j…)` of the output is computed, reading anywhere in the inputs | distances, convolutions, per-row reductions, everything else |
+| explicit (`grid=`) | what one thread per **input** does, with atomic writes | histograms, scattering: see [Explicit mode](atomics.md) |
 
-Un kernel doit être défini dans un fichier `.py` ou une cellule de notebook : GPUsync relit son code source à la
-décoration. Défini dans `python -c` ou dans la console interactive, il est refusé avec un message qui le dit.
+A kernel must be defined in a `.py` file or a notebook cell: GPUsync reads its source code when it is decorated.
+Defined in `python -c` or in the interactive console, it is rejected with a message that says so.
 
-## Élément par élément
+## Element-wise
 
 ```python
 import numpy as np
@@ -31,13 +30,13 @@ c = blend(a, b, 0.25)
 assert c.shape == (480, 640) and np.allclose(c, 0.25)
 ```
 
-- `gs.f32[:]` accepte un tableau de **n'importe quelle forme** ; tous les tableaux d'un même appel doivent avoir
-  la même forme, qui est celle de la sortie. Il n'y a pas de diffusion (*broadcasting*) à la NumPy : une valeur
-  commune à toutes les cases se passe en scalaire (`t: gs.f32`).
-- Le type de retour est obligatoire (`-> gs.f32[:]`).
-- Dans le corps, un tableau désigne **sa valeur dans la case courante** : `a * (1.0 - t)` multiplie deux nombres.
+- `gs.f32[:]` accepts an array of **any shape**; all arrays of a call must have the same shape, which is the shape
+  of the output. There is no NumPy-style broadcasting: a value shared by every cell is passed as a scalar
+  (`t: gs.f32`).
+- The return type is required (`-> gs.f32[:]`).
+- In the body, an array stands for **its value in the current cell**: `a * (1.0 - t)` multiplies two numbers.
 
-On peut y mettre des variables, des conditions et des boucles :
+You can use variables, conditions and loops:
 
 ```python
 @gs.kernel
@@ -53,15 +52,15 @@ r = clamp_or_log(np.array([0.5, 2.0, 50.0], np.float32), 10.0)
 assert np.allclose(r[2], 10.0)
 ```
 
-## Avec index
+## Indexed
 
-`gs.index()` donne les coordonnées de la case de sortie calculée. Les dimensions des tableaux portent des noms ;
-la forme de la sortie est écrite avec ces noms, et GPUsync en déduit sa taille :
+`gs.index()` gives the coordinates of the output cell being computed. Array dimensions have names; the output
+shape is written with these names, and GPUsync works out its size:
 
 ```python
 @gs.kernel
 def pairwise_dist(x: gs.f32["n", "d"]) -> gs.f32["n", "n"]:
-    i, j = gs.index()                      # la case (i, j) de la sortie
+    i, j = gs.index()                      # cell (i, j) of the output
     acc = 0.0
     for k in range(x.shape[1]):
         diff = x[i, k] - x[j, k]
@@ -74,19 +73,19 @@ ref = np.sqrt(((pts[:, None] - pts[None]) ** 2).sum(-1))
 assert np.allclose(dist, ref, atol=1e-5)
 ```
 
-Règles des dimensions :
+Dimension rules:
 
-| Écriture | Signification |
+| Written | Meaning |
 |---|---|
-| `gs.f32["n", "t"]` | deux dimensions nommées ; un même nom impose la même taille partout où il apparaît |
-| `gs.f32[:, :]` | deux dimensions sans nom, de taille libre, lisible par `x.shape[k]` |
-| `gs.f32["n", 3]` | taille fixe : l'appel est refusé si l'axe n'a pas 3 éléments |
-| `-> gs.f32["n"]` | la sortie : uniquement des noms d'entrée ou des tailles entières |
+| `gs.f32["n", "t"]` | two named dimensions; a name means the same size everywhere it appears |
+| `gs.f32[:, :]` | two unnamed dimensions, any size, readable through `x.shape[k]` |
+| `gs.f32["n", 3]` | fixed size: the call is rejected if the axis does not have 3 elements |
+| `-> gs.f32["n"]` | the output: only input dimension names or integer sizes |
 
-Une incohérence (`'a' → 3, 'b' → 4` pour une même dimension `n`) lève `gs.ShapeMismatch` avant tout calcul.
+A mismatch (`'a' → 3, 'b' → 4` for the same dimension `n`) raises `gs.ShapeMismatch` before anything runs.
 
-Dans le corps, on indexe avec des entiers (`x[i, k]`), on lit `x.shape[k]` et `len(x)` (la première dimension).
-Pas de tranches (`x[i, :]`) : on écrit la boucle.
+In the body you index with integers (`x[i, k]`), and read `x.shape[k]` and `len(x)` (the first dimension). No
+slices (`x[i, :]`): write the loop.
 
 ```python
 @gs.kernel
@@ -101,9 +100,9 @@ m = np.arange(12, dtype=np.float32).reshape(3, 4)
 assert np.allclose(row_mean(m), m.mean(axis=1))
 ```
 
-### Plusieurs sorties
+### Several outputs
 
-Un tuple de types en retour, un tuple de valeurs dans le `return` ; l'appel rend un tuple de résultats :
+A tuple of types as the return type, a tuple of values in `return`; the call returns a tuple of results:
 
 ```python
 @gs.kernel
@@ -125,11 +124,11 @@ mean, std = stats(series)
 assert np.allclose(std, series.std(axis=1), atol=1e-5)
 ```
 
-Toutes les sorties ont la même forme.
+All outputs have the same shape.
 
-### Tableaux locaux
+### Local arrays
 
-`gs.local(type, taille)` crée un tableau propre à chaque case, mis à zéro, de taille constante :
+`gs.local(type, size)` creates an array private to each cell, zero-filled, of constant size:
 
 ```python
 @gs.kernel
@@ -143,47 +142,45 @@ def histogram_per_row(x: gs.f32["n", "t"]) -> gs.i32["n"]:
     for b in range(10):
         if bins[b] > bins[best]:
             best = b
-    return best                            # la classe la plus peuplée de la ligne
+    return best                            # the most populated bin of the row
 
 data = np.random.rand(4, 1000).astype(np.float32)
 assert histogram_per_row(data).shape == (4,)
 ```
 
-Un tableau local vit dans la mémoire privée du thread : quelques dizaines à quelques centaines d'éléments au
-plus, au-delà il devient lent.
+A local array lives in the thread's private memory: a few tens to a few hundred elements at most; beyond that it
+gets slow.
 
 ## Types
 
-| Type | NumPy | Remarques |
+| Type | NumPy | Notes |
 |---|---|---|
-| `gs.f32` | `float32` | le type de calcul normal sur GPU |
-| `gs.f64` | `float64` | absent de Metal et de nombreux GPU grand public : voir [Périphériques](peripheriques.md) |
+| `gs.f32` | `float32` | the usual GPU compute type |
+| `gs.f64` | `float64` | missing on Metal and on many consumer GPUs: see [Devices](devices.md) |
 | `gs.i32`, `gs.u32` | `int32`, `uint32` | |
-| `gs.i64`, `gs.u64` | `int64`, `uint64` | division et reste 64 bits lents sur Metal (préférer OpenCL sur Mac pour ces calculs) |
+| `gs.i64`, `gs.u64` | `int64`, `uint64` | 64-bit division and remainder are slow on Metal (prefer OpenCL on a Mac for these) |
 
-Les tableaux passés doivent avoir **exactement** le type déclaré. Un tableau `float64` passé à un paramètre
-`gs.f32[:]` est refusé (`gs.TypeMismatch`, avec la correction à faire) ; `@gs.kernel(cast="auto")` autorise la
-conversion, qui coûte une copie.
+Arrays must have **exactly** the declared type. A `float64` array passed to a `gs.f32[:]` parameter is rejected
+(`gs.TypeMismatch`, with the fix to apply); `@gs.kernel(cast="auto")` allows the conversion, which costs a copy.
 
 ```python
 @gs.kernel(cast="auto")
 def twice(x: gs.f32[:]) -> gs.f32[:]:
     return x * 2.0
 
-assert twice(np.arange(3)).dtype == np.float32      # entiers 64 bits convertis en float32
+assert twice(np.arange(3)).dtype == np.float32      # 64-bit integers converted to float32
 ```
 
-Dans un kernel :
+Inside a kernel:
 
-- **les littéraux prennent le type du contexte** : `0.0` dans un calcul en f32 est un f32 (il ne force jamais du
-  f64) ;
-- les mélanges suivent `entier op flottant → flottant`, jamais vers f64 sans le demander ; entre entiers,
-  l'élargissement sans perte est implicite (i32 → i64, u32 → i64, u32 → u64), le reste se convertit à la main ;
-- conversions : `float(v)`, `int(v)` (troncature vers zéro, comme Python), `gs.f32(v)`, `gs.i32(v)`, `gs.u32(v)`,
-  `gs.i64(v)`… ;
-- `//` et `%` se comportent comme en Python, y compris sur les négatifs (`-7 // 3 == -3`, `-7 % 3 == 2`) ;
-- les variables sont typées à leur première affectation ; donner à un même nom des valeurs de types différents
-  (un compteur entier puis un flottant) est refusé ou source d'erreur : prenez deux noms.
+- **literals take the type of their context**: `0.0` in an f32 computation is an f32 (it never forces f64);
+- mixed operations follow `integer op float → float`, never to f64 unless asked; between integers, lossless
+  widening is implicit (i32 → i64, u32 → i64, u32 → u64), the rest is converted by hand;
+- conversions: `float(v)`, `int(v)` (truncation toward zero, as in Python), `gs.f32(v)`, `gs.i32(v)`, `gs.u32(v)`,
+  `gs.i64(v)`…;
+- `//` and `%` behave as in Python, negatives included (`-7 // 3 == -3`, `-7 % 3 == 2`);
+- variables are typed at their first assignment; giving one name values of different types (an integer counter,
+  then a float) is rejected or causes errors: use two names.
 
 ```python
 @gs.kernel
@@ -193,35 +190,35 @@ def divmod_like_python(x: gs.i32[:]) -> gs.i32[:]:
 assert list(divmod_like_python(np.array([-7, 7], np.int32))) == [-298, 201]
 ```
 
-## Ce qu'on peut écrire dans un kernel
+## What you can write in a kernel
 
-| Permis | Refusé |
+| Allowed | Rejected |
 |---|---|
-| arithmétique, comparaisons, `and` / `or` / `not` | listes, tuples (hors `gs.index()` et `return`), dictionnaires, chaînes |
-| bit à bit `&` `\|` `^` `~` `<<` `>>` sur les entiers ; `&` `\|` `^` sur les booléens | appels de fonctions Python (y compris les vôtres) |
-| `a if c else b`, `if` / `elif` / `else` | récursion, `lambda`, générateurs |
+| arithmetic, comparisons, `and` / `or` / `not` | lists, tuples (except `gs.index()` and `return`), dicts, strings |
+| bitwise `&` `\|` `^` `~` `<<` `>>` on integers; `&` `\|` `^` on booleans | calls to Python functions (including your own) |
+| `a if c else b`, `if` / `elif` / `else` | recursion, `lambda`, generators |
 | `for k in range(...)`, `while`, `break`, `continue` | `try`, `with` |
-| variables locales scalaires, `gs.local` | tranches `x[a:b]`, allocation de taille variable |
-| constantes globales numériques du module | objets, attributs autres que `x.shape` |
-| fonctions `gs.*` et `math.*` listées ci-dessous | |
+| scalar local variables, `gs.local` | slices `x[a:b]`, variable-size allocation |
+| numeric global constants of the module | objects, attributes other than `x.shape` |
+| the `gs.*` and `math.*` functions listed below | |
 
-Une construction refusée lève `gs.KernelSyntaxError` à la décoration, avec le fichier, la ligne et la cause.
+A rejected construct raises `gs.KernelSyntaxError` at decoration time, with the file, the line and the reason.
 
-Fonctions mathématiques (`gs.nom` ou `math.nom`) :
+Math functions (`gs.name` or `math.name`):
 
 | | |
 |---|---|
-| racines, exponentielles | `sqrt`, `exp`, `exp2`, `log`, `log2`, `pow` |
-| trigonométrie | `sin`, `cos`, `tan`, `tanh`, `atan2` |
-| arrondis | `floor`, `ceil`, `abs` |
-| extremums | `gs.min(a, b, …)`, `gs.max(a, b, …)` (2 valeurs ou plus) |
-| entiers | `gs.mulhi(a, b)` : partie haute du produit complet (ex. `(a * b) >> 32` sans débordement, pour des u32) |
-| constantes | `gs.pi`, `gs.e`, `gs.tau`, `gs.inf`, `gs.nan` (et `math.pi`…) |
+| roots, exponentials | `sqrt`, `exp`, `exp2`, `log`, `log2`, `pow` |
+| trigonometry | `sin`, `cos`, `tan`, `tanh`, `atan2` |
+| rounding | `floor`, `ceil`, `abs` |
+| extremes | `gs.min(a, b, …)`, `gs.max(a, b, …)` (2 values or more) |
+| integers | `gs.mulhi(a, b)`: high half of the full product (e.g. `(a * b) >> 32` without overflow, for u32) |
+| constants | `gs.pi`, `gs.e`, `gs.tau`, `gs.inf`, `gs.nan` (and `math.pi`…) |
 
 ```python
 import math
 
-GAIN = 3.0                                  # constante globale : lue à la décoration
+GAIN = 3.0                                  # global constant: read at decoration time
 
 @gs.kernel
 def gained(x: gs.f32[:]) -> gs.f32[:]:
@@ -230,26 +227,26 @@ def gained(x: gs.f32[:]) -> gs.f32[:]:
 assert np.allclose(gained(np.array([4.0], np.float32)), 10.0)
 ```
 
-Une constante globale est figée quand le kernel est décoré : la modifier ensuite ne change pas le kernel.
+A global constant is frozen when the kernel is decorated: changing it afterwards does not change the kernel.
 
-## La fonction Python reste utilisable
+## The Python function stays usable
 
-`gs.sqrt`, `gs.exp`… sont, hors kernel, les fonctions NumPy correspondantes, et `kernel.py_func` est la fonction
-d'origine : un kernel élément par élément écrit avec les fonctions `gs.*` s'exécute aussi en NumPy pur,
-pratique pour comparer.
+Outside a kernel, `gs.sqrt`, `gs.exp`… are the matching NumPy functions, and `kernel.py_func` is the original
+function: an element-wise kernel written with `gs.*` functions also runs in plain NumPy, which is handy to
+compare.
 
 ```python
 assert np.allclose(blend.py_func(a, b, 0.25), blend(a, b, 0.25))
 ```
 
-Ce n'est pas vrai avec `math.*` (qui n'accepte pas de tableaux), ni des kernels avec index : `gs.index()` n'a
-pas de sens hors du GPU.
+This does not hold with `math.*` (which does not accept arrays), nor for indexed kernels: `gs.index()` has no
+meaning outside the GPU.
 
 ## Compilation
 
-Un kernel est traduit une fois à la décoration (vérification des types, représentation interne), puis compilé
-pour un périphérique au premier appel qui l'y exécute. Les appels suivants réutilisent le code compilé.
-`kernel.source(cible)` montre le code généré (`"cuda"`, `"opencl"`, `"wgsl"` ou `"ir"`) :
+A kernel is translated once when it is decorated (type checking, internal representation), then compiled for a
+device on the first call that runs it there. Later calls reuse the compiled code. `kernel.source(target)` shows
+the generated code (`"cuda"`, `"opencl"`, `"wgsl"` or `"ir"`):
 
 ```python
 print(blend.source("opencl"))

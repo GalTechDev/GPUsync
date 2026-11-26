@@ -1,6 +1,6 @@
-//! IR → OpenCL C, base 1.2 (`cl_khr_fp64` activée seulement si le kernel utilise f64), et IR → CUDA C
-//! (même dialecte C à quelques différences près : signature, indice du thread, fonctions f32
-//! suffixées, atomiques natifs).
+//! IR → OpenCL C, base 1.2 (`cl_khr_fp64` enabled only if the kernel uses f64), and IR → CUDA C
+//! (the same C dialect with a few differences: signature, thread index, suffixed f32
+//! functions, native atomics).
 
 use gpusync_ir::*;
 
@@ -13,7 +13,7 @@ fn c_type(t: Scalar) -> &'static str {
         Scalar::U32 => "uint",
         Scalar::F32 => "float",
         Scalar::F64 => "double",
-        // Alias définis en tête du code : `long` / `ulong` en OpenCL, `long long` en CUDA.
+        // Aliases defined at the top of the code: `long` / `ulong` in OpenCL, `long long` in CUDA.
         Scalar::I64 => "gs_i64",
         Scalar::U64 => "gs_u64",
     }
@@ -44,7 +44,7 @@ fn lit(c: Const) -> String {
     }
 }
 
-/// Garantit un littéral flottant (« 3 » → « 3.0 »).
+/// Guarantees a float literal ("3" → "3.0").
 pub(crate) fn float_repr(s: String) -> String {
     if s.contains(['.', 'e', 'E']) {
         s
@@ -57,16 +57,16 @@ struct Gen<'a> {
     k: &'a Kernel,
     out: Out,
     tmp: usize,
-    /// CUDA C (NVRTC) plutôt qu'OpenCL C.
+    /// CUDA C (NVRTC) rather than OpenCL C.
     cuda: bool,
-    /// Indices de tableaux calculés en 64 bits (un tableau dépasse 2³¹ − 1 éléments).
+    /// Array indices computed in 64 bits (an array exceeds 2³¹ − 1 elements).
     wide: bool,
-    /// Paramètres remplacés par une constante (spécialisation).
+    /// Parameters replaced by a constant (specialization).
     spec: Vec<(usize, i64)>,
 }
 
 impl Gen<'_> {
-    /// Indice d'écriture des sorties : décalé de `obase` pour un kernel avec index lancé par blocs.
+    /// Write index of the outputs: offset by `obase` for an indexed kernel launched in blocks.
     fn out_index(&self) -> String {
         match &self.k.grid {
             Grid::Indexed { obase, .. } => format!("gs_i + {}", param_name(self.k, *obase)),
@@ -74,8 +74,8 @@ impl Gen<'_> {
         }
     }
 
-    /// Nom d'une fonction mathématique : en CUDA, la version f32 est suffixée (`sqrtf`), ce qui
-    /// évite toute ambiguïté de surcharge et tout passage implicite en f64.
+    /// Name of a math function: in CUDA the f32 version is suffixed (`sqrtf`), which
+    /// avoids any overload ambiguity and any implicit switch to f64.
     fn math(&self, base: &str, ty: Scalar) -> String {
         if self.cuda && ty == Scalar::F32 {
             format!("{base}f")
@@ -84,8 +84,8 @@ impl Gen<'_> {
         }
     }
 
-    /// Indice aplati d'un tableau. Variante large : additions, soustractions et produits en 64 bits
-    /// (`long` en OpenCL, `long long` en CUDA, où `long` fait 32 bits sous Windows).
+    /// Flattened index of an array. Wide variant: additions, subtractions and products in 64 bits
+    /// (`long` in OpenCL, `long long` in CUDA, where `long` is 32 bits on Windows).
     fn index(&self, e: &Expr) -> String {
         if !self.wide {
             return self.expr(e);
@@ -117,7 +117,7 @@ impl Gen<'_> {
                 let (x, y) = (self.expr(a), self.expr(b));
                 let name = if *op == BinOp::Shl { "shl" } else { "shr" };
                 match crate::const_shift(b) {
-                    // Décalage à gauche d'un signé : en non signé (débordement indéfini en C).
+                    // Left shift of a signed value: done unsigned (overflow is undefined in C).
                     Some(c) if *op == BinOp::Shl && matches!(a.ty, Scalar::I32 | Scalar::I64) => {
                         format!(
                             "(({})(({}){x} << {c}))",
@@ -170,7 +170,7 @@ impl Gen<'_> {
                     Intrinsic::Abs if args[0].ty == Scalar::I64 => {
                         format!("(({0}) < 0 ? -({0}) : ({0}))", a[0])
                     }
-                    // min / max 64 bits : expression ternaire (surcharges variables selon le dialecte).
+                    // 64-bit min / max: ternary expression (overloads vary with the dialect).
                     Intrinsic::Min if args[0].ty.is_int64() => {
                         format!("(({0}) < ({1}) ? ({0}) : ({1}))", a[0], a[1])
                     }
@@ -202,9 +202,9 @@ impl Gen<'_> {
         }
     }
 
-    /// `gs.matmul_u8` : boucle portable (un thread par case de c, produits d'octets) ; en CUDA, sur
-    /// Ampere et suivants (`__CUDA_ARCH__ >= 800`), tuiles 16 × 8 × 32 par les Tensor Cores
-    /// (`mma.sync … u8.u8.s32`, une tuile par warp à la fois).
+    /// `gs.matmul_u8`: portable loop (one thread per cell of c, byte products); in CUDA, on
+    /// Ampere and later (`__CUDA_ARCH__ >= 800`), 16 × 8 × 32 tiles through the Tensor Cores
+    /// (`mma.sync … u8.u8.s32`, one tile per warp at a time).
     #[allow(clippy::too_many_arguments)]
     fn matmul(&mut self, c: usize, a: usize, b: usize, m: u32, n: u32, k: u32) {
         let (cn, an, bn) = (
@@ -334,8 +334,8 @@ impl Gen<'_> {
                 self.out.line(format!("const {t} gs_start{n} = {s0};"));
                 self.out.line(format!("const {t} gs_stop{n} = {e0};"));
                 self.out.line(format!("const {t} gs_step{n} = {t0};"));
-                // Compteur caché (comme en Python) : la variable reçoit sa valeur à chaque tour et
-                // garde la dernière après la boucle.
+                // Hidden counter (as in Python): the variable gets its value on each iteration and
+                // keeps the last one after the loop.
                 let it = format!("gs_it{n}");
                 let cond = if start.ty == Scalar::U32 {
                     format!("gs_step{n} > 0u && {it} < gs_stop{n}")
@@ -414,7 +414,7 @@ impl Gen<'_> {
                 self.out.line(format!("if ({ok}) {{"));
                 let cu = ["atomicAdd", "atomicMin", "atomicMax"][*op as usize];
                 let call = match ty {
-                    // CUDA : addition flottante atomique native ; min et max émulés.
+                    // CUDA: native atomic float addition; min and max emulated.
                     Scalar::F32 if self.cuda && *op == AtomicOp::Add => {
                         format!("atomicAdd(&{p}[gs_ai], {v});")
                     }
@@ -504,8 +504,8 @@ fn unsigned(t: Scalar) -> Scalar {
     }
 }
 
-/// Décalage dont le compte n'est pas une constante : lu comme non signé, ≥ largeur → 0 (ou −1 pour
-/// `>>` d'un négatif), comme en Python.
+/// Shift whose count is not a constant: read as unsigned, ≥ width → 0 (or −1 for
+/// `>>` of a negative value), as in Python.
 fn c_shift_helper(op: u8, t: Scalar) -> String {
     let (ty, u) = (c_type(t), c_type(unsigned(t)));
     let w = if t.is_int64() { 64 } else { 32 };
@@ -568,19 +568,19 @@ const HELPERS: &[(Helper, &str)] = &[
     ),
 ];
 
-/// Génère le kernel OpenCL C. Point d'entrée : `gs_<nom>`.
+/// Generates the OpenCL C kernel. Entry point: `gs_<name>`.
 pub fn emit_opencl(k: &Kernel) -> Result<KernelSource, CodegenError> {
     emit_c(k, false, false, &[])
 }
 
-/// Génère le kernel CUDA C (compilé par NVRTC). Point d'entrée : `gs_<nom>` (`extern "C"`).
+/// Generates the CUDA C kernel (compiled by NVRTC). Entry point: `gs_<name>` (`extern "C"`).
 pub fn emit_cuda(k: &Kernel) -> Result<KernelSource, CodegenError> {
     emit_c(k, true, false, &[])
 }
 
-/// Variante (OpenCL C ou CUDA C) : indices 64 bits si `wide` (un tableau dépasse 2³¹ − 1 éléments ;
-/// plus lente), et paramètres de `spec` remplacés par des constantes (tailles connues à l'appel : le
-/// compilateur peut dérouler les boucles et garder les tableaux locaux en registres).
+/// Variant (OpenCL C or CUDA C): 64-bit indices if `wide` (an array exceeds 2³¹ − 1 elements;
+/// slower), and parameters of `spec` replaced by constants (sizes known at call time: the
+/// compiler can unroll loops and keep local arrays in registers).
 pub fn emit_c_variant(
     k: &Kernel,
     cuda: bool,
@@ -609,12 +609,12 @@ fn emit_c(
         spec: spec.to_vec(),
     };
     g.out.line(format!(
-        "// GPUsync — kernel « {} » ({}, généré)",
+        "// GPUsync — kernel \"{}\" ({}, generated)",
         k.name,
         if cuda { "CUDA C" } else { "OpenCL C" }
     ));
     if cuda {
-        // NVRTC sans en-têtes : types et constantes du dialecte OpenCL utilisés par l'émetteur.
+        // NVRTC without headers: types and constants of the OpenCL dialect used by the emitter.
         g.out.line("typedef unsigned int uint;");
         g.out.line("typedef long long gs_i64;");
         g.out.line("typedef unsigned long long gs_u64;");
@@ -655,8 +655,8 @@ fn emit_c(
             });
         }
     }
-    // Atomiques flottants : absents d'OpenCL 1.2 (et min / max en CUDA), émulés par une boucle
-    // de comparaison-échange.
+    // Float atomics: missing from OpenCL 1.2 (and min / max in CUDA), emulated with a
+    // compare-and-swap loop.
     for (op, ty) in crate::atomics(k) {
         if ty == Scalar::F32 && cuda && op == AtomicOp::Add as u8 {
             continue;
@@ -708,7 +708,7 @@ fn emit_c(
         args.push(format!("{gq}{}* {restrict} gs_out{o}", c_type(*t)));
     }
     args.push("const uint gs_n".into());
-    // Groupe (`group=`) : taille imposée au lancement, connue du compilateur.
+    // Group (`group=`): size fixed at launch, known to the compiler.
     let head = match (cuda, k.group) {
         (true, Some(g)) => format!("extern \"C\" __global__ void __launch_bounds__({g})"),
         (true, None) => "extern \"C\" __global__ void".into(),
@@ -727,7 +727,7 @@ fn emit_c(
     };
     match (k.group, k.cells) {
         (Some(gsz), c) if c > 1 => {
-            // cells= : première case du thread dans la tuile de son groupe (gsz·c cases).
+            // cells=: first cell of the thread in its group's tile (gsz·c cells).
             g.out.line(format!("const uint gs_t = {thread};"));
             g.out.line(format!(
                 "const uint gs_i = (gs_t / {gsz}u) * {}u + (gs_t % {gsz}u);",
@@ -739,8 +739,8 @@ fn emit_c(
     if k.group.is_none() {
         g.out.line("if (gs_i >= gs_n) return;");
     } else {
-        // Groupes complets (n multiple de la taille de groupe, vérifié au lancement) : pas de garde,
-        // tous les threads atteignent les barrières.
+        // Full groups (n a multiple of the group size, checked at launch): no guard,
+        // every thread reaches the barriers.
         g.out.line(if cuda {
             "const int gs_lane = (int)threadIdx.x;"
         } else {
@@ -748,8 +748,8 @@ fn emit_c(
         });
     }
     if let Grid::Indexed { axes, row0, .. } = &k.grid {
-        // Coordonnées du thread dans la grille (forme de la sortie, ordre C) ; le lancement
-        // couvre un bloc de lignes commençant à la ligne row0.
+        // Coordinates of the thread in the grid (output shape, C order); the launch
+        // covers a block of rows starting at row row0.
         g.out.line("uint gs_r = gs_i;");
         for (a, p) in axes.iter().enumerate().skip(1).rev() {
             let size = param_name(k, *p);
@@ -765,7 +765,7 @@ fn emit_c(
     let mut shared = false;
     for (i, l) in k.locals.iter().enumerate() {
         match l.len {
-            // Mémoire partagée : sans initialiseur en C ; mise à zéro par le groupe (comme gs.local).
+            // Shared memory: no initializer in C; zero-filled by the group (like gs.local).
             Some(n) if l.shared => {
                 let q = if cuda { "__shared__" } else { "__local" };
                 let name = local_name(k, i);
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(src.entry, "gs_normalize");
         let c = &src.code;
         assert!(c.contains("__global const float* restrict p0_x"), "{c}");
-        assert!(c.contains("const int p2__cart"), "{c}"); // « écart » assaini en ASCII
+        assert!(c.contains("const int p2__cart"), "{c}"); // "écart" sanitized to ASCII
         assert!(c.contains("gs_mod_f32(p0_x[gs_i], 3.0f)"), "{c}");
         assert!(c.contains("pow(p0_x[gs_i], 2.0f)"), "{c}");
         assert!(c.contains("gs_out0[gs_i] ="), "{c}");

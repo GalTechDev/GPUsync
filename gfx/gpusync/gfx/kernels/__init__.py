@@ -1,4 +1,4 @@
-"""Kernels GPU du framework `gpusync.gfx` (3D, UI et futures passes 2D)."""
+"""GPU kernels of the `gpusync.gfx` framework (3D, UI and future 2D passes)."""
 
 from .k3d import (
     BLOOM_GROUP,

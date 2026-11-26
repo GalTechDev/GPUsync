@@ -1,9 +1,9 @@
-"""Graphique : DTW 1 contre N, prototype v1 contre GPUsync Rust v2, sur le Mac et sur la RTX.
+"""Chart: DTW 1 against N, prototype v1 against Rust GPUsync v2, on the Mac and on the RTX.
 
-    python tools/compare_v1/plot_dtw1n.py [résultats.json] [image.png]
+    python tools/compare_v1/plot_dtw1n.py [results.json] [image.png]
 
-Lit les mesures enregistrées par `compare.py` (tools/compare_v1/results/) ; deux panneaux (un par
-machine), temps en fonction de N. Le prototype est sa meilleure variante dont le résultat est juste.
+Reads the measurements recorded by `compare.py` (tools/compare_v1/results/); two panels (one per
+machine), time as a function of N. The prototype is its best variant whose result is correct.
 """
 
 import json
@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "results", "dtw1n_2026-11-21.json")
 DST = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "results", "dtw1n_v1_v2.png")
 
-# Palette de référence (thème clair) : 3 premiers emplacements, validés toutes paires.
+# Reference palette (light theme): first 3 slots, validated for every pair.
 SURFACE, INK, INK2, MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8984", "#e6e5e1"
 COLORS = {"OpenCL": "#2a78d6", "CUDA": "#eb6834", "wgpu": "#1baf7a"}
 
@@ -33,7 +33,7 @@ def series(entry, variant):
 
 
 def best_v1(entry, ref_entry):
-    """Meilleure variante v1 par N, parmi celles dont la somme est d'accord avec v2 (1e-6)."""
+    """Best v1 variant per N, among those whose sum agrees with v2 (1e-6)."""
     ref = {n: s for n, _, s in zip(*series(ref_entry, "Rust"))}
     out = {}
     for variant in ("OOC Manuel", "OOC Auto"):
@@ -66,9 +66,9 @@ for ax, (title, v1_key, v2s, ref_key, names) in zip(axes, panels):
         x = [v / 1e6 for v in n]
         ax.plot(x, m, style, color=color, lw=2, marker="o", ms=8, mfc=color, mec=SURFACE, mew=2,
                 label=label, solid_capstyle="round", zorder=3)
-    # Étiquettes directes en bout de ligne (texte en encre, pas en couleur de série), écartées si proches.
-    # Du bas vers le haut : chaque étiquette au moins un écart au-dessus de la précédente (jamais
-    # sous l'axe).
+    # Direct labels at the end of each line (ink-coloured text, not the series colour), spread apart when close.
+    # From bottom to top: each label at least one gap above the previous one (never
+    # below the axis).
     ends = sorted((m[-1], label) for label, _, m, _, _ in lines)
     gap = ymax * 0.07
     prev = None
@@ -80,14 +80,14 @@ for ax, (title, v1_key, v2s, ref_key, names) in zip(axes, panels):
     v1_end = lines[0][2][-1]
     best_v2 = min(m[-1] for _, _, m, _, _ in lines[1:])
     gain = f"{v1_end / best_v2:.1f}".replace(".", ",")
-    ax.set_title(f"{title}\nà 2 M : Rust × {gain} plus rapide", loc="left",
+    ax.set_title(f"{title}\nat 2 M: Rust {gain}× faster", loc="left",
                  fontsize=13, color=INK, pad=12)
     ax.set_xlim(0, 2.75)
     ax.set_ylim(0, ymax * 1.12)
     ax.set_xticks([0.1, 0.5, 1.0, 1.5, 2.0])
     ax.set_xticklabels(["0,1 M", "0,5 M", "1 M", "1,5 M", "2 M"])
-    ax.set_xlabel("N (séries comparées à la référence)", color=INK2)
-    ax.set_ylabel("temps (ms, moins = mieux)", color=INK2)
+    ax.set_xlabel("N (series compared with the reference)", color=INK2)
+    ax.set_ylabel("time (ms, lower = better)", color=INK2)
     ax.grid(axis="y", color=GRID, lw=1)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
@@ -100,10 +100,10 @@ for ax, (title, v1_key, v2s, ref_key, names) in zip(axes, panels):
 fig.suptitle("DTW 1 contre N : prototype Python contre GPUsync Rust", x=0.01, ha="left", fontsize=15,
              color=INK, fontweight="bold")
 fig.text(0.01, 0.005,
-         "Séries de 30 points complétées à 32, sans fenêtre (benchmark DTW du prototype). Prototype : sa meilleure "
-         "variante au résultat juste.\nSur la RTX, sa variante « OOC Auto » (résultats faux) est exclue, et son kernel "
-         "ne compile pas en CUDA : la courbe est son OpenCL.\nMesures du 21/11/2026, à chaud, meilleur de 3 ; "
-         "résultats identiques entre versions (écart relatif ≤ 3e-9).", fontsize=9, color=INK2, va="bottom")
+         "Series of 30 points padded to 32, no window (the prototype's DTW benchmark). Prototype: its best "
+         "variant with a correct result.\nOn the RTX, its \"OOC Auto\" variant (wrong results) is excluded, and its kernel "
+         "does not compile with CUDA: the curve is its OpenCL one.\nMeasured on 21/11/2026, warm, best of 3; "
+         "identical results between versions (relative difference ≤ 3e-9).", fontsize=9, color=INK2, va="bottom")
 fig.tight_layout(rect=(0, 0.1, 1, 0.95))
 fig.savefig(DST, dpi=160, facecolor=SURFACE)
 print(DST)

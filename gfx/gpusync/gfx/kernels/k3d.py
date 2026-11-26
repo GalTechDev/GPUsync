@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import gpusync as gs
 
-EMPTY_VIS = 4294967295  # 0xFFFFFFFF : ciel / fond vide
-DEPTH_MAX = 16777215  # profondeur linéaire entre near et far, sur 24 bits (exacts en f32)
+EMPTY_VIS = 4294967295  # 0xFFFFFFFF: sky / empty background
+DEPTH_MAX = 16777215  # linear depth between near and far, on 24 bits (exact in f32)
 BLOOM_GROUP = 64
 VIS_STRIPES = 32
 SHADOW_STRIPES = 16
@@ -40,7 +40,7 @@ def patch_vertices(
     src: gs.f32["snv", "c3"],
     offset: gs.i32,
 ) -> gs.f32["nv", "c3"]:
-    """Met à jour en VRAM les sommets/normales d'un `Object3D` dynamique (0 copie CPU)."""
+    """Updates the vertices / normals of a dynamic `Object3D` in VRAM (no CPU copy)."""
     v, c = gs.index()
     sv = v - offset
     if sv >= 0 and sv < src.shape[0]:
@@ -55,7 +55,7 @@ def patch_trs_to_matrices(
     trs: gs.f32["k", "c8"],
     offset: gs.i32,
 ) -> (gs.f32["nm", "c16"], gs.f32["nm", "c16"]):
-    """Convertit des instances GPU compactes `(px, py, pz, rx, ry, rz, scale, visible)` en matrices 4×4 en VRAM."""
+    """Converts compact GPU instances `(px, py, pz, rx, ry, rz, scale, visible)` into 4×4 matrices in VRAM."""
     m, elem = gs.index()
     idx = m - offset
     if idx < 0 or idx >= trs.shape[0]:
@@ -141,10 +141,10 @@ def bind_trs_to_matrices(
     trs: gs.f32["k", "cs"],
     slot_row: gs.i32["nm"],
 ) -> (gs.f32["nm", "c16"], gs.f32["nm", "c16"]):
-    """Objets dont la position vient d'un calcul GPU : la matrice de l'emplacement `m` est faite de la ligne
-    `slot_row[m]` de `trs` (`px, py, pz, rx, ry, rz, échelle, visible`, colonnes suivantes ignorées ; -1 : inchangé).
+    """Objects whose position comes from a GPU computation: the matrix of slot `m` is built from row
+    `slot_row[m]` of `trs` (`px, py, pz, rx, ry, rz, scale, visible`, further columns ignored; -1: unchanged).
 
-    L'échelle et la visibilité fixées côté CPU (longueur des colonnes de la matrice) sont conservées."""
+    The scale and visibility set on the CPU side (length of the matrix columns) are kept."""
     m, elem = gs.index()
     row = slot_row[m]
     if row < 0:
@@ -199,7 +199,7 @@ def patch_matrices(
     src: gs.f32["k", "c16"],
     offset: gs.i32,
 ) -> gs.f32["nm", "c16"]:
-    """Copie un bloc de matrices 4×4 GPU `(K, 16)` directement dans `models`."""
+    """Copies a block of GPU 4×4 matrices `(K, 16)` directly into `models`."""
     m, elem = gs.index()
     idx = m - offset
     if idx >= 0 and idx < src.shape[0]:
@@ -209,7 +209,7 @@ def patch_matrices(
 
 @gs.kernel
 def mul_vp_matrices(models: gs.f32["nm", "c16"], vp: gs.f32["c16"]) -> gs.f32["nm", "c16"]:
-    """Calcule `MVP = VP @ M` pour toutes les instances directement sur le GPU."""
+    """Computes `MVP = VP @ M` for every instance directly on the GPU."""
     m, elem = gs.index()
     row = elem // 4
     col = elem - row * 4
@@ -233,7 +233,7 @@ def vertex_world(
     models: gs.f32["nm", "c16"],
     norms: gs.f32["nm", "c16"],
 ) -> (gs.f32["nv", "c3"], gs.f32["nv", "c3"]):
-    """Transforme positions et normales de tous les objets en espace monde (partagé entre caméras)."""
+    """Transforms the positions and normals of every object into world space (shared between cameras)."""
     v, c = gs.index()
     o = v_obj[v]
     px = v_pos[v, 0]
@@ -277,7 +277,7 @@ def vertex_project_all(
     shadow_w: gs.f32,
     shadow_h: gs.f32,
 ) -> (gs.f32["nv"], gs.f32["nv"], gs.f32["nv"], gs.f32["nv"], gs.f32["nv"], gs.f32["nv"]):
-    """Fusionne projection caméra (perspective ou ortho) et projection soleil en 1 dispatch."""
+    """Merges the camera projection (perspective or ortho) and the sun projection into 1 dispatch."""
     v = gs.index()
     o = v_obj[v]
     x = v_pos[v, 0]
@@ -302,7 +302,7 @@ def vertex_project_all(
         sx = (cx * inv_w * 0.5 + 0.5) * width
         sy = (0.5 - cy * inv_w * 0.5) * height
     else:
-        # Derrière le plan proche : coordonnées de découpe (x, y) brutes et w codé en négatif (≤ −1)
+        # Behind the near plane: raw clip coordinates (x, y) and w encoded as negative (≤ −1)
         sx = cx
         sy = cy
         inv_w = cw - near - 1.0
@@ -327,7 +327,7 @@ def vertex_project(
     far: gs.f32,
     is_ortho: gs.i32,
 ) -> (gs.f32["nv"], gs.f32["nv"], gs.f32["nv"]):
-    """Projette chaque sommet vers l'écran (caméra secondaire ou ombres désactivées)."""
+    """Projects each vertex to the screen (secondary camera or shadows disabled)."""
     v = gs.index()
     o = v_obj[v]
     x = v_pos[v, 0]
@@ -352,14 +352,14 @@ def vertex_project(
         sx = (cx * inv_w * 0.5 + 0.5) * width
         sy = (0.5 - cy * inv_w * 0.5) * height
     else:
-        # Derrière le plan proche : coordonnées de découpe (x, y) brutes et w codé en négatif (≤ −1)
+        # Behind the near plane: raw clip coordinates (x, y) and w encoded as negative (≤ −1)
         sx = cx
         sy = cy
         inv_w = cw - near - 1.0
     return sx, sy, inv_w
 
 
-# ───────────────────────── 2. Rasterizers Parallèles par Bandes ─────────────────────────
+# ───────────────────────── 2. Parallel strip rasterizers ─────────────────────────
 
 
 @gs.kernel(grid=("nt", SHADOW_STRIPES))
@@ -370,7 +370,7 @@ def rasterize_shadow(
     sz: gs.f32["nv"],
     smap: gs.Out[gs.u32["sh", "sw"], EMPTY_VIS],
 ):
-    """Rasterise la shadow map en parallèle (16 bandes/triangle, pas incrémental)."""
+    """Rasterizes the shadow map in parallel (16 strips per triangle, incremental step)."""
     t, strip = gs.index()
     i0 = tri_idx[t, 0]
     i1 = tri_idx[t, 1]
@@ -435,12 +435,12 @@ def rasterize_triangles(
     select: gs.i32,
     target: gs.Out[gs.u32["h", "w"], EMPTY_VIS],
 ):
-    """Rasterisation parallèle (32 bandes/triangle, bornes X exactes par scanline), en deux passes :
-    `select=0` écrit la profondeur la plus proche (24 bits), `select=1` le numéro du triangle qui a
-    exactement cette profondeur dans `zbuf` (le plus petit numéro en cas d'égalité). Un seul noyau pour les
-    deux passes : les calculs flottants, donc les profondeurs, sont identiques.
+    """Parallel rasterization (32 strips per triangle, exact X bounds per scanline), in two passes:
+    `select=0` writes the closest depth (24 bits), `select=1` the number of the triangle that has
+    exactly that depth in `zbuf` (the smallest number on a tie). A single kernel for both
+    passes: the float computations, hence the depths, are identical.
 
-    Un triangle qui traverse le plan proche est découpé ici en un ou deux triangles."""
+    A triangle crossing the near plane is clipped here into one or two triangles."""
     t, strip = gs.index()
     h = target.shape[0]
     w = target.shape[1]
@@ -448,7 +448,7 @@ def rasterize_triangles(
     k1 = tri_idx[t, 1]
     k2 = tri_idx[t, 2]
     if inv_w[k0] == 0.0 or inv_w[k1] == 0.0 or inv_w[k2] == 0.0:
-        return  # hors de la profondeur d'une caméra orthographique
+        return  # outside the depth range of an orthographic camera
     n_in = 0
     if inv_w[k0] > 0.0:
         n_in += 1
@@ -459,7 +459,7 @@ def rasterize_triangles(
     if n_in == 0:
         return
 
-    # Rotation (le sens de parcours est conservé) : un seul sommet devant → le premier ; deux → les deux premiers
+    # Rotation (winding order kept): a single vertex in front → the first one; two → the first two
     rot = 0
     if n_in == 1:
         if inv_w[k1] > 0.0:
@@ -491,7 +491,7 @@ def rasterize_triangles(
     if n_in < 3:
         fw = float(w)
         fh = float(h)
-        # Coordonnées de découpe de A (devant), C (derrière) et B (devant si n_in = 2)
+        # Clip coordinates of A (in front), C (behind) and B (in front if n_in = 2)
         a_w = 1.0 / aw
         a_x = (ax / fw * 2.0 - 1.0) * a_w
         a_y = (1.0 - ay / fh * 2.0) * a_w
@@ -505,7 +505,7 @@ def rasterize_triangles(
             b_w = 1.0 / bw
             b_x = (bx / fw * 2.0 - 1.0) * b_w
             b_y = (1.0 - by / fh * 2.0) * b_w
-        # Q sur [C, A] ; P sur [B, A] (un sommet devant) ou sur [C, B] (deux)
+        # Q on [C, A]; P on [B, A] (one vertex in front) or on [C, B] (two)
         sq = (near - c_w) / (a_w - c_w)
         q_x = c_x + sq * (a_x - c_x)
         q_y = c_y + sq * (a_y - c_y)
@@ -552,7 +552,7 @@ def rasterize_triangles(
         iw2 = cw if part == 0 else dw
 
         area = (y1 - y0) * (x2 - x0) - (x1 - x0) * (y2 - y0)
-        # Bornes limitées avant conversion : un sommet découpé peut tomber très loin de l'écran
+        # Bounds clamped before conversion: a clipped vertex can land very far off screen
         lo_y = gs.min(gs.max(gs.min(y0, y1, y2), -1.0), float(h))
         hi_y = gs.min(gs.max(gs.max(y0, y1, y2), -1.0), float(h))
         lo_x = gs.min(gs.max(gs.min(x0, x1, x2), -1.0), float(w))
@@ -671,7 +671,7 @@ def shade_pbr(
     wireframe: gs.i32,
     near: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Shading différé PBR : Cook-Torrance GGX, soleil + PCF 3×3, Point/SpotLight, skybox HDRI, brouillard."""
+    """Deferred PBR shading: Cook-Torrance GGX, sun + 3×3 PCF, point / spot lights, HDRI skybox, fog."""
     py, px = gs.index()
     h = visbuf.shape[0]
     w = visbuf.shape[1]
@@ -781,7 +781,7 @@ def shade_pbr(
     b1 = pw1 * inv_pw
     b2 = pw2 * inv_pw
     if gs.min(iw0, iw1, iw2) <= 0.0:
-        # Triangle qui traverse le plan proche : barycentriques homogènes (valables derrière la caméra)
+        # Triangle crossing the near plane: homogeneous barycentrics (valid behind the camera)
         fw = float(w)
         fh = float(h)
         hw0 = iw0 + near + 1.0
@@ -853,15 +853,15 @@ def shade_pbr(
     em_tid = int(materials[m, 14])
     rough_tid = int(materials[m, 15])
 
-    # Échantillonnage textures PBR (pool statique + atlas dynamique 0-copie pour RenderTarget/vidéo/GPU)
+    # PBR texture sampling (static pool + zero-copy dynamic atlas for RenderTarget / video / GPU)
     u_tex = uu - gs.floor(uu)
     v_tex = 1.0 - (vv - gs.floor(vv))
     if pat == 5:
-        # Miroir planaire vertical (plane_z) : projection écran symétrique horizontale
+        # Vertical planar mirror (plane_z): horizontally symmetric screen projection
         u_tex = 1.0 - (float(px) + 0.5) / float(w)
         v_tex = (float(py) + 0.5) / float(h)
     elif pat == 6:
-        # Miroir planaire horizontal (plane_y, eau/sol) : projection écran symétrique verticale
+        # Horizontal planar mirror (plane_y, water / floor): vertically symmetric screen projection
         u_tex = (float(px) + 0.5) / float(w)
         v_tex = 1.0 - (float(py) + 0.5) / float(h)
 
@@ -976,7 +976,7 @@ def shade_pbr(
             etg = float((cs >> gs.u32(8)) & mask_u) * inv255
             etb = float((cs >> gs.u32(16)) & mask_u) * inv255
         if pat == 5 or pat == 6:
-            # Miroir planaire optique : inverse ACES + dé-gamma calibrés 1:1 (sans double IBL laiteux)
+            # Optical planar mirror: inverse ACES + de-gamma calibrated 1:1 (no milky double IBL)
             lr_m = etr * etr
             lg_m = etg * etg
             lb_m = etb * etb
@@ -1074,7 +1074,7 @@ def shade_pbr(
     lg = eg
     lb = eb
 
-    # 1) Soleil directionnel
+    # 1) Directional sun
     ndotl = gs.max(nx * sun_x + ny * sun_y + nz * sun_z, 0.0)
     if ndotl > 0.0 and shadow > 0.0:
         hx = vx + sun_x
@@ -1109,7 +1109,7 @@ def shade_pbr(
         lg += (kdg + fg * spec_s) * rad_g
         lb += (kdb + fb * spec_s) * rad_b
 
-    # 2) Lumières locales unifiées (PointLight = 1, SpotLight = 2)
+    # 2) Unified local lights (PointLight = 1, SpotLight = 2)
     for li in range(lights.shape[0]):
         lkind = lights[li, 7]
         if lkind > 0.5:
@@ -1134,7 +1134,7 @@ def shade_pbr(
                         rf = 1.0 - rd_ratio * rd_ratio
                         atten = atten * rf * rf
                 if lkind > 1.5 and atten > 0.0:
-                    # SpotLight : atténuation douce entre cos_outer (12) et cos_inner (11)
+                    # SpotLight: soft attenuation between cos_outer (12) and cos_inner (11)
                     spot_cos = -(lx * lights[li, 8] + ly * lights[li, 9] + lz * lights[li, 10])
                     c_in = lights[li, 11]
                     c_out = lights[li, 12]
@@ -1173,7 +1173,7 @@ def shade_pbr(
                     lg += (kdg + fg * spec_s) * rad_g
                     lb += (kdb + fb * spec_s) * rad_b
 
-    # 3) Ambiant hémisphérique + IBL ciel
+    # 3) Hemispherical ambient + sky IBL
     hemi = ny * 0.5 + 0.5
     amb_r = 0.05 + 0.14 * hemi
     amb_g = 0.06 + 0.18 * hemi
@@ -1562,7 +1562,7 @@ def blit_viewport(
     dh: gs.i32,
     border_rgba: gs.u32,
 ) -> gs.u32["h", "w"]:
-    """Incruste une vue caméra (`sub`) dans le rectangle `(ox, oy, dw, dh)` du framebuffer principal."""
+    """Inlays a camera view (`sub`) into the rectangle `(ox, oy, dw, dh)` of the main framebuffer."""
     py, px = gs.index()
     lx = px - ox
     ly = py - oy
@@ -1580,7 +1580,7 @@ def blit_viewport(
 
 @gs.kernel
 def upscale_sharp(ref: gs.u32["h", "w"], sub: gs.u32["sh", "sw"]) -> gs.u32["h", "w"]:
-    """Agrandit une image RGBA8 à la taille de `ref` : Catmull-Rom, borné par les quatre voisins (pas de halo)."""
+    """Scales an RGBA8 image up to the size of `ref`: Catmull-Rom, clamped by the four neighbours (no halo)."""
     py, px = gs.index()
     sw = sub.shape[1]
     sh = sub.shape[0]
@@ -1654,7 +1654,7 @@ def ssr_pass(
     strength: gs.f32,
     max_steps: gs.i32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Reflets Screen-Space (SSR) par raymarching 3D dans la profondeur du Visibility Buffer."""
+    """Screen-space reflections (SSR) by 3D ray marching in the depth of the Visibility Buffer."""
     py, px = gs.index()
     h = visbuf.shape[0]
     w = visbuf.shape[1]
@@ -1702,7 +1702,7 @@ def ssr_pass(
     b1 = pw1 * inv_pw
     b2 = pw2 * inv_pw
     if gs.min(iw0, iw1, iw2) <= 0.0:
-        # Triangle qui traverse le plan proche : barycentriques homogènes (valables derrière la caméra)
+        # Triangle crossing the near plane: homogeneous barycentrics (valid behind the camera)
         fw = float(w)
         fh = float(h)
         hw0 = iw0 + near + 1.0
@@ -1807,7 +1807,7 @@ def ssr_pass(
                             hit_st = st
 
     if hit_w > 0.0:
-        # Raffinement dichotomique (3 étapes) pour éliminer tout effet d'escalier sur les surfaces courbes
+        # Bisection refinement (3 steps) to remove any staircase artefact on curved surfaces
         lo = gs.max(hit_dist - step_len, 0.05)
         hi = hit_dist
         for _ in range(3):

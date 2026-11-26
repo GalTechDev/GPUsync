@@ -1,10 +1,10 @@
-//! Fenêtre native GPU (`gs.Window`) basée sur `winit` + `wgpu::Surface`.
+//! Native GPU window (`gs.Window`) based on `winit` + `wgpu::Surface`.
 //!
-//! Quand un `gs.Array` (RGBA8 empaqueté en `u32`, forme `(H, W)`) réside déjà sur le même
-//! périphérique wgpu (Metal, Vulkan, DX12), `present_wg` lit directement son `wgpu::Buffer` dans un
-//! shader plein écran et l'affiche dans la swapchain — **zéro copie GPU → CPU**. Pour les autres
-//! backends (OpenCL, CUDA, CPU) ou les tableaux NumPy, `present_bytes` envoie les octets via un
-//! buffer GPU réutilisé.
+//! When a `gs.Array` (RGBA8 packed in `u32`, shape `(H, W)`) already lives on the same
+//! wgpu device (Metal, Vulkan, DX12), `present_wg` reads its `wgpu::Buffer` directly in a
+//! full-screen shader and shows it in the swapchain — **zero GPU → CPU copy**. For other
+//! backends (OpenCL, CUDA, CPU) or NumPy arrays, `present_bytes` uploads the bytes through a
+//! reused GPU buffer.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -22,7 +22,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::exec::{WgBuffer, WgDevice};
 
-/// Événement discret renvoyé par `WgWindow::poll()`.
+/// Discrete event returned by `WgWindow::poll()`.
 #[derive(Debug, Clone)]
 pub enum WindowEvent {
     Close,
@@ -74,8 +74,8 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
-// `EventLoop::new()` ne peut être appelé qu'une fois par processus dans winit : on le réutilise
-// entre fenêtres successives (notebooks, scripts, tests) sur le thread principal.
+// `EventLoop::new()` can only be called once per process in winit: it is reused
+// across successive windows (notebooks, scripts, tests) on the main thread.
 thread_local! {
     static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
 }
@@ -86,7 +86,7 @@ fn take_event_loop() -> Result<EventLoop<()>, BackendError> {
             return Ok(el);
         }
         EventLoop::new()
-            .map_err(|e| BackendError(format!("impossible de créer la boucle de fenêtre ({e})")))
+            .map_err(|e| BackendError(format!("cannot create the window event loop ({e})")))
     })
 }
 
@@ -275,7 +275,7 @@ fn key_name(key: &Key) -> Option<String> {
     }
 }
 
-/// Fenêtre native wgpu + winit (doit vivre sur le thread principal).
+/// Native wgpu + winit window (must live on the main thread).
 pub struct WgWindow {
     event_loop: Option<EventLoop<()>>,
     app: AppState,
@@ -291,7 +291,7 @@ pub struct WgWindow {
 }
 
 impl WgWindow {
-    /// Ouvre une fenêtre native et l'attache au périphérique wgpu (`dev` ou premier GPU wgpu disponible).
+    /// Opens a native window and attaches it to the wgpu device (`dev` or the first available wgpu GPU).
     pub fn open(
         width: u32,
         height: u32,
@@ -305,7 +305,7 @@ impl WgWindow {
             Some(d) => d,
             None => {
                 let first = st.devices.first().ok_or_else(|| {
-                    BackendError("aucun GPU wgpu disponible pour ouvrir une fenêtre".into())
+                    BackendError("no wgpu GPU available to open a window".into())
                 })?;
                 WgDevice::open(first.1.backend, first.1.index)?
             }
@@ -332,16 +332,16 @@ impl WgWindow {
             create_err: None,
         };
 
-        // Déclenche `resumed` pour créer la fenêtre native sur le thread principal.
+        // Triggers `resumed` to create the native window on the main thread.
         event_loop.pump_app_events(Some(Duration::ZERO), &mut app);
         if let Some(e) = app.create_err.take() {
             return_event_loop(event_loop);
-            return Err(BackendError(format!("création de la fenêtre : {e}")));
+            return Err(BackendError(format!("window creation: {e}")));
         }
         let Some(window) = app.window.clone() else {
             return_event_loop(event_loop);
             return Err(BackendError(
-                "winit n'a pas pu initialiser la fenêtre native".into(),
+                "winit could not initialize the native window".into(),
             ));
         };
 
@@ -350,20 +350,20 @@ impl WgWindow {
             Err(e) => {
                 app.window = None;
                 return_event_loop(event_loop);
-                return Err(BackendError(format!("wgpu : création de surface ({e})")));
+                return Err(BackendError(format!("wgpu: surface creation ({e})")));
             }
         };
 
         let adapter = &st.adapters[dev.adapter_idx];
         let caps = surface.get_capabilities(adapter);
-        // Préférer un format linéaire (Bgra8Unorm / Rgba8Unorm) : les pixels u32 sont déjà en sRGB.
+        // Prefer a linear format (Bgra8Unorm / Rgba8Unorm): the u32 pixels are already sRGB.
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| !f.is_srgb())
             .or_else(|| caps.formats.first().copied())
-            .ok_or_else(|| BackendError("surface wgpu sans format compatible".into()))?;
+            .ok_or_else(|| BackendError("wgpu surface without a compatible format".into()))?;
         let is_srgb = format.is_srgb();
 
         let present_mode = pick_present_mode(&caps.present_modes, vsync);
@@ -533,7 +533,7 @@ impl WgWindow {
         self.app.mouse_pos
     }
 
-    /// Pompe les événements système (non bloquant) et renvoie ceux accumulés depuis le dernier appel.
+    /// Pumps system events (non-blocking) and returns those gathered since the last call.
     pub fn poll(&mut self) -> Vec<WindowEvent> {
         if let Some(el) = &mut self.event_loop {
             el.pump_app_events(Some(Duration::ZERO), &mut self.app);
@@ -556,7 +556,7 @@ impl WgWindow {
         }
     }
 
-    /// Affiche directement un `WgBuffer` (RGBA8 empaqueté en `u32`, `width × height`) : **zéro copie CPU**.
+    /// Shows a `WgBuffer` directly (RGBA8 packed in `u32`, `width × height`): **zero CPU copy**.
     pub fn present_wg(
         &mut self,
         buf: &WgBuffer,
@@ -569,7 +569,7 @@ impl WgWindow {
         let need = (width as usize) * (height as usize) * 4;
         if buf.bytes < need {
             return Err(BackendError(format!(
-                "gs.Window.present : buffer trop petit ({} o pour {width}×{height} u32)",
+                "gs.Window.present: buffer too small ({} B for {width}×{height} u32)",
                 buf.bytes
             )));
         }
@@ -581,7 +581,7 @@ impl WgWindow {
         self.blit_buffer(&buf.buf, width, height)
     }
 
-    /// Affiche des octets hôtes (RGBA8 / u32 empaqueté) via un buffer GPU réutilisé.
+    /// Shows host bytes (RGBA8 / packed u32) through a reused GPU buffer.
     pub fn present_bytes(
         &mut self,
         rgba: &[u8],
@@ -594,7 +594,7 @@ impl WgWindow {
         let need = (width as usize) * (height as usize) * 4;
         if rgba.len() < need {
             return Err(BackendError(format!(
-                "gs.Window.present : {} octets reçus pour {width}×{height} RGBA",
+                "gs.Window.present: {} bytes received for {width}×{height} RGBA",
                 rgba.len()
             )));
         }
@@ -622,7 +622,7 @@ impl WgWindow {
         fb_w: u32,
         fb_h: u32,
     ) -> Result<(), BackendError> {
-        let _ = self.dev.flush_batch(); // un lot refusé ne concerne que ses propres résultats
+        let _ = self.dev.flush_batch(); // a rejected batch only affects its own results
         let Some(surface) = &self.surface else {
             return Ok(());
         };
@@ -641,7 +641,7 @@ impl WgWindow {
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err(BackendError(
-                    "wgpu : erreur de validation sur la surface".into(),
+                    "wgpu: validation error on the surface".into(),
                 ));
             }
         };

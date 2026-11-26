@@ -1,14 +1,14 @@
-//! Exécution CUDA (ARCHITECTURE.md §8, §9), sur le modèle d'OpenCL :
+//! CUDA execution (ARCHITECTURE.md §8, §9), modelled on OpenCL:
 //!
-//! - **Deux streams** par périphérique : `compute` (kernels) et `transfer` (copies), chaînés par
-//!   événements : les transferts d'un bloc se recouvrent avec le calcul d'un autre.
-//! - **Mémoire épinglée** (`cuMemHostAlloc`) : les copies depuis (ou vers) ces tampons se font par DMA
-//!   à pleine vitesse, et sans bloquer.
-//! - **Compilation** : CUDA C → PTX par NVRTC (pour l'architecture du GPU, ou la plus récente connue de
-//!   NVRTC), puis PTX → code machine par le driver.
+//! - **Two streams** per device: `compute` (kernels) and `transfer` (copies), chained by
+//!   events: the transfers of one chunk overlap with the computation of another.
+//! - **Pinned memory** (`cuMemHostAlloc`): copies from (or to) these buffers go through DMA
+//!   at full speed, without blocking.
+//! - **Compilation**: CUDA C → PTX with NVRTC (for the GPU's architecture, or the most recent one
+//!   NVRTC knows), then PTX → machine code by the driver.
 //!
-//! Le contexte principal du périphérique est rendu courant au début de chaque opération : les appels
-//! peuvent venir de n'importe quel thread.
+//! The device's primary context is made current at the start of every operation: calls
+//! may come from any thread.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{CString, c_void};
@@ -19,27 +19,27 @@ use gpusync_runtime::{BackendError, DeviceInfo};
 use crate::sys::{self, CUcontext, CUdeviceptr, CUevent, CUfunction, CUmodule, CUstream, Driver};
 
 const BLOCK: u32 = 256;
-/// Buffers mis en réserve pour être réutilisés : capacité arrondie à la puissance de deux jusqu'à
-/// 64 Mio, taille exacte au-delà (une boucle réutilise les mêmes tailles) ; 2 Gio en tout, rendus au
-/// driver si une allocation échoue.
+/// Buffers kept in reserve for reuse: capacity rounded up to a power of two up to
+/// 64 MiB, exact size beyond (a loop reuses the same sizes); 2 GiB in all, given back to the
+/// driver if an allocation fails.
 const POOL_POW2_MAX: usize = 64 << 20;
 const POOL_MAX_TOTAL: usize = 2 << 30;
 const POOL_MAX_BUF: usize = POOL_MAX_TOTAL / 4;
 
-/// Buffer en réserve : capacité, adresse, un événement par stream.
+/// Reserved buffer: capacity, address, one event per stream.
 type Spare = (usize, CUdeviceptr, [CUevent; 2]);
 
-/// Réserve de buffers libérés. `cuMemAlloc` / `cuMemFree` coûtent cher (`cuMemFree` synchronise
-/// tout le GPU, et une mémoire neuve se paie à la première écriture) : un buffer rendu est gardé,
-/// avec un événement par stream. Il est repris de préférence une fois ces événements passés ;
-/// sinon tout de suite, dans l'ordre des streams, comme le pool de CuPy : chaque stream attend
-/// (côté GPU, sans bloquer l'hôte) l'événement de l'autre, son propre ordre faisant le reste.
-/// Une boucle qui soumet plus vite que le GPU ne calcule réutilise ainsi toujours les mêmes buffers.
+/// Pool of released buffers. `cuMemAlloc` / `cuMemFree` are expensive (`cuMemFree` synchronizes
+/// the whole GPU, and fresh memory is paid for at its first write): a returned buffer is kept,
+/// with one event per stream. It is preferably taken again once those events have passed;
+/// otherwise right away, in stream order, like CuPy's pool: each stream waits
+/// (on the GPU, without blocking the host) for the other's event, its own order doing the rest.
+/// A loop that submits faster than the GPU computes thus always reuses the same buffers.
 struct BufPool {
     d: &'static Driver,
     compute: CUstream,
     transfer: CUstream,
-    /// Buffers rendus (capacité, adresse, événements) et total des capacités.
+    /// Returned buffers (capacity, address, events) and total capacity.
     free: Mutex<(Vec<Spare>, usize)>,
 }
 
@@ -58,7 +58,7 @@ impl BufPool {
         let (c, ptr, evs) = g.0.swap_remove(pos);
         g.1 -= c;
         if ready.is_none() {
-            // Encore utilisé par des commandes en file : chaque stream attend celles de l'autre.
+            // Still used by queued commands: each stream waits for the other's.
             let ok = unsafe {
                 (self.d.cuStreamWaitEvent)(self.compute, evs[1], 0) == 0
                     && (self.d.cuStreamWaitEvent)(self.transfer, evs[0], 0) == 0
@@ -73,7 +73,7 @@ impl BufPool {
         Some(ptr)
     }
 
-    /// Garde le buffer s'il y a de la place ; sinon le libère.
+    /// Keeps the buffer if there is room; otherwise releases it.
     fn give(&self, cap: usize, ptr: CUdeviceptr) {
         let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
         if g.1 + cap <= POOL_MAX_TOTAL {
@@ -99,8 +99,8 @@ impl BufPool {
     }
 }
 
-/// Taille réservée pour `bytes` : puissance de deux (réutilisation fréquente) jusqu'à 64 Mio,
-/// taille exacte au-delà.
+/// Size reserved for `bytes`: power of two (frequent reuse) up to 64 MiB,
+/// exact size beyond.
 fn capacity(bytes: usize) -> usize {
     let b = bytes.max(256);
     if b <= POOL_POW2_MAX {
@@ -110,33 +110,33 @@ fn capacity(bytes: usize) -> usize {
     }
 }
 
-/// Un périphérique CUDA ouvert.
+/// An open CUDA device.
 pub struct CuDevice {
     pub info: DeviceInfo,
     d: &'static Driver,
     ctx: CUcontext,
     compute: CUstream,
     transfer: CUstream,
-    /// Capacité de calcul (ex. 89 pour 8.9).
+    /// Compute capability (e.g. 89 for 8.9).
     cc: i32,
     pool: Arc<BufPool>,
     kernels: Mutex<HashMap<String, Arc<CuKernel>>>,
     pinned_pool: Mutex<HashMap<usize, Vec<Pinned>>>,
-    /// Tampons épinglés qu'un envoi en file lit encore, du plus ancien au plus récent.
+    /// Pinned buffers that a queued upload still reads, oldest first.
     pinned_busy: Mutex<VecDeque<(Pinned, CuEvent)>>,
 }
 
-// Les objets du driver CUDA sont utilisables depuis tous les threads (contexte rendu courant).
+// CUDA driver objects can be used from every thread (context made current).
 unsafe impl Send for CuDevice {}
 unsafe impl Sync for CuDevice {}
 
-/// Kernel compilé (module PTX chargé et sa fonction).
+/// Compiled kernel (loaded PTX module and its function).
 pub struct CuKernel {
     d: &'static Driver,
     ctx: CUcontext,
     module: CUmodule,
     func: CUfunction,
-    /// Threads par bloc : la taille de groupe du kernel (`group=`), sinon `BLOCK`.
+    /// Threads per block: the kernel's group size (`group=`), otherwise `BLOCK`.
     block: u32,
 }
 
@@ -152,7 +152,7 @@ impl Drop for CuKernel {
     }
 }
 
-/// Buffer en mémoire du périphérique.
+/// Buffer in device memory.
 pub struct CuBuffer {
     d: &'static Driver,
     ctx: CUcontext,
@@ -176,7 +176,7 @@ impl Drop for CuBuffer {
     }
 }
 
-/// Événement : fin d'une opération mise en file.
+/// Event: end of a queued operation.
 pub struct CuEvent {
     d: &'static Driver,
     ev: CUevent,
@@ -198,7 +198,7 @@ impl CuEvent {
     }
 }
 
-/// Tampon hôte épinglé ; rendu au pool par `recycle`, libéré à la destruction.
+/// Pinned host buffer; returned to the pool by `recycle`, freed on drop.
 pub struct Pinned {
     d: &'static Driver,
     ctx: CUcontext,
@@ -218,7 +218,7 @@ impl Drop for Pinned {
     }
 }
 
-/// Argument de lancement, dans l'ordre des paramètres du kernel.
+/// Launch argument, in kernel parameter order.
 pub enum CuArg<'a> {
     Buf(&'a CuBuffer),
     I32(i32),
@@ -232,7 +232,7 @@ pub enum CuArg<'a> {
 static OPEN: OnceLock<Mutex<HashMap<usize, Arc<CuDevice>>>> = OnceLock::new();
 
 impl CuDevice {
-    /// Ouvre (une seule fois par processus) le périphérique `cuda:<index>`.
+    /// Opens (once per process) the device `cuda:<index>`.
     pub fn open(index: usize) -> Result<Arc<CuDevice>, BackendError> {
         let mut open = OPEN
             .get_or_init(Default::default)
@@ -244,7 +244,7 @@ impl CuDevice {
         let (dev, info) = crate::enumerate()?
             .into_iter()
             .nth(index)
-            .ok_or_else(|| BackendError(format!("périphérique cuda:{index} introuvable")))?;
+            .ok_or_else(|| BackendError(format!("device cuda:{index} not found")))?;
         let d = sys::driver()?;
         let mut ctx = std::ptr::null_mut();
         d.check(
@@ -256,7 +256,7 @@ impl CuDevice {
             let mut s = std::ptr::null_mut();
             d.check(
                 unsafe { (d.cuStreamCreate)(&mut s, sys::STREAM_NON_BLOCKING) },
-                "création d'un stream",
+                "stream creation",
             )?;
             Ok(s)
         };
@@ -298,11 +298,11 @@ impl CuDevice {
         let mut ev = std::ptr::null_mut();
         self.d.check(
             unsafe { (self.d.cuEventCreate)(&mut ev, sys::EVENT_DISABLE_TIMING) },
-            "événement",
+            "event",
         )?;
         let e = CuEvent { d: self.d, ev };
         self.d
-            .check(unsafe { (self.d.cuEventRecord)(ev, stream) }, "événement")?;
+            .check(unsafe { (self.d.cuEventRecord)(ev, stream) }, "event")?;
         Ok(e)
     }
 
@@ -310,14 +310,14 @@ impl CuDevice {
         for e in wait {
             self.d.check(
                 unsafe { (self.d.cuStreamWaitEvent)(stream, e.ev, 0) },
-                "attente d'un événement",
+                "waiting for an event",
             )?;
         }
         Ok(())
     }
 
-    /// Compile (avec cache) le code CUDA C et renvoie le kernel `entry`.
-    /// `group` : threads par bloc imposés par le kernel (mémoire partagée, barrières).
+    /// Compiles (with a cache) the CUDA C code and returns the kernel `entry`.
+    /// `group`: threads per block required by the kernel (shared memory, barriers).
     pub fn compile(
         &self,
         code: &str,
@@ -340,13 +340,13 @@ impl CuDevice {
         let mut module = std::ptr::null_mut();
         self.d.check(
             unsafe { (self.d.cuModuleLoadData)(&mut module, ptx.as_ptr().cast()) },
-            "chargement du PTX (driver plus ancien que NVRTC ? mettez le driver NVIDIA à jour)",
+            "loading the PTX (driver older than NVRTC? update the NVIDIA driver)",
         )?;
         let name = CString::new(entry).unwrap();
         let mut func = std::ptr::null_mut();
         if let Err(e) = self.d.check(
             unsafe { (self.d.cuModuleGetFunction)(&mut func, module, name.as_ptr()) },
-            "kernel introuvable dans le module",
+            "kernel not found in the module",
         ) {
             unsafe { (self.d.cuModuleUnload)(module) };
             return Err(e);
@@ -362,8 +362,8 @@ impl CuDevice {
         Ok(k)
     }
 
-    /// CUDA C → PTX avec NVRTC, pour l'architecture du GPU (ou la plus récente connue de NVRTC : le
-    /// driver compile alors le PTX pour le GPU).
+    /// CUDA C → PTX with NVRTC, for the GPU's architecture (or the most recent one NVRTC knows: the
+    /// driver then compiles the PTX for the GPU).
     fn ptx(&self, code: &str) -> Result<Vec<u8>, BackendError> {
         let n = sys::nvrtc()?;
         let archs = n.archs();
@@ -373,7 +373,7 @@ impl CuDevice {
             .filter(|a| *a <= self.cc)
             .max()
             .unwrap_or(self.cc);
-        let src = CString::new(code).map_err(|_| BackendError("code CUDA invalide".into()))?;
+        let src = CString::new(code).map_err(|_| BackendError("invalid CUDA code".into()))?;
         let fname = CString::new("gpusync.cu").unwrap();
         let mut prog = std::ptr::null_mut();
         let r = unsafe {
@@ -387,9 +387,9 @@ impl CuDevice {
             )
         };
         if r != 0 {
-            return Err(BackendError(format!("NVRTC : création ({})", n.error(r))));
+            return Err(BackendError(format!("NVRTC: creation ({})", n.error(r))));
         }
-        // Pas de --use_fast_math : la précision prime (résultats comparés à NumPy), comme en OpenCL.
+        // No --use_fast_math: precision comes first (results compared with NumPy), as with OpenCL.
         let opts: Vec<CString> = [
             format!("--gpu-architecture=compute_{arch}"),
             "-default-device".into(),
@@ -405,7 +405,7 @@ impl CuDevice {
             let mut log = vec![0u8; size.max(1)];
             unsafe { (n.nvrtcGetProgramLog)(prog, log.as_mut_ptr().cast()) };
             Err(BackendError(format!(
-                "échec de compilation CUDA sur {} ({}) :\n{}",
+                "CUDA compilation failed on {} ({}):\n{}",
                 self.info.name,
                 n.error(r),
                 String::from_utf8_lossy(&log).trim_end_matches('\0')
@@ -421,7 +421,7 @@ impl CuDevice {
         result
     }
 
-    /// Buffer en mémoire du périphérique.
+    /// Buffer in device memory.
     pub fn alloc(&self, bytes: usize) -> Result<CuBuffer, BackendError> {
         self.bind()?;
         let cap = capacity(bytes);
@@ -431,7 +431,7 @@ impl CuDevice {
                 let mut ptr = 0;
                 let mut r = unsafe { (self.d.cuMemAlloc_v2)(&mut ptr, cap) };
                 if r != 0 {
-                    // Mémoire pleine : rendre la réserve au driver, puis réessayer.
+                    // Memory full: give the pool back to the driver, then try again.
                     self.trim();
                     r = unsafe { (self.d.cuMemAlloc_v2)(&mut ptr, cap) };
                 }
@@ -449,7 +449,7 @@ impl CuDevice {
         })
     }
 
-    /// Libère les buffers en réserve (après la fin des calculs en file).
+    /// Frees the reserved buffers (after queued work completes).
     fn trim(&self) {
         unsafe { (self.d.cuCtxSynchronize)() };
         let mut g = self.pool.free.lock().unwrap_or_else(|e| e.into_inner());
@@ -464,7 +464,7 @@ impl CuDevice {
         g.1 = 0;
     }
 
-    /// Tampon épinglé d'au moins `bytes` octets (pris dans le pool si possible).
+    /// Pinned buffer of at least `bytes` bytes (taken from the pool if possible).
     pub fn pinned(&self, bytes: usize) -> Result<Pinned, BackendError> {
         self.bind()?;
         self.reclaim();
@@ -481,7 +481,7 @@ impl CuDevice {
         let mut p: *mut c_void = std::ptr::null_mut();
         self.d.check(
             unsafe { (self.d.cuMemHostAlloc)(&mut p, bytes.max(4), 0) },
-            "tampon épinglé",
+            "pinned buffer",
         )?;
         Ok(Pinned {
             d: self.d,
@@ -491,7 +491,7 @@ impl CuDevice {
         })
     }
 
-    /// Remet en réserve les tampons dont l'envoi est terminé (le stream de transfert est ordonné).
+    /// Puts back into the pool the buffers whose upload is done (the transfer stream is ordered).
     fn reclaim(&self) {
         loop {
             let p = {
@@ -510,8 +510,8 @@ impl CuDevice {
         }
     }
 
-    /// Rend un tampon épinglé que l'envoi `_e` (dernière opération du stream de transfert, ou antérieure)
-    /// lit encore. Au-delà de 64 envois en cours, attend le plus ancien (mémoire bornée).
+    /// Returns a pinned buffer that upload `_e` (last operation of the transfer stream, or an earlier one)
+    /// still reads. Beyond 64 uploads in flight, waits for the oldest (bounded memory).
     pub fn recycle_after(&self, p: Pinned, _e: &CuEvent) -> Result<(), BackendError> {
         self.bind()?;
         let ev = self.record(self.transfer)?;
@@ -527,7 +527,7 @@ impl CuDevice {
         Ok(())
     }
 
-    /// Rend un tampon épinglé au pool.
+    /// Returns a pinned buffer to the pool.
     pub fn recycle(&self, p: Pinned) {
         self.pinned_pool
             .lock()
@@ -537,11 +537,11 @@ impl CuDevice {
             .push(p);
     }
 
-    /// Copie hôte → périphérique (stream de transfert, non bloquante), après `wait`.
+    /// Host → device copy (transfer stream, non-blocking), after `wait`.
     ///
     /// # Safety
-    /// `src` doit rester valide jusqu'à la fin de l'événement renvoyé (et être épinglée pour que la
-    /// copie soit asynchrone).
+    /// `src` must stay valid until the returned event completes (and be pinned for the
+    /// copy to be asynchronous).
     pub unsafe fn write_at(
         &self,
         dst: &CuBuffer,
@@ -561,15 +561,15 @@ impl CuDevice {
                     self.transfer,
                 )
             },
-            "écriture",
+            "write",
         )?;
         self.record(self.transfer)
     }
 
-    /// Copie périphérique → hôte (stream de transfert, non bloquante), après `wait`.
+    /// Device → host copy (transfer stream, non-blocking), after `wait`.
     ///
     /// # Safety
-    /// `dst` doit rester valide jusqu'à la fin de l'événement renvoyé.
+    /// `dst` must stay valid until the returned event completes.
     pub unsafe fn read_at(
         &self,
         src: &CuBuffer,
@@ -589,12 +589,12 @@ impl CuDevice {
                     self.transfer,
                 )
             },
-            "lecture",
+            "read",
         )?;
         self.record(self.transfer)
     }
 
-    /// Copie périphérique → périphérique (stream de transfert), après `wait`.
+    /// Device → device copy (transfer stream), after `wait`.
     pub fn copy_at(
         &self,
         src: &CuBuffer,
@@ -620,7 +620,7 @@ impl CuDevice {
         self.record(self.transfer)
     }
 
-    /// Met le kernel en file de calcul sur `n` éléments, après `wait`.
+    /// Queues the kernel on the compute stream over `n` elements, after `wait`.
     pub fn launch(
         &self,
         k: &CuKernel,
@@ -630,7 +630,7 @@ impl CuDevice {
     ) -> Result<CuEvent, BackendError> {
         self.bind()?;
         self.after(self.compute, wait)?;
-        // Valeurs des arguments (8 octets chacune) et tableau de pointeurs vers elles.
+        // Argument values (8 bytes each) and array of pointers to them.
         let mut vals: Vec<[u8; 8]> = args
             .iter()
             .map(|a| {
@@ -651,7 +651,7 @@ impl CuDevice {
         let grid = (n as u64).div_ceil(k.block as u64).max(1);
         if grid > i32::MAX as u64 {
             return Err(BackendError(format!(
-                "{n} éléments : trop pour une seule grille CUDA"
+                "{n} elements: too many for a single CUDA grid"
             )));
         }
         self.d.check(
@@ -670,17 +670,17 @@ impl CuDevice {
                     std::ptr::null_mut(),
                 )
             },
-            "lancement du kernel",
+            "kernel launch",
         )?;
         self.record(self.compute)
     }
 
-    /// Les commandes CUDA partent sans attendre : rien à faire (pour l'interface commune).
+    /// CUDA commands go out without waiting: nothing to do (for the common interface).
     pub fn flush(&self) -> Result<(), BackendError> {
         Ok(())
     }
 
-    /// Attend la fin de tout ce qui est en file (calcul et transferts).
+    /// Waits for everything queued (computation and transfers).
     pub fn finish(&self) -> Result<(), BackendError> {
         self.bind()?;
         self.d
@@ -688,10 +688,10 @@ impl CuDevice {
     }
 }
 
-/// Cache disque du PTX produit par NVRTC (~100 ms par kernel et par processus sinon). La suite
-/// (PTX → code machine) est déjà mise en cache par le driver. Dossier : `GPUSYNC_CACHE_DIR`, sinon
-/// le cache utilisateur (`%LOCALAPPDATA%\gpusync`, `~/.cache/gpusync`, `~/Library/Caches/gpusync`) ;
-/// `GPUSYNC_CACHE=0` le désactive. Un fichier illisible est simplement recompilé.
+/// Disk cache of the PTX produced by NVRTC (~100 ms per kernel and per process otherwise). The rest
+/// (PTX → machine code) is already cached by the driver. Folder: `GPUSYNC_CACHE_DIR`, otherwise
+/// the user cache (`%LOCALAPPDATA%\gpusync`, `~/.cache/gpusync`, `~/Library/Caches/gpusync`);
+/// `GPUSYNC_CACHE=0` disables it. An unreadable file is simply recompiled.
 mod ptx_cache {
     use std::path::PathBuf;
 
@@ -716,7 +716,7 @@ mod ptx_cache {
         Some(base.join("gpusync").join("cuda"))
     }
 
-    /// FNV-1a 64 bits : clé stable entre exécutions et versions de Rust.
+    /// 64-bit FNV-1a: key stable across runs and Rust versions.
     fn key(code: &str, cc: i32) -> String {
         let mut h: u64 = 0xcbf29ce484222325;
         for b in VERSION.bytes().chain(cc.to_le_bytes()).chain(code.bytes()) {
@@ -728,7 +728,7 @@ mod ptx_cache {
 
     pub fn get(code: &str, cc: i32) -> Option<Vec<u8>> {
         let p = std::fs::read(dir()?.join(key(code, cc))).ok()?;
-        // PTX terminé par un zéro (attendu par cuModuleLoadData).
+        // PTX terminated by a zero (expected by cuModuleLoadData).
         (p.last() == Some(&0) && p.starts_with(b"//")).then_some(p)
     }
 

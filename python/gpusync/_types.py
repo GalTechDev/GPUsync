@@ -1,7 +1,7 @@
-"""Types des kernels : `gs.f32`, `gs.f32[:]`, etc.
+"""Kernel types: `gs.f32`, `gs.f32[:]`, etc.
 
-Un type scalaire sert à la fois d'annotation (`x: gs.f32[:]`, `s: gs.f32`), de conversion dans
-un kernel (`gs.i32(x)`) et de conversion en Python ordinaire (`gs.f32(3)` → `numpy.float32(3.0)`).
+A scalar type serves at once as an annotation (`x: gs.f32[:]`, `s: gs.f32`), as a conversion inside
+a kernel (`gs.i32(x)`) and as a conversion in plain Python (`gs.f32(3)` → `numpy.float32(3.0)`).
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ class DType:
         self.np = np.dtype(np_dtype)
 
     def __getitem__(self, dims) -> "ArrayType":
-        """Type tableau.
+        """Array type.
 
-        - `gs.f32[:]` : tableau de f32 (kernel élément par élément : toute forme) ;
-        - `gs.f32["n", "t"]` : tableau à 2 dimensions nommées ; une même lettre dans plusieurs
-          paramètres impose la même taille, et la sortie reprend ces noms (`-> gs.f32["n", "n"]`) ;
-        - `gs.f32[:, :]` : 2 dimensions sans nom (taille libre, lisible via `x.shape[k]`) ;
-        - `gs.i32[10]` : taille fixe (surtout pour les sorties `gs.Out[gs.i32[10]]`).
+        - `gs.f32[:]`: array of f32 (element-wise kernel: any shape);
+        - `gs.f32["n", "t"]`: array with 2 named dimensions; the same letter in several
+          parameters means the same size, and the output reuses these names (`-> gs.f32["n", "n"]`);
+        - `gs.f32[:, :]`: 2 unnamed dimensions (any size, readable through `x.shape[k]`);
+        - `gs.i32[10]`: fixed size (mostly for `gs.Out[gs.i32[10]]` outputs).
         """
         items = dims if isinstance(dims, tuple) else (dims,)
         out = []
@@ -38,12 +38,12 @@ class DType:
                 out.append(d)
             else:
                 raise TypeError(
-                    f"gs.{self.name}[{d!r}] : dimension attendue ':', un nom ou une taille ≥ 1 (ex. gs.{self.name}[\"n\", \"t\"], gs.{self.name}[10])"
+                    f"gs.{self.name}[{d!r}]: expected dimension ':', a name or a size ≥ 1 (e.g. gs.{self.name}[\"n\", \"t\"], gs.{self.name}[10])"
                 )
         return ArrayType(self, tuple(out))
 
     def __call__(self, value):
-        """Conversion en Python ordinaire (hors kernel)."""
+        """Conversion in plain Python (outside a kernel)."""
         return self.np.type(value)
 
     def __repr__(self) -> str:
@@ -57,13 +57,13 @@ class DType:
 
 
 class ArrayType:
-    """Tableau d'éléments d'un type scalaire (`gs.f32[:]`, `gs.f32["n", "t"]`)."""
+    """Array of elements of a scalar type (`gs.f32[:]`, `gs.f32["n", "t"]`)."""
 
     __slots__ = ("dtype", "dims")
 
     def __init__(self, dtype: DType, dims: tuple = (None,)) -> None:
         self.dtype = dtype
-        self.dims = dims  # nom de chaque dimension, None si sans nom
+        self.dims = dims  # name of each dimension, None if unnamed
 
     def __repr__(self) -> str:
         inner = ", ".join(":" if d is None else repr(d) for d in self.dims)
@@ -71,14 +71,14 @@ class ArrayType:
 
 
 class OutType:
-    """Sortie du mode explicite (`counts: gs.Out[gs.i32[10]]`) : allouée et mise à zéro par la
-    bibliothèque, écrite par `gs.atomic_add` / `atomic_min` / `atomic_max`, rendue comme résultat."""
+    """Explicit-mode output (`counts: gs.Out[gs.i32[10]]`): allocated and zero-filled by the
+    library, written by `gs.atomic_add` / `atomic_min` / `atomic_max`, returned as a result."""
 
     __slots__ = ("array", "fill")
 
     def __init__(self, array: ArrayType, fill=0) -> None:
         self.array = array
-        self.fill = fill  # valeur de départ de chaque case (0, ou ex. gs.inf pour atomic_min)
+        self.fill = fill  # start value of each cell (0, or e.g. gs.inf for atomic_min)
 
     def __repr__(self) -> str:
         return f"gs.Out[{self.array!r}]" if self.fill == 0 else f"gs.Out[{self.array!r}, {self.fill!r}]"
@@ -86,16 +86,16 @@ class OutType:
 
 class _Out:
     def __getitem__(self, t) -> OutType:
-        """`gs.Out[gs.i32[10]]` (cases à zéro) ou `gs.Out[gs.f32["m"], gs.inf]` (valeur de départ)."""
+        """`gs.Out[gs.i32[10]]` (cells at zero) or `gs.Out[gs.f32["m"], gs.inf]` (start value)."""
         fill = 0
         if isinstance(t, tuple):
             if len(t) != 2 or not isinstance(t[1], (int, float)) or isinstance(t[1], bool):
-                raise TypeError("gs.Out[type, valeur de départ] : ex. gs.Out[gs.f32[\"m\"], gs.inf]")
+                raise TypeError("gs.Out[type, start value]: e.g. gs.Out[gs.f32[\"m\"], gs.inf]")
             t, fill = t
         if not isinstance(t, ArrayType):
-            raise TypeError("gs.Out[...] attend un type tableau, ex. gs.Out[gs.i32[10]] ou gs.Out[gs.f32[\"n\"]]")
+            raise TypeError("gs.Out[...] expects an array type, e.g. gs.Out[gs.i32[10]] or gs.Out[gs.f32[\"n\"]]")
         if any(d is None for d in t.dims):
-            raise TypeError(f"gs.Out[{t!r}] : donnez la taille de chaque dimension (nom d'une dimension d'entrée ou entier)")
+            raise TypeError(f"gs.Out[{t!r}]: give the size of each dimension (name of an input dimension or integer)")
         return OutType(t, fill)
 
     def __repr__(self) -> str:

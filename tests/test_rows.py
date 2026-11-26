@@ -1,7 +1,7 @@
-"""Jalon M3 : kernels avec index découpés par blocs de lignes (ARCHITECTURE.md §9.7).
+"""Milestone M3: indexed kernels split into blocks of rows (ARCHITECTURE.md §9.7).
 
-Les réglages du moteur sont réduits pour forcer, sur de petits tableaux, de nombreux blocs dont le
-dernier est incomplet, dans chaque mode (Direct, Résident, par blocs), et des lancements cadencés.
+The engine settings are reduced to force, on small arrays, many blocks whose last one
+is incomplete, in every mode (Direct, Resident, chunked), and timed launches.
 """
 
 import numpy as np
@@ -16,9 +16,9 @@ from test_index import check, dtw, dtw_ref, matvec, moments, pairwise
 DEVICES = [d.id for d in gs.devices()]
 RNG = np.random.default_rng(31)
 
-# (taille de bloc, budget, taille de bloc Direct)
+# (chunk size, budget, Direct chunk size)
 CONFIGS = {
-    "blocs": dict(chunk_bytes=4000, budget_bytes=200_000, direct_chunk_bytes=12_000),
+    "chunks": dict(chunk_bytes=4000, budget_bytes=200_000, direct_chunk_bytes=12_000),
     "budget_minimal": dict(chunk_bytes=4000, budget_bytes=1, direct_chunk_bytes=12_000),
 }
 
@@ -32,14 +32,14 @@ def limits(request):
 
 @gs.kernel
 def gather(x: gs.f32["n"], idx: gs.i32["m"]) -> gs.f32["m"]:
-    """1 dimension : `idx` est découpé, `x` (lu à n'importe quel indice) reste entier."""
+    """1 dimension: `idx` is split, `x` (read at any index) stays whole."""
     i = gs.index()
     return x[idx[i]] * 2.0
 
 
 @gs.kernel
 def rescale(x: gs.f32["n", "t"]) -> gs.f32["n", "t"]:
-    """Une ligne lue en entier, mais toujours la ligne courante : découpée."""
+    """A row read whole, but always the current row: split."""
     i, j = gs.index()
     m = x[i, 0]
     for k in range(x.shape[1]):
@@ -49,15 +49,15 @@ def rescale(x: gs.f32["n", "t"]) -> gs.f32["n", "t"]:
 
 @gs.kernel
 def shifted(x: gs.f32["n", "t"]) -> gs.f32["n", "t"]:
-    """Lit la ligne suivante : `x` ne peut pas être découpé (reste entier)."""
+    """Reads the next row: `x` cannot be split (stays whole)."""
     i, j = gs.index()
     nxt = i + 1 if i + 1 < x.shape[0] else i
     return x[nxt, j] - x[i, j]
 
 
 def needs_whole(dev):
-    """Le budget peut-il s'appliquer ? Pas en mode Direct (cpu:0, OpenCL sur mémoire unifiée) ;
-    sur Metal, le mode Direct dépend de l'alignement des tableaux NumPy (aléatoire)."""
+    """Can the budget apply? Not in Direct mode (cpu:0, OpenCL on unified memory);
+    on Metal, Direct mode depends on the alignment of the NumPy arrays (random)."""
     return not (dev == "cpu:0" or (dev.startswith("opencl") and _core.device_zero_copy(dev)))
 
 
@@ -80,10 +80,10 @@ def test_whole_input_and_split_output(dev, limits):
     s = RNG.random((150, 6), dtype=np.float32)
     nxt = np.vstack([s[1:], s[-1:]])
     if limits == "budget_minimal" and needs_whole(dev) and not dev.startswith("metal"):
-        # `x` (lu aussi à la ligne j) ne tient pas dans un budget d'un octet : erreur qui le nomme.
-        with pytest.raises(gs.UnsupportedFeature, match="l'entrée 'x'.*indexez-la par la ligne courante"):
+        # `x` (also read at row j) does not fit in a one-byte budget: an error that names it.
+        with pytest.raises(gs.UnsupportedFeature, match="input 'x'.*index it by the current row"):
             pairwise(x, device=dev)
-        with pytest.raises(gs.UnsupportedFeature, match="l'entrée 'v'"):
+        with pytest.raises(gs.UnsupportedFeature, match="input 'v'"):
             matvec(x, v, device=dev)
         return
     xs = RNG.random(1000, dtype=np.float32)
@@ -115,9 +115,9 @@ def test_dtw_by_blocks(dev, limits):
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_input_left_on_device(dev):
-    """Une sortie restée sur le GPU, relue par blocs de lignes par le kernel suivant."""
+    """An output kept on the GPU, read back in blocks of rows by the next kernel."""
     x = RNG.random((200, 5), dtype=np.float32)
-    d = pairwise(x, device=dev)  # réglages par défaut : Résident sur GPU dédié
+    d = pairwise(x, device=dev)  # default settings: Resident on a discrete GPU
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
     _set_transfer_limits(chunk_bytes=4000, budget_bytes=10_000, direct_chunk_bytes=12_000)
     try:
@@ -130,7 +130,7 @@ def test_input_left_on_device(dev):
 
 @pytest.mark.parametrize("dev", [d for d in DEVICES if d != "cpu:0"])
 def test_paced_launches(dev):
-    """Grille de plus de 65 536 cases : plusieurs lancements chronométrés, résultat identique."""
+    """Grid of more than 65,536 cells: several timed launches, identical result."""
     x = RNG.random((700, 4), dtype=np.float32)
     ref = np.sqrt(((x[:, None] - x[None]) ** 2).sum(-1)).astype(np.float32)
     check(pairwise(x, device=dev), ref)
@@ -139,10 +139,10 @@ def test_paced_launches(dev):
 
 
 def test_block_mode():
-    """Sur GPU dédié, un appel au-delà du budget passe en mode « flux » (par blocs de lignes)."""
+    """On a discrete GPU, a call beyond the budget switches to "flux" mode (blocks of rows)."""
     dedicated = [d.id for d in gs.devices() if not d.unified_memory]
     if not dedicated:
-        pytest.skip("pas de GPU dédié")
+        pytest.skip("no discrete GPU")
     x = RNG.random((400, 8), dtype=np.float32)
     _set_transfer_limits(chunk_bytes=4000, budget_bytes=10_000)
     try:

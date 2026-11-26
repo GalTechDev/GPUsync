@@ -1,5 +1,5 @@
-"""Entiers 64 bits (gs.i64, gs.u64) : arithmétique, sémantique de Python, conversions, scalaires,
-élargissement implicite depuis 32 bits ; comparés à NumPy sur chaque périphérique."""
+"""64-bit integers (gs.i64, gs.u64): arithmetic, Python semantics, conversions, scalars,
+implicit widening from 32 bits; compared with NumPy on every device."""
 
 import numpy as np
 import pytest
@@ -25,7 +25,7 @@ def arith_u(x: gs.u64[:], y: gs.u64[:]) -> (gs.u64[:], gs.u64[:], gs.u64[:]):
 
 @gs.kernel
 def widen(a: gs.i32[:], b: gs.i64[:], u: gs.u32[:]) -> (gs.i64[:], gs.u64[:], gs.f32[:], gs.i32[:]):
-    # i32 + i64 → i64 ; u32 → u64 sans conversion écrite ; i64 → f32 ; i64 → i32 explicite.
+    # i32 + i64 → i64; u32 → u64 without a written conversion; i64 → f32; explicit i64 → i32.
     w = gs.u64(0)
     w = w + u
     return a + b, w * 3, gs.f32(b), gs.i32(b % 1000)
@@ -38,7 +38,7 @@ def cmp_select(x: gs.i64[:], y: gs.i64[:]) -> gs.i64[:]:
 
 @gs.kernel
 def residues(digits: gs.i32["n", "k"], d: gs.i64["n"]) -> gs.i64["n"]:
-    """Reste d'un grand nombre (chiffres base 256, poids fort en tête) modulo un diviseur < 2⁴⁰."""
+    """Remainder of a big number (base-256 digits, most significant first) modulo a divisor < 2⁴⁰."""
     i = gs.index()
     r = 0
     m = d[i]
@@ -58,8 +58,8 @@ def test_arithmetic_i64(dev):
     c = (1 << 45) + 7
     s, q, r, m = arith(x, y, c, device=dev)
     check(s, x * 3 + y - c)
-    check(q, x // y)  # sémantique de Python : arrondi vers −∞
-    check(r, x % y)  # reste du signe du diviseur
+    check(q, x // y)  # Python semantics: rounded toward −∞
+    check(r, x % y)  # remainder has the sign of the divisor
     check(m, np.maximum(np.abs(x), y))
 
 
@@ -94,7 +94,7 @@ def test_comparison_and_constant(dev):
 
 @pytest.mark.parametrize("dev", DEVICES)
 def test_residues_of_big_number(dev):
-    """Le cœur du crible profond : grand nombre (1 000 chiffres base 256) modulo d < 2⁴⁰."""
+    """The core of the deep sieve: big number (1,000 base-256 digits) modulo d < 2⁴⁰."""
     n = 300
     number = int.from_bytes(RNG.bytes(1000), "big")
     digits = np.frombuffer(number.to_bytes(1000, "big"), np.uint8).astype(np.int32)
@@ -112,7 +112,7 @@ def test_messages(tmp_path):
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("k", path)
-    with pytest.raises(gs.TypeMismatch, match="gs.Out en i64 non supportée"):
+    with pytest.raises(gs.TypeMismatch, match="gs.Out output in i64 not supported"):
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
     path.write_text(
@@ -120,10 +120,10 @@ def test_messages(tmp_path):
         "def k(x: gs.i32[:], y: gs.u64[:]) -> gs.u64[:]:\n    return x + y\n"
     )
     spec = importlib.util.spec_from_file_location("k2", path)
-    with pytest.raises(gs.TypeMismatch, match="i32 et u64 : conversion explicite"):
+    with pytest.raises(gs.TypeMismatch, match="between i32 and u64: explicit conversion"):
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
 
 def test_scalar_out_of_range():
-    with pytest.raises(gs.TypeMismatch, match="hors de la plage de i64"):
+    with pytest.raises(gs.TypeMismatch, match="range of i64"):
         arith(np.zeros(4, np.int64), np.ones(4, np.int64), 1 << 70)

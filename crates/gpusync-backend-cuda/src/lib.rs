@@ -1,6 +1,6 @@
-//! Backend CUDA (ARCHITECTURE.md §8, jalon M6). Le driver (`nvcuda` / `libcuda`) et NVRTC sont chargés
-//! dynamiquement : rien à installer à la compilation, et sur une machine sans GPU NVIDIA le backend est
-//! simplement indisponible, avec la raison.
+//! CUDA backend (ARCHITECTURE.md §8, milestone M6). The driver (`nvcuda` / `libcuda`) and NVRTC are loaded
+//! dynamically: nothing to install at build time, and on a machine without an NVIDIA GPU the backend is
+//! simply unavailable, with the reason.
 
 mod exec;
 mod sys;
@@ -18,8 +18,8 @@ impl Backend for CudaBackend {
         "cuda"
     }
 
-    /// Sans NVRTC, aucun kernel ne peut être compilé : le backend est indisponible (avec la façon de
-    /// l'installer), et le choix automatique passe au backend suivant.
+    /// Without NVRTC no kernel can be compiled: the backend is unavailable (with how to
+    /// install it), and the automatic choice moves on to the next backend.
     fn devices(&self) -> Result<Vec<DeviceInfo>, BackendError> {
         let devs = enumerate()?;
         if !devs.is_empty() && !sys::nvrtc_present() {
@@ -29,7 +29,7 @@ impl Backend for CudaBackend {
     }
 }
 
-/// Version de NVRTC chargée (ex. « 12.1 »), ou la raison de son absence.
+/// Version of the loaded NVRTC (e.g. "12.1"), or the reason it is missing.
 pub fn nvrtc_version() -> Result<String, BackendError> {
     let n = sys::nvrtc()?;
     let (a, b) = n.version();
@@ -41,28 +41,28 @@ pub(crate) fn enumerate() -> Result<Vec<(sys::CUdevice, DeviceInfo)>, BackendErr
     let mut version = 0;
     d.check(
         unsafe { (d.cuDriverGetVersion)(&mut version) },
-        "version du driver",
+        "driver version",
     )?;
     let mut count = 0;
     d.check(
         unsafe { (d.cuDeviceGetCount)(&mut count) },
-        "nombre de périphériques",
+        "device count",
     )?;
     let mut out = Vec::new();
     for i in 0..count {
         let mut dev = 0;
-        d.check(unsafe { (d.cuDeviceGet)(&mut dev, i) }, "périphérique")?;
+        d.check(unsafe { (d.cuDeviceGet)(&mut dev, i) }, "device")?;
         let mut name = [0 as c_char; 256];
         d.check(
             unsafe { (d.cuDeviceGetName)(name.as_mut_ptr(), 256, dev) },
-            "nom",
+            "name",
         )?;
         let name = unsafe { CStr::from_ptr(name.as_ptr()) }
             .to_string_lossy()
             .trim()
             .to_string();
         let mut mem = 0usize;
-        d.check(unsafe { (d.cuDeviceTotalMem_v2)(&mut mem, dev) }, "mémoire")?;
+        d.check(unsafe { (d.cuDeviceTotalMem_v2)(&mut mem, dev) }, "memory")?;
         let attr = |a| {
             let mut v = 0;
             unsafe { (d.cuDeviceGetAttribute)(&mut v, a, dev) };
@@ -83,15 +83,15 @@ pub(crate) fn enumerate() -> Result<Vec<(sys::CUdevice, DeviceInfo)>, BackendErr
                 },
                 vendor: "NVIDIA".into(),
                 version: format!(
-                    "CUDA {}.{} (capacité {major}.{minor})",
+                    "CUDA {}.{} (compute capability {major}.{minor})",
                     version / 1000,
                     (version % 1000) / 10
                 ),
-                // Tous les GPU NVIDIA calculent en f64, fonctions mathématiques comprises.
+                // Every NVIDIA GPU computes in f64, math functions included.
                 f64: true,
                 f64_math: true,
                 int64: true,
-                // Jetson : mémoire partagée, mais traitée comme un GPU dédié (pas de mode Direct à M6).
+                // Jetson: shared memory, but treated as a discrete GPU (no Direct mode in M6).
                 unified_memory: false,
                 memory_bytes: Some(mem as u64),
                 max_buffer_bytes: Some(mem as u64),

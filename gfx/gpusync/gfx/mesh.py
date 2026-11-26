@@ -1,4 +1,4 @@
-"""Maillages 3D procéduraux, chargeur Wavefront `.obj` et recettes sérialisables `.scene.json`."""
+"""Procedural 3D meshes, Wavefront `.obj` loader and serializable `.scene.json` recipes."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import numpy as np
 
 @dataclass
 class Mesh:
-    """Maillage indexé : positions `(N, 3)`, normales `(N, 3)`, UV `(N, 2)`, triangles `(T, 3)`."""
+    """Indexed mesh: positions `(N, 3)`, normals `(N, 3)`, UV `(N, 2)`, triangles `(T, 3)`."""
 
     positions: np.ndarray  # float32 (N, 3)
     normals: np.ndarray  # float32 (N, 3)
@@ -28,7 +28,7 @@ class Mesh:
     def num_triangles(self) -> int:
         return int(self.indices.shape[0])
 
-    # ── Constructeurs ergonomiques (avec recette sérialisable) ──
+    # ── Convenient constructors (with a serializable recipe) ──
 
     @classmethod
     def plane(cls, size: float = 16.0, subdivisions: int = 16) -> Mesh:
@@ -36,7 +36,7 @@ class Mesh:
 
     @classmethod
     def quad(cls, width: float = 2.0, height: float = 1.2) -> Mesh:
-        """Rectangle vertical face +Z (idéal pour écrans 3D, miroirs, affiches, panneaux UI)."""
+        """Vertical rectangle facing +Z (ideal for 3D screens, mirrors, posters, UI panels)."""
         return make_quad(width=width, height=height)
 
     @classmethod
@@ -71,12 +71,12 @@ class Mesh:
 
     @classmethod
     def from_gltf(cls, path: str | Path, *, normalize_size: float | None = None) -> Mesh:
-        """Charge un maillage glTF 2.0 / `.glb` (zéro dépendance externe)."""
+        """Loads a glTF 2.0 / `.glb` mesh (no external dependency)."""
         from .gltf import load_gltf_mesh
 
         return load_gltf_mesh(path, normalize_size=normalize_size)
 
-    # ── Sérialisation légère (.scene.json) ──
+    # ── Lightweight serialization (.scene.json) ──
 
     def to_dict(self, *, base_dir: Path | None = None) -> dict[str, Any]:
         if self.recipe is not None:
@@ -153,11 +153,11 @@ class Mesh:
                 uvs=np.ascontiguousarray(data["uvs"], dtype=np.float32),
                 indices=np.ascontiguousarray(data["indices"], dtype=np.int32),
             )
-        raise ValueError(f"Type de maillage inconnu dans le fichier scène : {kind!r}")
+        raise ValueError(f"Unknown mesh type in the scene file: {kind!r}")
 
 
 def make_plane_grid(size: float = 16.0, subdivisions: int = 16) -> Mesh:
-    """Plan horizontal Y=0 subdivisé en petits triangles (optimisé pour le rasterizer GPU)."""
+    """Horizontal plane Y=0 subdivided into small triangles (optimized for the GPU rasterizer)."""
     n = subdivisions + 1
     half = size * 0.5
     coords = np.linspace(-half, half, n, dtype=np.float32)
@@ -187,7 +187,7 @@ def make_plane_grid(size: float = 16.0, subdivisions: int = 16) -> Mesh:
 
 
 def make_quad(width: float = 2.0, height: float = 1.2) -> Mesh:
-    """Quad vertical face +Z avec UV `[0, 1] × [0, 1]` (v=0 en bas, v=1 en haut)."""
+    """Vertical quad facing +Z with UV `[0, 1] × [0, 1]` (v=0 at the bottom, v=1 at the top)."""
     hw, hh = width * 0.5, height * 0.5
     positions = np.array(
         [[-hw, -hh, 0.0], [hw, -hh, 0.0], [hw, hh, 0.0], [-hw, hh, 0.0]],
@@ -209,7 +209,7 @@ def make_quad(width: float = 2.0, height: float = 1.2) -> Mesh:
 
 
 def make_box(sx: float = 1.0, sy: float = 1.0, sz: float = 1.0, sub: int = 2) -> Mesh:
-    """Boîte à normales nettes (faces subdivisées pour garder des triangles compacts)."""
+    """Box with sharp normals (faces subdivided to keep compact triangles)."""
     hx, hy, hz = sx * 0.5, sy * 0.5, sz * 0.5
     faces = [
         ((0, 0, 1), (hx, 0, 0), (0, hy, 0), (0, 0, hz)),
@@ -253,7 +253,7 @@ def make_box(sx: float = 1.0, sy: float = 1.0, sz: float = 1.0, sub: int = 2) ->
 
 
 def make_uv_sphere(radius: float = 1.0, rings: int = 24, sectors: int = 36) -> Mesh:
-    """Sphère UV lisse."""
+    """Smooth UV sphere."""
     pos_list, norm_list, uv_list, idx_list = [], [], [], []
     for ir in range(rings + 1):
         v = ir / rings
@@ -290,7 +290,7 @@ def make_uv_sphere(radius: float = 1.0, rings: int = 24, sectors: int = 36) -> M
 def make_torus(
     major_r: float = 1.0, minor_r: float = 0.32, major_seg: int = 44, minor_seg: int = 22
 ) -> Mesh:
-    """Tore lisse centré à l'origine, dans le plan XZ."""
+    """Smooth torus centred at the origin, in the XZ plane."""
     pos_list, norm_list, uv_list, idx_list = [], [], [], []
     for i in range(major_seg + 1):
         u = i / major_seg
@@ -331,7 +331,7 @@ def make_torus(
 
 
 def make_cylinder(radius: float = 0.5, height: float = 2.0, sectors: int = 28) -> Mesh:
-    """Cylindre fermé avec normales propres sur les flancs et les couvercles."""
+    """Closed cylinder with clean normals on the sides and caps."""
     pos_list, norm_list, uv_list, idx_list = [], [], [], []
     hy = height * 0.5
     for iy, y in enumerate((-hy, hy)):
@@ -379,7 +379,7 @@ def make_cylinder(radius: float = 0.5, height: float = 2.0, sectors: int = 28) -
 
 
 def make_crystal(radius: float = 0.7, height: float = 2.0, sides: int = 8) -> Mesh:
-    """Cristal facetté (normales plates par face pour des reflets spéculaires francs)."""
+    """Faceted crystal (flat normals per face for crisp specular highlights)."""
     top = np.array([0.0, height * 0.5, 0.0], dtype=np.float32)
     bot = np.array([0.0, -height * 0.5, 0.0], dtype=np.float32)
     ring_hi = []
@@ -423,7 +423,7 @@ def make_crystal(radius: float = 0.7, height: float = 2.0, sides: int = 8) -> Me
 
 
 def load_obj(path: str | Path, *, normalize_size: float | None = None) -> Mesh:
-    """Charge un maillage Wavefront `.obj` (triangles ou quads, normales calculées si absentes)."""
+    """Loads a Wavefront `.obj` mesh (triangles or quads, normals computed if missing)."""
     p = Path(path)
     raw_v: list[tuple[float, float, float]] = []
     raw_vn: list[tuple[float, float, float]] = []

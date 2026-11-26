@@ -1,4 +1,4 @@
-"""GPUsync v2 — écrire des kernels GPU en Python et les exécuter sur n'importe quel GPU.
+"""GPUsync — write GPU kernels in Python and run them on any GPU.
 
     import numpy as np
     import gpusync as gs
@@ -8,20 +8,21 @@
         return (x - mean) / std
 
     x = np.random.rand(1_000_000).astype(np.float32)
-    y = normalize(x, x.mean(), x.std())     # gs.Array : calcul lancé sur le GPU
-    print(y[:5])                            # attend la fin et rapatrie
+    y = normalize(x, x.mean(), x.std())     # gs.Array: computation launched on the GPU
+    print(y[:5])                            # waits for the end and copies back
 
-État : jalon M6 (élément par élément, avec index, mode explicite à atomiques ; sans limite de taille ; await, DLPack ; CUDA). Voir ARCHITECTURE.md.
+Status: milestone M6 (element-wise, indexed, explicit mode with atomics; no size limit; await, DLPack; CUDA).
+See docs/ and ARCHITECTURE.md.
 """
 
 def _nvrtc_dirs() -> None:
-    """Dossiers des roues pip NVIDIA (`nvidia-cuda-nvrtc-cu12`…) où le backend CUDA cherche NVRTC,
-    en plus du toolkit CUDA et du PATH. Lu au premier kernel compilé en CUDA."""
+    """Folders of the NVIDIA pip wheels (`nvidia-cuda-nvrtc-cu12`…) where the CUDA backend looks for NVRTC,
+    besides the CUDA toolkit and the PATH. Read when the first kernel is compiled with CUDA."""
     import glob
     import os
     import sys
 
-    if "GPUSYNC_NVRTC_DIRS" in os.environ:  # choisi par l'utilisateur (vide : aucune roue)
+    if "GPUSYNC_NVRTC_DIRS" in os.environ:  # chosen by the user (empty: no wheel)
         return
     found = []
     for base in sys.path:
@@ -35,8 +36,8 @@ def _nvrtc_dirs() -> None:
 
 _nvrtc_dirs()
 
-# Le moteur graphique `gpusync.gfx` est un paquet à part (gpusync-gfx), qui ajoute `gpusync/gfx/` : installé à
-# côté de la bibliothèque ou ailleurs sur sys.path (mode modifiable), il est trouvé comme un sous-paquet.
+# The graphics engine `gpusync.gfx` is a separate package (gpusync-gfx) that adds `gpusync/gfx/`: installed
+# next to the library or elsewhere on sys.path (editable mode), it is found as a subpackage.
 __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 
 from . import _core  # noqa: E402
@@ -64,7 +65,7 @@ from ._device import (
     sync,
 )
 from ._kernel import Kernel, OutOfBounds, OutOfMemory, kernel
-from ._math import *  # noqa: F403  (sqrt, exp, … utilisables dans les kernels)
+from ._math import *  # noqa: F403  (sqrt, exp, … usable in kernels)
 from ._math import __all__ as _math_all
 from ._types import Out, f32, f64, i32, i64, u32, u64
 from ._window import Window
@@ -83,7 +84,7 @@ __all__ = [
 
 def __getattr__(name: str):
     if name == "gfx":
-        # `gs.gfx` : chargé au premier accès, s'il est installé
+        # `gs.gfx`: loaded on first access, if installed
         import importlib
 
         try:
@@ -92,8 +93,8 @@ def __getattr__(name: str):
             if e.name != f"{__name__}.gfx":
                 raise
             raise ImportError(
-                "gs.gfx : le moteur graphique est un paquet à part. Installez-le : pip install gpusync-gfx "
-                "(depuis le dépôt : pip install -e gfx)"
+                "gs.gfx: the graphics engine is a separate package. Install it: pip install gpusync-gfx "
+                "(from the repository: pip install -e gfx)"
             ) from None
         globals()["gfx"] = mod
         return mod

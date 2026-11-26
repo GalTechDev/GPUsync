@@ -1,9 +1,9 @@
-"""Nuages 3D autour du joueur, pilotés par une `Weather` : la carte fait le temps, la simulation 3D fait les nuages.
+"""3D clouds around the player, driven by a `Weather`: the map makes the weather, the 3D simulation makes the clouds.
 
-Un pavé périodique d'`Atmosphere` suit la colonne de la météo au-dessus du joueur. Toutes les minutes simulées, il en
-reçoit l'advection horizontale, la vitesse verticale, les flux de surface, la pression et un rappel lent des moyennes
-horizontales. Quand le joueur se déplace, l'air du pavé change de la différence entre les deux colonnes de la carte.
-Le raccord est à sens unique : les nuages 3D ne modifient pas la carte."""
+A periodic tile of `Atmosphere` follows the weather column above the player. Every simulated minute it
+receives from it the horizontal advection, the vertical velocity, the surface fluxes, the pressure and a slow
+relaxation of the horizontal means. When the player moves, the tile's air changes by the difference between the two map
+columns. The coupling is one-way: the 3D clouds do not change the map."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ from .weather import Weather
 
 
 class LocalClouds:
-    """`Atmosphere` qui suit la météo `weather` au point `(x, y)` (m, coordonnées de la carte).
+    """`Atmosphere` that follows the `weather` at point `(x, y)` (m, map coordinates).
 
-    `size`, `dx`, `dz`, `top` : pavé 3D. `nudge_time` : rappel de la température et de l'humidité moyennes ;
-    `wind_time` : rappel du vent. `every` : intervalle simulé entre deux échanges. `coarse` : départ sur une grille
-    `coarse` fois plus large, bien plus rapide ; `refine` passe ensuite à la maille `dx` sans interruption."""
+    `size`, `dx`, `dz`, `top`: 3D tile. `nudge_time`: relaxation of the mean temperature and humidity;
+    `wind_time`: relaxation of the wind. `every`: simulated interval between two exchanges. `coarse`: start on a grid
+    `coarse` times coarser, much faster; `refine` then switches to the `dx` mesh without interruption."""
 
     def __init__(
         self,
@@ -54,7 +54,7 @@ class LocalClouds:
     # ── Mise en place ──
 
     def start(self) -> None:
-        """(Re)commence la simulation 3D depuis la colonne de la carte : un ciel sans nuages, à laisser mûrir (`run`)."""
+        """(Re)starts the 3D simulation from the map column: a cloudless sky, to be left to mature (`run`)."""
         a = self._args
         s = self.weather.sample(self.x, self.y)
         n = 4 * max(4, round(a["size"] / a["dx"] / 4))
@@ -74,9 +74,9 @@ class LocalClouds:
             rain=True, ice=True, sponge_depth=0.25 * a["top"], max_dt=0.02 * a["dx"], cfl=0.8, initial={"theta_l": bump},
         )  # fmt: skip
         self.atmosphere = Atmosphere(cfg, device=self.weather.device)
-        self.offset = np.zeros(2)  # position du coin du pavé sur la carte (m)
+        self.offset = np.zeros(2)  # position of the tile's corner on the map (m)
         self.dt = self.atmosphere.stable_dt()
-        # L'horloge du pavé est celle de la carte
+        # The tile's clock is the map's
         self.time = self.weather.time
         self._next = self._rebased = self.time
         self._adv = self._wind = None
@@ -91,7 +91,7 @@ class LocalClouds:
         return self._coarse > 1
 
     def refine(self) -> None:
-        """Passe à la maille finale (l'état continue, interpolé). Entre deux pas seulement."""
+        """Switches to the final mesh (the state carries on, interpolated). Only between two steps."""
         if self._coarse > 1:
             self.atmosphere = self.atmosphere.refined(self._coarse)
             self._args["dx"] /= self._coarse
@@ -99,8 +99,8 @@ class LocalClouds:
             self.dt = self.atmosphere.stable_dt()
 
     def add_nest(self, size: float = 2400.0, dx: float = 25.0, dz: float = 75.0) -> NestedAtmosphere:
-        """Grille fine (`NestedAtmosphere`) autour du joueur, dans le pavé ; elle le suit par bonds. Sur toute la hauteur
-        du pavé : `dz` doit diviser `top`. Après `refine` seulement."""
+        """Fine grid (`NestedAtmosphere`) around the player, inside the tile; it follows the player in jumps. Over the
+        whole height of the tile: `dz` must divide `top`. Only after `refine`."""
         if self.refinable:
             raise RuntimeError("LocalClouds.add_nest : affiner d'abord (refine)")
         self._nest_args = dict(size=size, dx=dx, dz=dz)
@@ -112,26 +112,26 @@ class LocalClouds:
 
     @property
     def step_length(self) -> float:
-        """Durée d'un pas : celui de la grille fine s'il y en a une."""
+        """Duration of a step: that of the fine grid if there is one."""
         n = self.nest
         return self.dt if n is None or n._dt is None else n._dt[1]
 
     @property
     def clock(self) -> float:
-        """Instant de ce qu'on voit : la grille fine a jusqu'à un pas large de retard sur le pavé."""
+        """Instant of what is shown: the fine grid lags behind the tile by up to one coarse step."""
         return self.time if self.nest is None else self.time - (self.atmosphere.time - self.nest.time)
 
-    # ── Échange avec la carte ──
+    # ── Exchange with the map ──
 
     def _levels(self, s: dict) -> dict:
-        """Colonne de la carte aux niveaux du pavé."""
+        """Map column at the tile's levels."""
         z = self.atmosphere.z
         return {k: np.interp(z, s["z"], s[k]) for k in ("t", "qv", "qc", "u", "v", "w", "theta_adv", "q_adv", "p", "theta")}
 
     def _exchange(self) -> None:
         atm, weather = self.atmosphere, self.weather
         z = atm.z
-        # Déplacement du joueur : l'air du pavé prend la différence des deux colonnes
+        # Player moving: the tile's air takes the difference between the two columns
         moved = math.hypot(*(a - b for a, b in zip(self._place, (self.x, self.y))))
         if moved > 500.0:
             self._shift(self._levels(weather.sample(*self._place)), self._levels(weather.sample(self.x, self.y)))
@@ -140,8 +140,8 @@ class LocalClouds:
         c = self._levels(s)
         self.column, self.means = c, atm.level_means()
         m = self.means
-        # Advections lissées sur une demi-heure
-        # Advections et ascendance prises plus large : un orage résolu par la carte sur une maille n'est pas un forçage
+        # Advections smoothed over half an hour
+        # Advections and ascent taken wider: a storm resolved by the map on one cell is not a forcing
         b = self._levels(weather.sample(self.x, self.y, width=1.5))
         new = np.stack([b["theta_adv"] * b["t"] / b["theta"], b["q_adv"], b["w"]])
         keep = 0.0 if self._adv is None else math.exp(-self.every / 1800.0)
@@ -150,13 +150,13 @@ class LocalClouds:
         keep_part = np.minimum(1.0, 0.2 / np.maximum(np.abs(w), 1e-6))
         t_adv, q_adv, w = t_adv * keep_part, q_adv * keep_part, w * keep_part * np.clip(z / 1000.0, 0.0, 1.0)
         cooling = -weather.config.cooling / 86400.0 * np.clip((c["p"] - 15000.0) / 10000.0, 0.0, 1.0)
-        # Vent : la carte donne sa variation, le rappel rattrape le reste
+        # Wind: the map gives its change, the relaxation catches up with the rest
         wind = np.stack([c["u"], c["v"]])
         before = self._wind if moved <= 500.0 and self._wind is not None else (self.time, wind)
         lapse = self.time - before[0]
         du, dv = (wind - before[1]) / lapse if lapse > 0.0 else 0.0 * wind
         self._wind = (self.time, wind)
-        # Rappel : sur l'énergie d'eau liquide et l'eau totale (nuages compris), deux fois plus vif en altitude
+        # Relaxation: on liquid water static energy and total water (clouds included), twice as fast aloft
         relax = self.nudge_time * (1.0 - 0.5 * np.clip((z - 3000.0) / 3000.0, 0.0, 1.0))
         s_target = c["t"] + GRAVITY / CP * z - LV / CP * c["qc"]
         s_now = m["t"] + GRAVITY / CP * z - LV / CP * (m["qc"] + m["qr"])
@@ -172,12 +172,12 @@ class LocalClouds:
         cfg.surface_theta_flux, cfg.surface_qt_flux = s["theta_flux"], s["qt_flux"]
         cfg.friction_velocity = s["friction_velocity"]
         self.ground = s
-        # Repère : suit le vent moyen des nuages quand il a trop changé
+        # Frame: follows the mean cloud-layer wind when it has changed too much
         deep = (z > 500.0) & (z < 6000.0)
         fu, fv = float(c["u"][deep].mean()), float(c["v"][deep].mean())
         if math.hypot(fu - cfg.frame_u, fv - cfg.frame_v) > 3.0:
             atm.set_frame(fu, fv)
-        # Pression de référence : remise à jour toutes les dix minutes
+        # Reference pressure: updated every ten minutes
         if self.time - self._rebased >= 600.0 or moved > 500.0:
             atm.rebase(m["t"] if moved <= 500.0 else atm.level_means()["t"], *self._vapor(atm), s["surface_pressure"])
             self._rebased = self.time
@@ -194,10 +194,10 @@ class LocalClouds:
         ratio = np.clip((new["qv"] + new["qc"]) / np.maximum(old["qv"] + old["qc"], 1e-7), 0.2, 5.0)
         self.atmosphere.offset(s=ds, qt=ratio, u=new["u"] - old["u"], v=new["v"] - old["v"])
 
-    # ── Temps ──
+    # ── Time ──
 
     def parts(self, dt: float | None = None):
-        """Un pas du pavé en morceaux (générateur), météo et échanges compris : un morceau par image dans un jeu."""
+        """One tile step in pieces (a generator), weather and exchanges included: one piece per frame in a game."""
         atm = self.atmosphere
         if self.nest is not None:
             yield from self._nest_parts()
@@ -214,13 +214,13 @@ class LocalClouds:
             yield
 
     def _nest_parts(self):
-        """Un pas fin, précédé d'un pas du pavé quand la grille fine l'a rattrapé."""
+        """One fine step, preceded by a tile step when the fine grid has caught up with it."""
         atm, nest = self.atmosphere, self.nest
         if nest.steps % 40 == 0:
             nest.refresh_steps()
         before, clock = atm.time, nest.time
         yield from nest.tick_parts()
-        # Le repère avance avec ce qu'on voit
+        # The frame moves along with what is shown
         self.offset += (nest.time - clock) * np.array([atm.config.frame_u, atm.config.frame_v])
         if atm.time > before:
             self.time += atm.time - before
@@ -231,7 +231,7 @@ class LocalClouds:
                 self._exchange()
                 nest.follow()
                 yield
-        # La grille fine se recentre par bonds sur le joueur
+        # The fine grid recentres on the player in jumps
         x, y, _ = self.camera_position()
         cfg = nest.config
         cx, cy = (o + 0.5 * cfg.nx * cfg.dx for o in nest.origin)
@@ -249,23 +249,23 @@ class LocalClouds:
             self.step(min(self.dt, end + 1e-3 - self.clock))
             k += 1
             if k % 4 == 0:
-                gs.sync(self.weather.device)  # borne la file du GPU
+                gs.sync(self.weather.device)  # bounds the GPU queue
 
     def move_to(self, x: float, y: float) -> None:
-        """Place le joueur ; l'air du pavé suit au prochain échange. Après un grand saut, préférer `start`."""
+        """Places the player; the tile's air follows at the next exchange. After a big jump, prefer `start`."""
         self.x, self.y = float(x), float(y)
 
     # ── Vue ──
 
     def camera_position(self, height: float = 2.0) -> np.ndarray:
-        """Position du joueur dans le repère du pavé (qui se déplace avec le vent), ramenée dans le pavé."""
+        """Player position in the tile's frame (which moves with the wind), wrapped back into the tile."""
         cfg = self.atmosphere.config
         side = np.array([cfg.nx * cfg.dx, cfg.ny * cfg.dy])
         x, y = (np.array([self.x, self.y]) - self.offset) % side
         if self.nest is not None:
-            x, y = nearest(self.nest, x, y)  # le pavé est périodique : l'image du joueur voisine de la grille fine
+            x, y = nearest(self.nest, x, y)  # the tile is periodic: the image of the player next to the fine grid
         return np.array([x, y, float(height)])
 
     def sun(self) -> tuple[float, float]:
-        """Hauteur et azimut du soleil (degrés) au-dessus du joueur."""
+        """Elevation and azimuth of the sun (degrees) above the player."""
         return self.weather.sun_position(self.x, self.y)

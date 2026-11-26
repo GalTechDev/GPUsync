@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Mesures du jalon M1 : surcoût par appel, débit, pic mémoire (zéro-copie).
+"""Measurements of milestone M1: overhead per call, throughput, peak memory (zero-copy).
 
-    python tools/bench_m1.py latency            # tous les périphériques
-    python tools/bench_m1.py memory opencl:0    # pic mémoire sur 1 Gio (un processus par mesure)
-    python tools/bench_m1.py all                # latence + mémoire de chaque périphérique
+    python tools/bench_m1.py latency            # every device
+    python tools/bench_m1.py memory opencl:0    # peak memory on 1 GiB (one process per measurement)
+    python tools/bench_m1.py all                # latency + memory of each device
 
-Le surcoût est mesuré de bout en bout : appel du kernel + lecture du résultat (np.asarray), sur
-1 000 éléments, là où le calcul lui-même est négligeable. Référence prototype (M5 Pro, OpenCL) :
-3,07 ms par appel ; pyopencl brut : 0,30 ms. Objectif M1 : ≤ 0,3 ms.
+The overhead is measured end to end: kernel call + reading the result (np.asarray), on
+1,000 elements, where the computation itself is negligible. Prototype reference (M5 Pro, OpenCL):
+3.07 ms per call; raw pyopencl: 0.30 ms. M1 goal: ≤ 0.3 ms.
 """
 
 from __future__ import annotations
@@ -27,13 +27,13 @@ def normalize(x: gs.f32[:], mean: gs.f32, std: gs.f32) -> gs.f32[:]:
     return (x - mean) / std
 
 
-PEAK_KIND = "ram"  # Windows : "ram" (working set) ou "commit" (mémoire engagée)
+PEAK_KIND = "ram"  # Windows: "ram" (working set) or "commit" (committed memory)
 
 
 def peak_rss() -> int:
-    """Pic de mémoire physique du processus, en octets : mémoire résidente (macOS, Linux), working set
-    (Windows). Sous Windows, la mémoire engagée (PEAK_KIND = "commit") compte aussi les allocations
-    en VRAM réservées par le pilote, ce qui ne reflète pas la RAM utilisée."""
+    """Peak physical memory of the process, in bytes: resident memory (macOS, Linux), working set
+    (Windows). On Windows, committed memory (PEAK_KIND = "commit") also counts the VRAM allocations
+    reserved by the driver, which does not reflect the RAM used."""
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -46,13 +46,13 @@ def peak_rss() -> int:
             ]
 
         k32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
-        k32.GetCurrentProcess.restype = wintypes.HANDLE  # sinon le handle 64 bits est tronqué
+        k32.GetCurrentProcess.restype = wintypes.HANDLE  # otherwise the 64-bit handle is truncated
         psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(PMC), wintypes.DWORD]
         psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
         pmc = PMC()
         pmc.cb = ctypes.sizeof(PMC)
         if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(pmc), pmc.cb):
-            raise OSError("GetProcessMemoryInfo a échoué")
+            raise OSError("GetProcessMemoryInfo failed")
         return pmc.PeakWorkingSetSize if PEAK_KIND == "ram" else pmc.PeakPagefileUsage
     import resource
 
@@ -77,33 +77,33 @@ def latency(dev: str) -> None:
     for _ in range(reps):
         np.asarray(normalize(big, 0.5, 2.0, device=dev))
     big_ms = (time.perf_counter() - t) / reps * 1e3
-    gbs = 2 * big.nbytes / (big_ms / 1e3) / 1e9  # lecture + écriture
+    gbs = 2 * big.nbytes / (big_ms / 1e3) / 1e9  # read + write
     mark = "✓" if small <= 0.3 else "✗"
-    print(f"  {dev:<10} 1 000 éléments : {small:7.3f} ms/appel {mark}   |   10 M éléments : {big_ms:8.1f} ms ({gbs:5.1f} Go/s)", flush=True)
+    print(f"  {dev:<10} 1,000 elements: {small:7.3f} ms/call {mark}   |   10 M elements: {big_ms:8.1f} ms ({gbs:5.1f} GB/s)", flush=True)
 
 
 def memory(dev: str) -> None:
-    size = 1 << 30  # 1 Gio d'entrée
+    size = 1 << 30  # 1 GiB of input
     info = next(d for d in gs.devices() if d.id == dev)
     if info.max_buffer_bytes is not None and info.max_buffer_bytes < size:
-        print(f"  {dev:<10} 1 Gio dépasse la taille max d'un buffer ({info.max_buffer_bytes / 2**30:.2f} Gio) : "
-              "erreur claire attendue (out-of-core en M3)", flush=True)
+        print(f"  {dev:<10} 1 GiB exceeds the largest buffer size ({info.max_buffer_bytes / 2**30:.2f} GiB): "
+              "clear error expected (out-of-core in M3)", flush=True)
         try:
             normalize(np.zeros(size // 4, np.float32), 0.0, 1.0, device=dev)
         except gs.UnsupportedFeature as e:
             print(f"             → gs.UnsupportedFeature : {str(e)[:90]}…", flush=True)
         return
     x = np.empty(size // 4, dtype=np.float32)
-    x[:] = 1.0  # pages réellement allouées
+    x[:] = 1.0  # pages actually allocated
     base = peak_rss()
     y = normalize(x, 0.0, 2.0, device=dev)
     out = np.asarray(y)
-    # Lire tout le résultat : les pages écrites par le GPU ne comptent dans la mémoire
-    # résidente qu'une fois touchées par le CPU. Mesure honnête : la sortie compte pour 1 Gio.
+    # Read the whole result: pages written by the GPU only count in the resident memory
+    # once touched by the CPU. Honest measurement: the output counts for 1 GiB.
     assert float(out.sum(dtype=np.float64)) == 0.5 * out.size
     extra = peak_rss() - base
-    print(f"  {dev:<10} entrée 1,00 Gio → pic supplémentaire {extra / size:4.2f} Gio "
-          f"(sortie seule = 1,00) | zéro-copie : {'oui' if y.zero_copy else 'non'}", flush=True)
+    print(f"  {dev:<10} input 1.00 GiB → extra peak {extra / size:4.2f} GiB "
+          f"(output alone = 1.00) | zero-copy: {'yes' if y.zero_copy else 'no'}", flush=True)
 
 
 if __name__ == "__main__":
@@ -112,11 +112,11 @@ if __name__ == "__main__":
     if cmd == "memory" and len(sys.argv) > 2:
         memory(sys.argv[2])
     elif cmd in ("latency", "all"):
-        print("Surcoût par appel (appel + lecture du résultat) et débit :")
+        print("Overhead per call (call + reading the result) and throughput:")
         for d in devs:
             latency(d)
         if cmd == "all":
-            print("\nPic mémoire (un processus par périphérique) :", flush=True)
+            print("\nPeak memory (one process per device):", flush=True)
             for d in devs:
                 if d != "cpu:0":
                     subprocess.run([sys.executable, __file__, "memory", d], check=False)

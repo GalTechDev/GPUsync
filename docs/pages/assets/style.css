@@ -1,5 +1,5 @@
-/* GPUsync — site de documentation. Direction artistique de bio.galtech.cc : Inter pour le texte, JetBrains Mono
-   en capitales pour les titres et étiquettes, bleu #0056c6, angles vifs, filets #c2c6d8, fond à trame de points. */
+/* GPUsync — documentation website. Visual style of bio.galtech.cc: Inter for text, JetBrains Mono in capitals for
+   headings and labels, blue #0056c6, sharp corners, #c2c6d8 rules, dotted background. */
 
 :root {
   --primary: #0056c6;
@@ -114,7 +114,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   user-select: none;
 }
 
-/* ── Menu latéral ── */
+/* ── Side menu ── */
 
 .side {
   position: fixed;
@@ -183,7 +183,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 }
 .side-foot a { color: var(--on-surface-variant); }
 
-/* ── En-tête ── */
+/* ── Header ── */
 
 .page { margin-left: var(--side); min-height: 100vh; display: flex; flex-direction: column; }
 
@@ -234,7 +234,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 
 .menu-toggle { display: none; }
 
-/* ── Contenu ── */
+/* ── Content ── */
 
 .content {
   flex: 1;
@@ -305,7 +305,7 @@ code {
 a code { color: var(--primary); }
 h2 code, h3 code, .top-title code, .card-title code { text-transform: none; letter-spacing: 0; font-size: 0.85em; color: inherit; }
 
-/* Blocs de code : une carte, comme les projets du portfolio */
+/* Code blocks: a card, like the portfolio's projects */
 .code {
   margin: 20px 0;
   background: var(--surface-lowest);
@@ -351,7 +351,7 @@ h2 code, h3 code, .top-title code, .card-title code { text-transform: none; lett
 .tk-gs { color: var(--code-gs); }
 .tk-dec { color: var(--primary); font-weight: 600; }
 
-/* Étiquettes (PUBLIC / PRIVE du portfolio) */
+/* Badges (the portfolio's PUBLIC / PRIVE) */
 .badge {
   display: inline-block;
   padding: 3px 7px;
@@ -375,7 +375,7 @@ h2 code, h3 code, .top-title code, .card-title code { text-transform: none; lett
   background: var(--surface-low);
 }
 
-/* Tableaux */
+/* Tables */
 .table-wrap { margin: 20px 0; overflow-x: auto; border: 1px solid var(--outline-variant); background: var(--surface-lowest); }
 table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
 th {
@@ -393,7 +393,7 @@ td { padding: 10px 14px; border-top: 1px solid var(--outline-variant); vertical-
 tr:first-child td { border-top: 0; }
 td code { white-space: nowrap; }
 
-/* Sommaire de la page (écrans larges) */
+/* Page table of contents (wide screens) */
 .toc { position: sticky; top: calc(var(--top) + 32px); align-self: start; font-size: 13px; }
 .toc-title {
   font: 600 10px/1 var(--mono);
@@ -410,7 +410,7 @@ td code { white-space: nowrap; }
 }
 .toc a:hover { color: var(--primary); border-left-color: var(--primary); text-decoration: none; }
 
-/* Pied de page : précédent / suivant */
+/* Footer: previous / next */
 .pager { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 64px; }
 .pager a {
   display: block;
@@ -424,7 +424,7 @@ td code { white-space: nowrap; }
 .pager .name { display: block; margin-top: 8px; font: 600 15px/1.3 var(--mono); text-transform: uppercase; color: var(--primary); }
 .pager .next { text-align: right; grid-column: 2; }
 
-/* ── Accueil ── */
+/* ── Home ── */
 
 .hero { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr); gap: 40px; align-items: center; padding: 16px 0 8px; }
 .hero-title {
@@ -485,7 +485,7 @@ a.card:hover { border-color: var(--primary); text-decoration: none; }
 
 .scrim { display: none; }
 
-/* ── Écrans moyens et petits ── */
+/* ── Medium and small screens ── */
 
 @media (max-width: 1240px) {
   .content { grid-template-columns: minmax(0, 1fr); }

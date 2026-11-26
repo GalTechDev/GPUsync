@@ -1,12 +1,12 @@
-//! Exécution OpenCL (ARCHITECTURE.md §8, §9).
+//! OpenCL execution (ARCHITECTURE.md §8, §9).
 //!
-//! - **Deux files** par périphérique : `compute` (kernels, opérations sur mémoire hôte en zéro-copie)
-//!   et `transfer` (copies hôte ↔ périphérique), chaînées par événements : les transferts d'un bloc
-//!   se recouvrent avec le calcul d'un autre.
-//! - **Mémoire unifiée** : `wrap_host` crée un buffer `CL_MEM_USE_HOST_PTR` qui utilise directement la
-//!   mémoire de l'hôte ; `sync_host` (map + unmap) la rend cohérente après calcul.
-//! - **Mémoire épinglée** : `pinned` fournit des tampons `CL_MEM_ALLOC_HOST_PTR` mappés une fois pour
-//!   toutes ; un transfert depuis (ou vers) leur pointeur se fait par DMA à pleine vitesse.
+//! - **Two queues** per device: `compute` (kernels, zero-copy operations on host memory)
+//!   and `transfer` (host ↔ device copies), chained by events: the transfers of one chunk
+//!   overlap with the computation of another.
+//! - **Unified memory**: `wrap_host` creates a `CL_MEM_USE_HOST_PTR` buffer that uses host memory
+//!   directly; `sync_host` (map + unmap) makes it coherent after the computation.
+//! - **Pinned memory**: `pinned` provides `CL_MEM_ALLOC_HOST_PTR` buffers mapped once and
+//!   for all; a transfer from (or to) their pointer goes through DMA at full speed.
 
 use std::collections::{HashMap, VecDeque};
 use std::ptr;
@@ -29,7 +29,7 @@ fn err(what: &str, e: impl std::fmt::Display) -> BackendError {
     BackendError(format!("OpenCL : {what} ({e})"))
 }
 
-/// Un périphérique OpenCL ouvert.
+/// An open OpenCL device.
 pub struct ClDevice {
     pub info: DeviceInfo,
     context: Context,
@@ -37,25 +37,25 @@ pub struct ClDevice {
     transfer: CommandQueue,
     kernels: Mutex<HashMap<String, Arc<ClKernel>>>,
     pinned_pool: Mutex<HashMap<usize, Vec<Pinned>>>,
-    /// Tampons épinglés qu'un envoi en file lit encore, du plus ancien au plus récent.
+    /// Pinned buffers that a queued upload still reads, oldest first.
     pinned_busy: Mutex<VecDeque<(Pinned, Event)>>,
     pool: Arc<BufPool>,
 }
 
-/// Kernel compilé. `set_arg` + lancement doivent être atomiques : d'où le verrou.
+/// Compiled kernel. `set_arg` + launch must be atomic: hence the lock.
 pub struct ClKernel {
     kernel: Mutex<Kernel>,
     _program: Program,
-    /// Taille de groupe imposée (`group=`) ; sinon choisie par le driver.
+    /// Group size required (`group=`); otherwise chosen by the driver.
     local: Option<usize>,
 }
 
-/// Buffer OpenCL, éventuellement adossé à la mémoire de l'hôte (`host_ptr` non nul).
+/// OpenCL buffer, possibly backed by host memory (non-null `host_ptr`).
 pub struct ClBuffer {
     buf: std::mem::ManuallyDrop<Buffer<u8>>,
     pub bytes: usize,
     pub host_ptr: *mut u8,
-    /// Capacité réelle et réserve où le rendre (buffers en mémoire du périphérique).
+    /// Actual capacity and pool to return it to (buffers in device memory).
     cap: usize,
     pool: Option<Arc<BufPool>>,
 }
@@ -69,8 +69,8 @@ impl Drop for ClBuffer {
     }
 }
 
-/// Buffers mis en réserve : capacité arrondie à la puissance de deux jusqu'à 64 Mio, taille exacte
-/// au-delà, 2 Gio en tout (rendus au driver si une allocation échoue).
+/// Pooled buffers: capacity rounded up to a power of two up to 64 MiB, exact size
+/// beyond, 2 GiB in all (given back to the driver if an allocation fails).
 const POOL_POW2_MAX: usize = 64 << 20;
 const POOL_MAX_TOTAL: usize = 2 << 30;
 
@@ -83,10 +83,10 @@ fn capacity(bytes: usize) -> usize {
     }
 }
 
-/// Réserve de buffers libérés : `clCreateBuffer` donne une mémoire neuve, payée à la première
-/// écriture. Un buffer rendu est gardé avec un marqueur par file ; il est repris de préférence une
-/// fois les marqueurs passés, sinon tout de suite, chaque file attendant (barrière côté
-/// périphérique, sans bloquer l'hôte) le marqueur de l'autre, son propre ordre faisant le reste.
+/// Pool of released buffers: `clCreateBuffer` gives fresh memory, paid for at the first
+/// write. A returned buffer is kept with one marker per queue; it is preferably taken again once
+/// the markers have passed, otherwise right away, each queue waiting (a barrier on the
+/// device, without blocking the host) for the other's marker, its own order doing the rest.
 struct BufPool {
     compute: opencl3::types::cl_command_queue,
     transfer: opencl3::types::cl_command_queue,
@@ -113,7 +113,7 @@ impl BufPool {
     fn give(&self, cap: usize, buf: Buffer<u8>) {
         let mut g = self.free.lock().unwrap_or_else(|e| e.into_inner());
         if g.1 + cap > POOL_MAX_TOTAL {
-            return; // libéré par le driver une fois les commandes en file terminées
+            return; // released by the driver once the queued commands are done
         }
         if let (Some(c), Some(t)) = (marker(self.compute, &[]), marker(self.transfer, &[])) {
             g.0.push((cap, buf, [c, t]));
@@ -138,7 +138,7 @@ impl BufPool {
         let (c, buf, [ec, et]) = g.0.swap_remove(pos);
         g.1 -= c;
         if ready.is_none() {
-            // Envelopper les cl_event retournés dans Event::new pour qu'ils soient libérés (clReleaseEvent).
+            // Wrap the returned cl_events in Event::new so that they get released (clReleaseEvent).
             let b1 = unsafe {
                 opencl3::command_queue::enqueue_barrier_with_wait_list(self.compute, 1, &et.get())
             }
@@ -166,7 +166,7 @@ impl BufPool {
     }
 }
 
-// Les objets OpenCL (cl_mem, cl_event) sont utilisables depuis n'importe quel thread.
+// OpenCL objects (cl_mem, cl_event) can be used from any thread.
 unsafe impl Send for ClBuffer {}
 unsafe impl Sync for ClBuffer {}
 
@@ -175,15 +175,15 @@ impl ClBuffer {
         !self.host_ptr.is_null()
     }
 
-    /// Vue « Buffer » empruntée (les API opencl3 attendent `&Buffer<T>`), sans prise de propriété.
+    /// Borrowed "Buffer" view (opencl3 APIs expect `&Buffer<T>`), without taking ownership.
     fn view(&self) -> std::mem::ManuallyDrop<Buffer<u8>> {
         std::mem::ManuallyDrop::new(Buffer::new(self.buf.get()))
     }
 }
 
-/// Tampon hôte épinglé, mappé en permanence ; rendu au pool à la destruction.
+/// Pinned host buffer, permanently mapped; returned to the pool on drop.
 pub struct Pinned {
-    _buf: Buffer<u8>, // propriétaire : le tampon reste mappé tant qu'il vit
+    _buf: Buffer<u8>, // owner: the buffer stays mapped while it lives
     pub ptr: *mut u8,
     pub bytes: usize,
 }
@@ -191,7 +191,7 @@ pub struct Pinned {
 unsafe impl Send for Pinned {}
 unsafe impl Sync for Pinned {}
 
-/// Argument de lancement, dans l'ordre des paramètres du kernel.
+/// Launch argument, in kernel parameter order.
 pub enum ClArg<'a> {
     Buf(&'a ClBuffer),
     I32(i32),
@@ -209,7 +209,7 @@ fn wait_list(events: &[&Event]) -> Vec<cl_event> {
 }
 
 impl ClDevice {
-    /// Ouvre (une seule fois par processus) le périphérique d'index `index` (`opencl:<index>`).
+    /// Opens (once per process) the device of index `index` (`opencl:<index>`).
     pub fn open(index: usize) -> Result<Arc<ClDevice>, BackendError> {
         let mut open = OPEN
             .get_or_init(Default::default)
@@ -221,15 +221,15 @@ impl ClDevice {
         let (id, info) = crate::enumerate()?
             .into_iter()
             .nth(index)
-            .ok_or_else(|| BackendError(format!("périphérique opencl:{index} introuvable")))?;
+            .ok_or_else(|| BackendError(format!("device opencl:{index} not found")))?;
         let device = Device::new(id);
-        let context = Context::from_device(&device).map_err(|e| err("création du contexte", e))?;
-        #[allow(deprecated)] // clCreateCommandQueue : seule API disponible en OpenCL 1.2 (Apple)
+        let context = Context::from_device(&device).map_err(|e| err("context creation", e))?;
+        #[allow(deprecated)] // clCreateCommandQueue: the only API available in OpenCL 1.2 (Apple)
         let compute =
-            CommandQueue::create_default(&context, 0).map_err(|e| err("création de la file", e))?;
+            CommandQueue::create_default(&context, 0).map_err(|e| err("queue creation", e))?;
         #[allow(deprecated)]
         let transfer =
-            CommandQueue::create_default(&context, 0).map_err(|e| err("création de la file", e))?;
+            CommandQueue::create_default(&context, 0).map_err(|e| err("queue creation", e))?;
         let pool = Arc::new(BufPool {
             compute: compute.get(),
             transfer: transfer.get(),
@@ -249,8 +249,8 @@ impl ClDevice {
         Ok(d)
     }
 
-    /// Compile (avec cache) le code OpenCL C et renvoie le kernel `entry`.
-    /// `group` : taille de groupe imposée par le kernel (mémoire partagée, barrières).
+    /// Compiles (with a cache) the OpenCL C code and returns the kernel `entry`.
+    /// `group`: group size required by the kernel (shared memory, barriers).
     pub fn compile(
         &self,
         code: &str,
@@ -261,15 +261,15 @@ impl ClDevice {
         if let Some(k) = cache.get(code) {
             return Ok(k.clone());
         }
-        // Pas de -cl-fast-relaxed-math : la précision prime (résultats comparés à NumPy).
+        // No -cl-fast-relaxed-math: precision comes first (results compared with NumPy).
         let program =
             Program::create_and_build_from_source(&self.context, code, "").map_err(|log| {
                 BackendError(format!(
-                    "échec de compilation OpenCL sur {} :\n{log}",
+                    "OpenCL compilation failed on {}:\n{log}",
                     self.info.name
                 ))
             })?;
-        let kernel = Kernel::create(&program, entry).map_err(|e| err("création du kernel", e))?;
+        let kernel = Kernel::create(&program, entry).map_err(|e| err("kernel creation", e))?;
         let k = Arc::new(ClKernel {
             kernel: Mutex::new(kernel),
             _program: program,
@@ -279,7 +279,7 @@ impl ClDevice {
         Ok(k)
     }
 
-    /// Buffer en mémoire du périphérique.
+    /// Buffer in device memory.
     pub fn alloc(&self, bytes: usize) -> Result<ClBuffer, BackendError> {
         let cap = capacity(bytes);
         let create = || unsafe {
@@ -290,7 +290,7 @@ impl ClDevice {
             None => match create() {
                 Ok(b) => b,
                 Err(_) => {
-                    // Mémoire pleine : rendre la réserve au driver, puis réessayer.
+                    // Memory full: give the pool back to the driver, then try again.
                     self.finish()?;
                     self.pool.trim();
                     create().map_err(|e| err("allocation", e))?
@@ -306,10 +306,10 @@ impl ClDevice {
         })
     }
 
-    /// Buffer qui utilise directement la mémoire de l'hôte (zéro-copie sur mémoire unifiée).
+    /// Buffer that uses host memory directly (zero-copy on unified memory).
     ///
     /// # Safety
-    /// `ptr` doit rester valide (et ne pas être libéré) tant que le buffer peut être utilisé.
+    /// `ptr` must stay valid (and not be freed) as long as the buffer may be used.
     pub unsafe fn wrap_host(&self, ptr: *mut u8, bytes: usize) -> Result<ClBuffer, BackendError> {
         let buf = unsafe {
             Buffer::<u8>::create(
@@ -319,7 +319,7 @@ impl ClDevice {
                 ptr.cast(),
             )
         }
-        .map_err(|e| err("buffer adossé à l'hôte", e))?;
+        .map_err(|e| err("host-backed buffer", e))?;
         Ok(ClBuffer {
             buf: std::mem::ManuallyDrop::new(buf),
             bytes,
@@ -329,7 +329,7 @@ impl ClDevice {
         })
     }
 
-    /// Tampon épinglé d'au moins `bytes` octets (pris dans le pool si possible).
+    /// Pinned buffer of at least `bytes` bytes (taken from the pool if possible).
     pub fn pinned(&self, bytes: usize) -> Result<Pinned, BackendError> {
         self.reclaim();
         if let Some(p) = self
@@ -349,7 +349,7 @@ impl ClDevice {
                 ptr::null_mut(),
             )
         }
-        .map_err(|e| err("tampon épinglé", e))?;
+        .map_err(|e| err("pinned buffer", e))?;
         let mut mapped: cl_mem = ptr::null_mut();
         unsafe {
             self.transfer
@@ -362,7 +362,7 @@ impl ClDevice {
                     &mut mapped,
                     &[],
                 )
-                .map_err(|e| err("map d'un tampon épinglé", e))?;
+                .map_err(|e| err("mapping a pinned buffer", e))?;
         }
         Ok(Pinned {
             _buf: buf,
@@ -371,13 +371,13 @@ impl ClDevice {
         })
     }
 
-    /// Remet en réserve les tampons dont l'envoi est terminé (la file de transfert est ordonnée).
+    /// Puts back into the pool the buffers whose upload is done (the transfer queue is ordered).
     fn reclaim(&self) {
         loop {
             let p = {
                 let mut busy = self.pinned_busy.lock().unwrap_or_else(|e| e.into_inner());
                 match busy.front() {
-                    // Terminé (0) ou en erreur (négatif).
+                    // Done (0) or failed (negative).
                     Some((_, e)) if e.command_execution_status().is_ok_and(|s| s.0 <= 0) => {
                         busy.pop_front().map(|(p, _)| p)
                     }
@@ -391,11 +391,11 @@ impl ClDevice {
         }
     }
 
-    /// Rend un tampon épinglé que l'envoi `e` lit encore. Au-delà de 64 envois en cours, attend le plus
-    /// ancien (mémoire bornée).
+    /// Returns a pinned buffer that upload `e` still reads. Beyond 64 uploads in flight, waits for the
+    /// oldest (bounded memory).
     pub fn recycle_after(&self, p: Pinned, e: &Event) -> Result<(), BackendError> {
         unsafe { opencl3::event::retain_event(e.get()) }
-            .map_err(|e| err("événement d'envoi", opencl3::error_codes::ClError(e)))?;
+            .map_err(|e| err("upload event", opencl3::error_codes::ClError(e)))?;
         let old = {
             let mut busy = self.pinned_busy.lock().unwrap_or_else(|e| e.into_inner());
             busy.push_back((p, Event::new(e.get())));
@@ -408,7 +408,7 @@ impl ClDevice {
         Ok(())
     }
 
-    /// Rend un tampon épinglé au pool (il reste mappé, prêt à resservir ; borné par taille).
+    /// Returns a pinned buffer to the pool (it stays mapped, ready for reuse; bounded per size).
     pub fn recycle(&self, p: Pinned) {
         let mut pool = self.pinned_pool.lock().unwrap_or_else(|e| e.into_inner());
         let slot = pool.entry(p.bytes).or_default();
@@ -417,10 +417,10 @@ impl ClDevice {
         }
     }
 
-    /// Copie hôte → périphérique (file de transfert, non bloquante), après `wait`.
+    /// Host → device copy (transfer queue, non-blocking), after `wait`.
     ///
     /// # Safety
-    /// `src` doit rester valide jusqu'à la fin de l'événement renvoyé.
+    /// `src` must stay valid until the returned event completes.
     pub unsafe fn write_at(
         &self,
         dst: &ClBuffer,
@@ -440,13 +440,13 @@ impl ClDevice {
                 &wait_list(wait),
             )
         }
-        .map_err(|e| err("écriture", e))
+        .map_err(|e| err("write", e))
     }
 
-    /// Copie périphérique → hôte (file de transfert, non bloquante), après `wait`.
+    /// Device → host copy (transfer queue, non-blocking), after `wait`.
     ///
     /// # Safety
-    /// `dst` doit rester valide jusqu'à la fin de l'événement renvoyé.
+    /// `dst` must stay valid until the returned event completes.
     pub unsafe fn read_at(
         &self,
         src: &ClBuffer,
@@ -465,10 +465,10 @@ impl ClDevice {
                 &wait_list(wait),
             )
         }
-        .map_err(|e| err("lecture", e))
+        .map_err(|e| err("read", e))
     }
 
-    /// Copie périphérique → périphérique (file de transfert), après `wait`.
+    /// Device → device copy (transfer queue), after `wait`.
     pub fn copy_at(
         &self,
         src: &ClBuffer,
@@ -492,7 +492,7 @@ impl ClDevice {
         .map_err(|e| err("copie", e))
     }
 
-    /// Met le kernel en file de calcul sur `n` éléments, après `wait`.
+    /// Queues the kernel on the compute queue over `n` elements, after `wait`.
     pub fn launch(
         &self,
         k: &ClKernel,
@@ -533,18 +533,18 @@ impl ClDevice {
             exec.set_event_wait_list(&waits)
                 .enqueue_nd_range(&self.compute)
         }
-        .map_err(|e| err("lancement du kernel", e))?;
+        .map_err(|e| err("kernel launch", e))?;
         self.compute.flush().map_err(|e| err("flush", e))?;
         Ok(ev)
     }
 
-    /// Envoie les commandes des deux files au périphérique sans attendre.
+    /// Sends the commands of both queues to the device without waiting.
     pub fn flush(&self) -> Result<(), BackendError> {
         self.transfer.flush().map_err(|e| err("flush", e))?;
         self.compute.flush().map_err(|e| err("flush", e))
     }
 
-    /// Rend la mémoire hôte d'un buffer `wrap_host` cohérente (attend la fin des calculs).
+    /// Makes the host memory of a `wrap_host` buffer coherent (waits for the computations).
     pub fn sync_host(&self, buf: &ClBuffer) -> Result<(), BackendError> {
         let mut mapped: cl_mem = ptr::null_mut();
         unsafe {
@@ -566,7 +566,7 @@ impl ClDevice {
         self.compute.finish().map_err(|e| err("finish", e))
     }
 
-    /// Attend la fin de tout ce qui est en file (calcul et transferts).
+    /// Waits for everything queued (computation and transfers).
     pub fn finish(&self) -> Result<(), BackendError> {
         self.compute.finish().map_err(|e| err("finish", e))?;
         self.transfer.finish().map_err(|e| err("finish", e))

@@ -1,7 +1,7 @@
-"""Jalon M4 : le même code dans un script, dans du code asyncio et dans Jupyter (critère du jalon).
+"""Milestone M4: the same code in a script, in asyncio code and in Jupyter (the milestone's criterion).
 
-Chaque variante tourne dans un processus neuf ; Jupyter est exécuté pour de vrai (nbclient + ipykernel,
-dépendances de développement), le kernel étant défini dans une cellule du notebook.
+Each variant runs in a fresh process; Jupyter is really executed (nbclient + ipykernel,
+development dependencies), the kernel being defined in a notebook cell.
 """
 
 import json
@@ -86,16 +86,16 @@ def test_script_and_asyncio(variant, tmp_path):
     same(parse(r.stdout), reference())
 
 
-@pytest.mark.filterwarnings("ignore:Proactor event loop:RuntimeWarning")  # zmq sous Windows
+@pytest.mark.filterwarnings("ignore:Proactor event loop:RuntimeWarning")  # zmq on Windows
 def test_jupyter(tmp_path):
     nbformat = pytest.importorskip("nbformat")
     nbclient = pytest.importorskip("nbclient")
     pytest.importorskip("ipykernel")
     nb = nbformat.v4.new_notebook()
     nb.cells = [
-        nbformat.v4.new_code_cell("import json\n" + KERNEL),  # kernels définis dans une cellule
+        nbformat.v4.new_code_cell("import json\n" + KERNEL),  # kernels defined in a cell
         nbformat.v4.new_code_cell(SYNC),
-        nbformat.v4.new_code_cell(AWAIT_TOP),  # await au niveau de la cellule (boucle de Jupyter)
+        nbformat.v4.new_code_cell(AWAIT_TOP),  # await at cell level (Jupyter's loop)
         nbformat.v4.new_code_cell("d"),  # affichage d'un gs.Array
     ]
     client = nbclient.NotebookClient(nb, timeout=120, kernel_name="python3", resources={"metadata": {"path": str(tmp_path)}})

@@ -1,14 +1,14 @@
-"""`gs.Window` : fenêtre native GPU (winit + wgpu), sans Pygame ni Tkinter.
+"""`gs.Window`: native GPU window (winit + wgpu), without Pygame or Tkinter.
 
     import gpusync as gs
 
-    with gs.Window(1024, 576, title="Démo") as win:
+    with gs.Window(1024, 576, title="Demo") as win:
         while win.open:
             for ev in win.poll():
                 if ev["type"] == "key_down" and ev["key"] == "escape":
                     win.close()
-            fb = render_kernel(...)      # gs.Array u32 (H, W) : reste sur le GPU
-            win.present(fb)              # zéro copie CPU sur Metal / Vulkan / DX12 !
+            fb = render_kernel(...)      # gs.Array u32 (H, W): stays on the GPU
+            win.present(fb)              # no CPU copy on Metal / Vulkan / DX12!
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from ._device import resolve
 
 
 class Window:
-    """Fenêtre native GPU affichant directement un `gs.Array` (zéro copie sur le même périphérique wgpu)
-    ou un tableau NumPy (`uint32` `(H, W)`, `uint8` `(H, W, 4)` ou `uint8` `(H, W, 3)`)."""
+    """Native GPU window showing a `gs.Array` directly (no copy on the same wgpu device)
+    or a NumPy array (`uint32` `(H, W)`, `uint8` `(H, W, 4)` or `uint8` `(H, W, 3)`)."""
 
     __slots__ = ("_win", "_rgba_scratch")
 
@@ -46,17 +46,17 @@ class Window:
 
     @property
     def device(self) -> str:
-        """Périphérique wgpu attaché à la fenêtre (ex. 'metal:0', 'vulkan:0')."""
+        """wgpu device attached to the window (e.g. 'metal:0', 'vulkan:0')."""
         return self._win.device
 
     @property
     def size(self) -> tuple[int, int]:
-        """Taille logique `(largeur, hauteur)` de la zone d'affichage."""
+        """Logical size `(width, height)` of the drawing area."""
         return self._win.size
 
     @property
     def physical_size(self) -> tuple[int, int]:
-        """Taille physique `(largeur, hauteur)` en pixels réels (HiDPI / Retina)."""
+        """Physical size `(width, height)` in real pixels (HiDPI / Retina)."""
         return self._win.physical_size
 
     @property
@@ -77,7 +77,7 @@ class Window:
 
     @property
     def zero_copy(self) -> bool:
-        """La dernière image présentée est-elle passée directement GPU → écran sans copie CPU ?"""
+        """Did the last presented image go straight from the GPU to the screen, without a CPU copy?"""
         return self._win.zero_copy
 
     def set_title(self, title: str) -> None:
@@ -99,20 +99,20 @@ class Window:
         return self._win.key_down(key)
 
     def poll(self) -> list[dict]:
-        """Pompe les événements système (clavier, souris, redimensionnement, fermeture) sans bloquer."""
+        """Pumps system events (keyboard, mouse, resize, close) without blocking."""
         return self._win.poll()
 
     def present(self, frame) -> None:
-        """Affiche une image :
-        - `gs.Array` de type `uint32` et forme `(H, W)` (RGBA8 empaqueté `R | G<<8 | B<<16 | A<<24`) :
-          **zéro copie CPU** s'il réside sur le même GPU wgpu que la fenêtre ;
-        - `np.ndarray` de forme `(H, W)` `uint32`, `(H, W, 4)` `uint8` (RGBA) ou `(H, W, 3)` `uint8` (RGB).
+        """Shows an image:
+        - `gs.Array` of type `uint32` and shape `(H, W)` (RGBA8 packed `R | G<<8 | B<<16 | A<<24`):
+          **no CPU copy** if it lives on the same wgpu GPU as the window;
+        - `np.ndarray` of shape `(H, W)` `uint32`, `(H, W, 4)` `uint8` (RGBA) or `(H, W, 3)` `uint8` (RGB).
         """
         if isinstance(frame, Array):
             if frame.ndim != 2 or frame.dtype != np.uint32:
                 raise _core.TypeMismatch(
-                    f"gs.Window.present : un gs.Array doit être uint32 2D (H, W) RGBA empaqueté, "
-                    f"reçu {frame.dtype} {frame.shape}"
+                    f"gs.Window.present: a gs.Array must be 2-D uint32 (H, W) packed RGBA, "
+                    f"got {frame.dtype} {frame.shape}"
                 )
             h, w = frame.shape
             if frame._handle is not None and not frame._ready:
@@ -142,8 +142,8 @@ class Window:
             self._win.present_host(self._rgba_scratch.ctypes.data, self._rgba_scratch.nbytes, w, h)
         else:
             raise _core.TypeMismatch(
-                f"gs.Window.present : attendu gs.Array uint32 (H, W) ou ndarray uint32 (H, W) / "
-                f"uint8 (H, W, 4) / uint8 (H, W, 3), reçu {arr.dtype} {arr.shape}"
+                f"gs.Window.present: expected a gs.Array uint32 (H, W) or an ndarray uint32 (H, W) / "
+                f"uint8 (H, W, 4) / uint8 (H, W, 3), got {arr.dtype} {arr.shape}"
             )
 
     def close(self) -> None:

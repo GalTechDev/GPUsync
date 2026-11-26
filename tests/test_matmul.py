@@ -1,6 +1,6 @@
-"""gs.matmul_u8 : produit de matrices d'octets collectif d'un groupe (Tensor Cores en CUDA, boucle
-portable ailleurs), comparé à NumPy sur chaque périphérique, pour des formes alignées sur les tuiles des
-Tensor Cores (16 × 8 × 32) et quelconques."""
+"""gs.matmul_u8: collective byte matrix product of a group (Tensor Cores with CUDA, a portable
+loop elsewhere), compared with NumPy on every device, for shapes aligned on the Tensor Core tiles
+(16 × 8 × 32) and arbitrary ones."""
 
 import importlib.util
 import tempfile
@@ -18,8 +18,8 @@ RNG = np.random.default_rng(8)
 
 
 def make_kernel(group, m, n, k, reps=1):
-    """Kernel : chaque groupe charge a (m × k octets) et b (n × k), c = 0, puis reps produits ;
-    rend c (m·n mots) répété sur les cases du groupe."""
+    """Kernel: each group loads a (m × k bytes) and b (n × k), c = 0, then reps products;
+    returns c (m·n words) repeated over the group's cells."""
     kw = k // 4
     src = f'''import gpusync as gs
 
@@ -55,8 +55,8 @@ def reference(a, b, m, n, k, reps):
 
 
 CASES = [
-    (128, 32, 16, 64, 1),    # tuiles des Tensor Cores
-    (256, 64, 64, 128, 2),   # plusieurs tuiles par warp, deux produits accumulés
+    (128, 32, 16, 64, 1),    # Tensor Core tiles
+    (256, 64, 64, 128, 2),   # several tiles per warp, two products accumulated
     (64, 5, 7, 12, 1),       # forme quelconque : boucle portable partout
 ]
 
@@ -66,7 +66,7 @@ CASES = [
 def test_matmul_u8(dev, group, m, n, k, reps):
     info = next(d for d in gs.devices() if d.id == dev)
     if group > info.max_group:
-        pytest.skip(f"groupes de {group} threads non disponibles")
+        pytest.skip(f"groups of {group} threads not available")
     f = make_kernel(group, m, n, k, reps)
     groups = 6
     w = group * max(1, -(-(m * n) // group))
@@ -98,11 +98,11 @@ def test_errors(tmp_path):
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
     base = ["i = gs.index()", "A = gs.shared(gs.u32, 64)", "C = gs.shared(gs.u32, 64)"]
-    with pytest.raises(gs.TypeMismatch, match="multiple de 4"):
+    with pytest.raises(gs.TypeMismatch, match="multiple of 4"):
         load(base + ["gs.matmul_u8(C, A, A, 4, 4, 6)", "return x[i]"])
-    with pytest.raises(gs.TypeMismatch, match="il en faut"):
+    with pytest.raises(gs.TypeMismatch, match="are needed"):
         load(base + ["gs.matmul_u8(C, A, A, 16, 16, 32)", "return x[i]"])
-    with pytest.raises(gs.KernelSyntaxError, match="dépend du thread"):
+    with pytest.raises(gs.KernelSyntaxError, match="depends on the thread"):
         load(base + ["if x[i] > 0:", "    gs.matmul_u8(C, A, A, 4, 4, 16)", "return x[i]"])
     with pytest.raises(gs.KernelSyntaxError, match="group="):
         load(["i = gs.index()", "gs.matmul_u8(x, x, x, 4, 4, 16)", "return x[i]"], group="")

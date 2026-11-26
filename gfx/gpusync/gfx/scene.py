@@ -1,4 +1,4 @@
-"""Classe de base `Scene` : multi-scènes héritables (`load`/`update`/`unload`) et export `.scene.json`."""
+"""`Scene` base class: inheritable multi-scenes (`load`/`update`/`unload`) and `.scene.json` export."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ from .ui import UILayer
 
 
 class Scene:
-    """Scène 3D/2D/UI héritable avec cycle de vie (`load`, `update`, `on_event`, `unload`) et export `.scene.json`.
+    """Inheritable 3D/2D/UI scene with a life cycle (`load`, `update`, `on_event`, `unload`) and `.scene.json` export.
 
-    Exemple :
-        class MonNiveau(gfx.Scene):
-            source = "levels/base.scene.json"  # optionnel
+    Example:
+        class MyLevel(gfx.Scene):
+            source = "levels/base.scene.json"  # optional
 
             def load(self):
                 self.orb = self.add(gfx.Object3D("orb", gfx.Mesh.sphere(0.8), pos=(0, 1.5, 0)))
@@ -49,7 +49,7 @@ class Scene:
         self._geom_dirty: bool = True
         self._geom_version: int = 0
 
-        # Buffers géométriques aplatis (recalculés uniquement quand la topologie change)
+        # Flattened geometry buffers (recomputed only when the topology changes)
         self._flat_nodes: list[Node] = []
         self._node_parent_idx: list[int] = []
         self._obj_node_indices: list[int] = []
@@ -73,19 +73,19 @@ class Scene:
         self.tri_obj = np.zeros((0,), dtype=np.int32)
         self.materials = np.zeros((0, 16), dtype=np.float32)
 
-    # ── Cycle de vie (à surcharger dans les sous-classes) ──
+    # ── Life cycle (to override in subclasses) ──
 
     def load(self) -> None:
-        """Appelé une fois lorsque la scène devient active (après chargement éventuel de `source`)."""
+        """Called once when the scene becomes active (after `source` is loaded, if any)."""
 
     def update(self, dt: float) -> None:
-        """Appelé à chaque image avec le temps écoulé `dt` (en secondes)."""
+        """Called every frame with the elapsed time `dt` (in seconds)."""
 
     def on_event(self, event: dict[str, Any]) -> None:
-        """Appelé pour chaque événement fenêtre non consommé par l'UI."""
+        """Called for each window event not consumed by the UI."""
 
     def unload(self) -> None:
-        """Appelé lorsqu'on quitte la scène (nettoyage éventuel)."""
+        """Called when leaving the scene (cleanup, if any)."""
 
     def _ensure_loaded(self, app: Any = None) -> None:
         if app is not None:
@@ -100,7 +100,7 @@ class Scene:
         self._loaded = True
         self.compile_geometry()
 
-    # ── Accès caméra principale & multi-caméras ──
+    # ── Main camera & multiple cameras ──
 
     @property
     def camera(self) -> Camera3D:
@@ -144,7 +144,7 @@ class Scene:
             self.cameras.append(Camera3D.orbit())
         return sorted((c for c in self.cameras if c.enabled), key=lambda c: c.order)
 
-    # ── Gestion des nœuds, objets 3D/2D et lumières ──
+    # ── Managing nodes, 3D/2D objects and lights ──
 
     @property
     def objects(self) -> list[Object3D]:
@@ -153,7 +153,7 @@ class Scene:
         return self._objects
 
     def add(self, item: Any, *, parent: Node | None = None):
-        """Ajoute un `Node`/`Object3D`, `GpuFluidSPH3D`, `Object2D` ou `Particles2D` à la scène."""
+        """Adds a `Node`/`Object3D`, `GpuFluidSPH3D`, `Object2D` or `Particles2D` to the scene."""
         if isinstance(item, Object2D):
             self.objects_2d.append(item)
             return item
@@ -195,7 +195,7 @@ class Scene:
         return light
 
     def import_gltf(self, path: str | Path, *, parent: Node | None = None) -> list[Node]:
-        """Importe tous les nœuds, matériaux PBR et textures d'un fichier `.glb` / `.gltf` dans la scène."""
+        """Imports every node, PBR material and texture of a `.glb` / `.gltf` file into the scene."""
         from .gltf import load_gltf_nodes
 
         nodes = load_gltf_nodes(path)
@@ -204,7 +204,7 @@ class Scene:
         return nodes
 
     def get(self, name: str) -> Node | None:
-        """Recherche le premier nœud portant `name` dans tout le graphe."""
+        """Looks for the first node named `name` in the whole graph."""
         for root in self.roots:
             for n in root.iter_tree():
                 if n.name == name:
@@ -220,7 +220,7 @@ class Scene:
         return out
 
     def mark_dirty(self) -> None:
-        """Signale qu'un maillage, matériau ou la hiérarchie a changé (recompilation VRAM)."""
+        """Signals that a mesh, a material or the hierarchy changed (VRAM recompilation)."""
         self._geom_dirty = True
 
     def clear(self) -> None:
@@ -233,7 +233,7 @@ class Scene:
         self.ui.clear()
         self.mark_dirty()
 
-    # ── Compilation géométrique & transforms vectorisés ──
+    # ── Geometry compilation & vectorized transforms ──
 
     def _rebuild_node_lists(self) -> None:
         flat: list[Node] = []
@@ -265,7 +265,7 @@ class Scene:
         self._has_hierarchy = has_hier
 
     def compile_geometry(self) -> None:
-        """Aplatit tous les `Object3D` du graphe en buffers plats contigus prêts pour le GPU."""
+        """Flattens every `Object3D` of the graph into contiguous flat buffers ready for the GPU."""
         if not self._geom_dirty:
             return
         self._rebuild_node_lists()
@@ -361,10 +361,10 @@ class Scene:
         self._geom_version += 1
 
     def build_world_transforms(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Calcule `(models_flat, normals_flat, light_mvps_flat, light_vp_flat)` pour toute la scène.
+        """Computes `(models_flat, normals_flat, light_mvps_flat, light_vp_flat)` for the whole scene.
 
-        Partagé entre toutes les caméras d'une même image (évite de recalculer `vertex_world` et la
-        shadow map plusieurs fois en multi-caméras).
+        Shared by every camera of a frame (avoids recomputing `vertex_world` and the
+        shadow map several times with multiple cameras).
         """
         self.compile_geometry()
         sun = self.env.sun
@@ -442,13 +442,13 @@ class Scene:
         )
 
     def build_camera_mvps(self, models_flat: np.ndarray, cam: Camera3D, aspect: float) -> np.ndarray:
-        """Calcule `MVP = P @ V @ M` en batch pour une caméra donnée."""
+        """Computes `MVP = P @ V @ M` as a batch for a given camera."""
         vp = (cam.proj_matrix(aspect) @ cam.view_matrix()).astype(np.float32)
         m4 = models_flat.reshape(-1, 4, 4)
         return np.ascontiguousarray(np.matmul(vp, m4).reshape(m4.shape[0], 16))
 
     def pack_lights(self) -> np.ndarray:
-        """Emballe les lumières actives dans un tableau `(max(1, N), 16)` f32 (PointLight + SpotLight)."""
+        """Packs the active lights into a `(max(1, N), 16)` f32 array (PointLight + SpotLight)."""
         if not self.lights:
             return np.zeros((1, 16), dtype=np.float32)
         out = np.zeros((len(self.lights), 16), dtype=np.float32)
@@ -457,7 +457,7 @@ class Scene:
         return out
 
     def pack_materials(self) -> np.ndarray:
-        """Met à jour le tableau des matériaux (si un matériau a été modifié à chaud)."""
+        """Updates the material array (if a material was changed on the fly)."""
         if not self._objects:
             return self.materials
         return np.ascontiguousarray(np.stack([o.material.pack() for o in self._objects], axis=0), dtype=np.float32)
@@ -475,7 +475,7 @@ class Scene:
         }
 
     def save(self, path: str | Path) -> Path:
-        """Exporte la scène au format JSON lisible (`.scene.json`)."""
+        """Exports the scene as readable JSON (`.scene.json`)."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         data = self.to_dict(base_dir=p.parent)
@@ -483,7 +483,7 @@ class Scene:
         return p
 
     def load_dict(self, data: dict[str, Any], *, base_dir: Path | None = None) -> None:
-        """Charge les données d'un dictionnaire scène dans `self`."""
+        """Loads the data of a scene dictionary into `self`."""
         self.clear()
         if "environment" in data:
             self.env = Environment.from_dict(data["environment"], base_dir=base_dir)
@@ -495,7 +495,7 @@ class Scene:
         self.mark_dirty()
 
     def load_file(self, path: str | Path) -> None:
-        """Charge un fichier `.scene.json` dans `self`."""
+        """Loads a `.scene.json` file into `self`."""
         p = Path(path)
         data = json.loads(p.read_text(encoding="utf-8"))
         self.load_dict(data, base_dir=p.parent)
@@ -510,7 +510,7 @@ class Scene:
 
     @classmethod
     def from_file(cls, path: str | Path) -> Scene:
-        """Crée une `Scene` directement depuis un fichier `.scene.json`."""
+        """Creates a `Scene` directly from a `.scene.json` file."""
         sc = cls()
         sc.load_file(path)
         sc._loaded = True

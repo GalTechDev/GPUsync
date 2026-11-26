@@ -1,11 +1,11 @@
-"""Atmosphère humide à l'échelle des nuages (LES anélastique).
+"""Moist atmosphere at cloud scale (anelastic LES).
 
-Grille C : `u`, `v`, `w` sont sur les faces basses de chaque cellule `(k, j, i)` ; x et y sont périodiques,
-le sol et le sommet sont rigides (`w[0] = 0`, et `w` est nul au-dessus de la dernière cellule).
+C grid: `u`, `v`, `w` are on the lower faces of each cell `(k, j, i)`; x and y are periodic,
+the ground and the top are rigid (`w[0] = 0`, and `w` is zero above the last cell).
 
-Scalaires : `s` = énergie statique d'eau liquide / cp (K, à une constante près), `qt` = vapeur + eau nuageuse,
-`qr` = pluie. `s` et `qt` se conservent pendant la condensation ; la température et l'eau nuageuse en sont
-déduites par ajustement à saturation."""
+Scalars: `s` = liquid water static energy / cp (K, up to a constant), `qt` = vapour + cloud water,
+`qr` = rain. `s` and `qt` are conserved during condensation; temperature and cloud water are
+derived from them by saturation adjustment."""
 
 import gpusync as gs
 
@@ -15,7 +15,7 @@ RV = 461.5
 LV = 2.501e6
 GRAVITY = 9.81
 
-# Colonnes de la table de référence `(nz, 8)`
+# Columns of the reference table `(nz, 8)`
 REF_Z, REF_P, REF_T, REF_QV, REF_QC, REF_RHO, REF_RHO_F, REF_EXNER = range(8)
 
 
@@ -31,11 +31,11 @@ def atm_thermo(
     s_ref: gs.f32,
     ice: gs.f32,
 ) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
-    """Ajustement à saturation : `(température, eau nuageuse, flottabilité)`.
+    """Saturation adjustment: `(temperature, cloud water, buoyancy)`.
 
-    `s = T + g z / cp - L (qc + qr) / cp` : on cherche T tel que `qc = max(qt - qs(T), 0)` (Newton).
-    Pression de vapeur saturante de Bolton (1980) ; pression de l'état de référence. `ice` = 1 : saturation mixte
-    eau-glace entre 0 et -23 °C, glace pure plus bas."""
+    `s = T + g z / cp - L (qc + qr) / cp`: find T such that `qc = max(qt - qs(T), 0)` (Newton).
+    Bolton (1980) saturation vapour pressure; pressure of the reference state. `ice` = 1: mixed
+    water-ice saturation between 0 and -23 °C, pure ice below."""
     k, j, i = gs.index()
     qr_c = gs.max(qr[k, j, i], 0.0)
     q_tot = gs.max(qt[k, j, i], 0.0)
@@ -99,8 +99,8 @@ def atm_scalar_stage(
     inv_dz: gs.f32,
     dt: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """`base + dt (advection de phi + slow)` : forme flux, reconstruction amont d'ordre 9 limitée
-    (MP de Suresh & Huynh 1997 : dépassements de 2 % au plus au nombre de Courant employé), calculée en écarts à la valeur amont pour garder la précision."""
+    """`base + dt (advection of phi + slow)`: flux form, limited order-9 upwind reconstruction
+    (MP of Suresh & Huynh 1997: overshoots of at most 2 % at the Courant number used), computed as deviations from the upwind value to keep precision."""
     k, j, i = gs.index()
     nz = phi.shape[0]
     ny = phi.shape[1]
@@ -109,7 +109,7 @@ def atm_scalar_stage(
     total = 0.0
     for ax in range(3):
         for side in range(2):
-            # Face basse de la cellule (côté 0) ou de la suivante (côté 1) le long de l'axe
+            # Lower face of the cell (side 0) or of the next one (side 1) along the axis
             fi = i
             fj = j
             fk = k
@@ -157,7 +157,7 @@ def atm_scalar_stage(
                     d_m = m2 - 2.0 * m1
                     d_0 = m1 + p1
                     d_p = p2 - 2.0 * p1
-                    # minmod de quatre courbures, de part et d'autre
+                    # minmod of four curvatures, on both sides
                     cur_p = 0.0
                     a1 = 4.0 * d_0 - d_p
                     a2 = 4.0 * d_p - d_0
@@ -204,10 +204,10 @@ def atm_momentum_stage(
     frame_v: gs.f32,
     dt: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """`base + dt (advection + flottabilité, Coriolis, subsidence + slow)` d'une composante du vent.
+    """`base + dt (advection + buoyancy, Coriolis, subsidence + slow)` of one wind component.
 
-    Advection sous forme flux, reconstruction amont d'ordre 9. Les flux de masse sont les moyennes de ceux de la
-    continuité discrète : un vent uniforme reste uniforme."""
+    Advection in flux form, order-9 upwind reconstruction. Mass fluxes are the means of those of the
+    discrete continuity: a uniform wind stays uniform."""
     k, j, i = gs.index()
     nz = u.shape[0]
     ny = u.shape[1]
@@ -239,7 +239,7 @@ def atm_momentum_stage(
             else:
                 inv_d = inv_dz
                 qk = k + side
-            # Flux de masse : moyenne de deux faces décalées d'une cellule le long de `comp`
+            # Mass flux: mean of two faces shifted by one cell along `comp`
             mass = 0.0
             for h in range(2):
                 hi = qi
@@ -314,7 +314,7 @@ def atm_momentum_stage(
     return base[k, j, i] + dt * (total + tend + slow[k, j, i])
 
 
-# ───────────────────────── Turbulence sous-maille (Smagorinsky-Lilly) ─────────────────────────
+# ───────────────────────── Subgrid turbulence (Smagorinsky-Lilly) ─────────────────────────
 
 
 @gs.kernel
@@ -332,7 +332,7 @@ def atm_eddy_viscosity(
     cs: gs.f32,
     prandtl: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Viscosité turbulente au centre des cellules, avec la stabilité sèche ou humide (Durran & Klemp 1982)."""
+    """Eddy viscosity at cell centres, with dry or moist stability (Durran & Klemp 1982)."""
     k, j, i = gs.index()
     nz = u.shape[0]
     ny = u.shape[1]
@@ -347,7 +347,7 @@ def atm_eddy_viscosity(
     s11 = (u[k, j, ip] - u[k, j, i]) / dx
     s22 = (v[k, jp, i] - v[k, j, i]) / dy
     s33 = (w_top - w[k, j, i]) / dz
-    # Cisaillements centrés
+    # Centred shears
     uc_jp = 0.5 * (u[k, jp, i] + u[k, jp, ip])
     uc_jm = 0.5 * (u[k, jm, i] + u[k, jm, ip])
     vc_ip = 0.5 * (v[k, j, ip] + v[k, jp, ip])
@@ -371,7 +371,7 @@ def atm_eddy_viscosity(
     dqt = (qt[kp, j, i] - qt[km, j, i]) / span
     n2 = 0.0
     if qc[k, j, i] > 1e-6:
-        # Air saturé : gradient de température contre l'adiabatique humide
+        # Saturated air: temperature gradient against the moist adiabat
         p = ref[k, 1]
         es = 611.2 * gs.exp(17.67 * (t_c - 273.15) / (t_c - 29.65))
         qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
@@ -382,7 +382,7 @@ def atm_eddy_viscosity(
         qvz = dqt
         n2 = 9.81 * ((dtdz + 9.81 / 1004.64) / t_c + 0.60778 * qvz)
     delta = gs.pow(dx * dy * dz, 0.33333333)
-    # Longueur de mélange limitée près du sol
+    # Mixing length limited near the ground
     height = ref[k, 0]
     inv_l2 = 1.0 / (cs * cs * delta * delta) + 1.0 / (0.16 * height * height)
     fb = gs.max(strain2 - n2 / prandtl, 0.0)
@@ -400,7 +400,7 @@ def atm_diffuse_scalar(
     inv_prandtl: gs.f32,
     surface_flux: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Diffusion turbulente d'un scalaire ; `surface_flux` (unité · m/s) entre par le sol."""
+    """Turbulent diffusion of a scalar; `surface_flux` (unit · m/s) enters through the ground."""
     k, j, i = gs.index()
     nz = phi.shape[0]
     ny = phi.shape[1]
@@ -440,7 +440,7 @@ def atm_diffuse_momentum(
     frame_u: gs.f32,
     frame_v: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Diffusion turbulente d'une composante (laplacien à viscosité variable) et frottement du sol `u*²`."""
+    """Turbulent diffusion of one component (variable-viscosity Laplacian) and ground friction `u*²`."""
     k, j, i = gs.index()
     nz = u.shape[0]
     ny = u.shape[1]
@@ -502,7 +502,7 @@ def atm_diffuse_momentum(
     return total
 
 
-# ───────────────────────── Forçages ─────────────────────────
+# ───────────────────────── Forcings ─────────────────────────
 
 
 @gs.kernel
@@ -513,7 +513,7 @@ def atm_forcing_scalar(
     inv_dz: gs.f32,
     sponge_ref: gs.f32["nz"],
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Subsidence de grande échelle (colonne 0), tendance imposée (`column`) et rappel près du sommet (colonne 7)."""
+    """Large-scale subsidence (column 0), imposed tendency (`column`) and relaxation near the top (column 7)."""
     k, j, i = gs.index()
     nz = phi.shape[0]
     w_ls = forcing[k, 0]
@@ -556,7 +556,7 @@ def atm_divergence(
     inv_dy: gs.f32,
     inv_dz: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Divergence du flux de masse `ρ0 u`."""
+    """Divergence of the mass flux `ρ0 u`."""
     k, j, i = gs.index()
     nz = u.shape[0]
     ip = (i + 1) % u.shape[2]
@@ -574,7 +574,7 @@ def atm_divergence(
 def atm_hartley_x1(
     a: gs.f32["nz", "ny", "nx"], trig: gs.f32["nx", "c2"], n1: gs.i32, n2: gs.i32
 ) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
-    """Hartley en x pour N = n1·n2, première passe (Cooley-Tukey) : parties réelle et imaginaire."""
+    """Hartley in x for N = n1·n2, first pass (Cooley-Tukey): real and imaginary parts."""
     k, j, i = gs.index()
     n = n1 * n2
     k1 = i // n2
@@ -597,7 +597,7 @@ def atm_hartley_x1(
 def atm_hartley_x2(
     re: gs.f32["nz", "ny", "nx"], im: gs.f32["nz", "ny", "nx"], trig: gs.f32["nx", "c2"], n1: gs.i32, n2: gs.i32
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Seconde passe : Re - Im de la transformée de Fourier."""
+    """Second pass: Re - Im of the Fourier transform."""
     k, j, i = gs.index()
     n = n1 * n2
     k2 = i // n1
@@ -646,7 +646,7 @@ def atm_hartley_y2_columns(
     n1: gs.i32,
     n2: gs.i32,
 ) -> gs.f32["ny", "nb", "nz", "g"]:
-    """Seconde passe en y, résultat rangé par colonnes : `(j, bloc, k, rang)` avec `i = bloc · g + rang`."""
+    """Second pass in y, result stored by columns: `(j, block, k, rank)` with `i = block · g + rank`."""
     j, b, k, r = gs.index()
     i = b * tpl.shape[3] + r
     n = n1 * n2
@@ -669,7 +669,7 @@ def atm_hartley_y2_columns(
 def atm_columns_hartley_y1(
     a: gs.f32["ny", "nb", "nz", "g"], tpl: gs.f32["nz", "ny", "nx"], trig: gs.f32["ny", "c2"], n1: gs.i32, n2: gs.i32
 ) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
-    """Première passe en y depuis le rangement par colonnes."""
+    """First pass in y from the column layout."""
     k, j, i = gs.index()
     b = i // a.shape[3]
     r = i - b * a.shape[3]
@@ -718,7 +718,7 @@ def _pressure_columns(
     eig_y: gs.f32["ny"],
     inv_dz: gs.f32,
 ) -> gs.f32["ny", "nb", "nz", "g"]:
-    """Système tridiagonal vertical de chaque mode horizontal (Thomas), parois de Neumann : un thread par colonne."""
+    """Vertical tridiagonal system of each horizontal mode (Thomas), Neumann walls: one thread per column."""
     j, b, k0, r = gs.index()
     nz = rhs.shape[2]
     i = b * rhs.shape[3] + r
@@ -729,7 +729,7 @@ def _pressure_columns(
     mean = 0
     excess = 0.0
     if i == 0 and j == 0:
-        # Bords ouverts : le bilan de masse latéral n'est nul qu'à l'arrondi près, on répartit l'écart sur la colonne
+        # Open edges: the lateral mass budget is zero only up to rounding, spread the residue over the column
         mean = 1
         mass = 0.0
         for m in range(nz):
@@ -742,7 +742,7 @@ def _pressure_columns(
         diag = -(lo + hi) - ref[m, 5] * lam
         d = rhs[j, b, m, r] - ref[m, 5] * excess
         if mean != 0 and m == 0:
-            # Mode moyen : la pression n'est définie qu'à une constante près
+            # Mean mode: pressure is only defined up to a constant
             diag = -1.0
             hi = 0.0
             d = 0.0
@@ -767,7 +767,7 @@ _COLUMN_KERNELS: dict[tuple[int, int], object] = {}
 
 
 def pressure_columns(group: int, nz: int):
-    """Noyau des colonnes pour `group` threads et `nz` niveaux (compilé une fois par taille)."""
+    """Column kernel for `group` threads and `nz` levels (compiled once per size)."""
     key = (group, nz)
     if key not in _COLUMN_KERNELS:
         _COLUMN_KERNELS[key] = gs.kernel(_pressure_columns, group=group, cells=nz)
@@ -781,7 +781,7 @@ def atm_project(
     comp: gs.i32,
     inv_d: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Retire le gradient de pression : le flux de masse devient sans divergence."""
+    """Removes the pressure gradient: the mass flux becomes divergence-free."""
     k, j, i = gs.index()
     if comp == 0:
         return vel[k, j, i] - (phi[k, j, i] - phi[k, j, (i - 1 + vel.shape[2]) % vel.shape[2]]) * inv_d
@@ -792,7 +792,7 @@ def atm_project(
     return vel[k, j, i] - (phi[k, j, i] - phi[k - 1, j, i]) * inv_d
 
 
-# ───────────────────────── Pluie chaude (Kessler) ─────────────────────────
+# ───────────────────────── Warm rain (Kessler) ─────────────────────────
 
 
 @gs.kernel
@@ -805,9 +805,9 @@ def atm_kessler(
     dt: gs.f32,
     ice: gs.f32,
 ) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
-    """Conversion, accrétion et évaporation de la pluie : `(qt, qr, transfert)`.
+    """Conversion, accretion and evaporation of rain: `(qt, qr, transfer)`.
 
-    `transfert` > 0 : eau passée du nuage à la pluie. `s` ne change pas : il compte déjà toute l'eau liquide."""
+    `transfer` > 0: water moved from cloud to rain. `s` does not change: it already counts all the liquid water."""
     k, j, i = gs.index()
     rho = ref[k, 5]
     rain = gs.max(qr[k, j, i], 0.0)
@@ -826,7 +826,7 @@ def atm_kessler(
         es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t_c - 273.15) / (t_c - 0.55))
     qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
     if cloud <= 0.0 and rain > 0.0 and vap < qs:
-        # Évaporation avec ventilation (Kessler, coefficients de Klemp & Wilhelmson 1978)
+        # Evaporation with ventilation (Kessler, coefficients of Klemp & Wilhelmson 1978)
         rr = rho * 1e-3 * rain
         vent = 1.6 + 124.9 * gs.pow(rr, 0.2046)
         evap = (1.0 - vap / qs) * vent * gs.pow(rr, 0.525) / (rho * 1e-3 * (5.4e5 + 2.55e6 / (p * 0.01 * qs)))
@@ -842,7 +842,7 @@ def atm_sediment(
     dt: gs.f32,
     inv_dz: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Chute de la pluie (flux amont) ; ce qui sort par le bas atteint le sol."""
+    """Rain fall (upwind flux); what leaves through the bottom reaches the ground."""
     k, j, i = gs.index()
     nz = qr.shape[0]
     out = 0.0
@@ -868,8 +868,8 @@ def atm_ice_fall(
     dt: gs.f32,
     inv_dz: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Variation d'eau nuageuse due à la chute des cristaux (Heymsfield & Donner 1990 : 3,29 (rho q)^0,16 m/s, en
-    proportion de la glace entre 258 et 238 K). Rien n'atteint le sol."""
+    """Change of cloud water due to falling crystals (Heymsfield & Donner 1990: 3.29 (rho q)^0.16 m/s, in
+    proportion to the ice between 258 and 238 K). Nothing reaches the ground."""
     k, j, i = gs.index()
     out = 0.0
     inflow = 0.0
@@ -895,14 +895,14 @@ def atm_surface_rain(
     dt: gs.f32,
     inv_dz: gs.f32,
 ) -> gs.f32["ny", "nx"]:
-    """Cumul de pluie au sol (kg/m², soit mm) : flux sortant de la première couche, comme dans `atm_sediment`."""
+    """Accumulated rain at the ground (kg/m², i.e. mm): flux leaving the first layer, as in `atm_sediment`."""
     j, i = gs.index()
     q = gs.max(qr[0, j, i], 0.0)
     speed = 36.34 * gs.pow(ref[0, 5] * 1e-3 * q, 0.1346)
     return acc[j, i] + ref[0, 5] * q * gs.min(speed, 0.9 / (dt * inv_dz)) * dt
 
 
-# ───────────────────────── Raccord avec la météo de grande échelle ─────────────────────────
+# ───────────────────────── Coupling with the large-scale weather ─────────────────────────
 
 
 @gs.kernel
@@ -915,7 +915,7 @@ def atm_level_means(
     qr: gs.f32["nz", "ny", "nx"],
     tpl: gs.f32["nz", "c6"],
 ) -> gs.f32["nz", "c6"]:
-    """Moyenne horizontale de chaque niveau (somme par lignes, pour la précision)."""
+    """Horizontal mean of each level (summed by rows, for precision)."""
     k, c = gs.index()
     total = 0.0
     for j in range(s.shape[1]):
@@ -939,7 +939,7 @@ def atm_level_means(
 
 @gs.kernel
 def atm_offset(phi: gs.f32["nz", "ny", "nx"], change: gs.f32["nz", "c2"]) -> gs.f32["nz", "ny", "nx"]:
-    """`phi · facteur + ajout`, un facteur et un ajout par niveau."""
+    """`phi · factor + addition`, one factor and one addition per level."""
     k, j, i = gs.index()
     return phi[k, j, i] * change[k, 1] + change[k, 0]
 
@@ -948,7 +948,7 @@ def atm_offset(phi: gs.f32["nz", "ny", "nx"], change: gs.f32["nz", "c2"]) -> gs.
 def atm_level_max(
     u: gs.f32["nz", "ny", "nx"], v: gs.f32["nz", "ny", "nx"], w: gs.f32["nz", "ny", "nx"], tpl: gs.f32["nz", "c3"]
 ) -> gs.f32["nz", "c3"]:
-    """Plus grande valeur absolue de chaque composante du vent, par niveau."""
+    """Largest absolute value of each wind component, per level."""
     k, c = gs.index()
     top = 0.0
     for j in range(u.shape[1]):

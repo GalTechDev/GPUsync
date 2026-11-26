@@ -1,22 +1,22 @@
-//! IR typée de GPUsync (ARCHITECTURE.md §6).
+//! Typed IR of GPUsync (ARCHITECTURE.md §6).
 //!
-//! M1 : kernels **élément par élément**. Chaque tableau en paramètre désigne l'élément courant ;
-//! la sortie a la forme des tableaux d'entrée. L'IR est *structurée* (arbre d'instructions), comme
-//! les langages cibles (OpenCL C, WGSL).
+//! M1: **element-wise** kernels. Each array parameter stands for the current element;
+//! the output has the shape of the input arrays. The IR is *structured* (a tree of statements), like
+//! the target languages (OpenCL C, WGSL).
 //!
-//! ## Sémantique (commune à l'interpréteur et aux émetteurs)
+//! ## Semantics (shared by the interpreter and the emitters)
 //!
-//! | Opération | Entiers | Flottants |
+//! | Operation | Integers | Floats |
 //! |---|---|---|
-//! | `+ - *`, négation | arithmétique modulaire (débordement = enroulement) | IEEE 754 |
-//! | `/` | — (le frontend convertit en flottant, comme Python) | IEEE 754 |
-//! | `//` | arrondi vers −∞ (Python) ; diviseur nul → 0 | `floor(a / b)` |
-//! | `%` | signe du diviseur (Python) ; diviseur nul → 0 | `fmod` corrigé du signe du diviseur (Python) |
-//! | `**` | — (flottants uniquement en M1) | `pow` |
-//! | conversion flottant → entier | troncature vers 0 | |
+//! | `+ - *`, negation | modular arithmetic (overflow = wrap-around) | IEEE 754 |
+//! | `/` | — (the frontend converts to float, as Python does) | IEEE 754 |
+//! | `//` | rounded toward −∞ (Python); zero divisor → 0 | `floor(a / b)` |
+//! | `%` | sign of the divisor (Python); zero divisor → 0 | `fmod` corrected to the divisor's sign (Python) |
+//! | `**` | — (floats only in M1) | `pow` |
+//! | float → integer conversion | truncation toward 0 | |
 //!
-//! Les expressions n'ont pas d'effet de bord : `and`, `or` et l'opérateur ternaire peuvent évaluer
-//! leurs deux côtés.
+//! Expressions have no side effects: `and`, `or` and the ternary operator may evaluate
+//! both sides.
 
 pub mod interp;
 
@@ -68,12 +68,12 @@ impl Scalar {
         matches!(self, Scalar::I32 | Scalar::U32 | Scalar::I64 | Scalar::U64)
     }
 
-    /// Entier non signé (u32, u64).
+    /// Unsigned integer (u32, u64).
     pub fn is_unsigned(self) -> bool {
         matches!(self, Scalar::U32 | Scalar::U64)
     }
 
-    /// Entier 64 bits (demande la capacité `int64` du périphérique).
+    /// 64-bit integer (requires the device's `int64` capability).
     pub fn is_int64(self) -> bool {
         matches!(self, Scalar::I64 | Scalar::U64)
     }
@@ -82,7 +82,7 @@ impl Scalar {
         self.is_float() || self.is_int()
     }
 
-    /// Taille en octets dans un tableau (bool n'est pas autorisé dans les tableaux).
+    /// Size in bytes in an array (bool is not allowed in arrays).
     pub fn size(self) -> usize {
         match self {
             Scalar::Bool => 1,
@@ -98,7 +98,7 @@ impl fmt::Display for Scalar {
     }
 }
 
-/// Valeur constante typée.
+/// Typed constant value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Const {
     Bool(bool),
@@ -126,9 +126,9 @@ impl Const {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {
-    /// Tableau : élément courant (kernel élément par élément) ou lu par indices (`x[i, k]`).
+    /// Array: current element (element-wise kernel) or read by indices (`x[i, k]`).
     Array,
-    /// Scalaire passé tel quel à tous les threads.
+    /// Scalar passed as is to every thread.
     Scalar,
 }
 
@@ -137,9 +137,9 @@ pub struct Param {
     pub name: String,
     pub kind: ParamKind,
     pub ty: Scalar,
-    /// Tableau d'un kernel avec index : paramètres (cachés, i32) donnant la taille de chaque axe.
+    /// Array of an indexed kernel: parameters (hidden, i32) giving the size of each axis.
     pub dims: Vec<usize>,
-    /// Paramètre ajouté par le frontend (taille d'une dimension nommée), fourni par le runtime.
+    /// Parameter added by the frontend (size of a named dimension), supplied by the runtime.
     pub hidden: bool,
 }
 
@@ -147,59 +147,59 @@ pub struct Param {
 pub struct Local {
     pub name: String,
     pub ty: Scalar,
-    /// `Some(n)` : tableau local de `n` éléments (`gs.local(type, n)`), propre à chaque thread.
+    /// `Some(n)`: local array of `n` elements (`gs.local(type, n)`), private to each thread.
     pub len: Option<u32>,
-    /// Tableau commun aux threads d'un groupe (`gs.shared(type, n)`, mémoire partagée du GPU).
+    /// Array shared by the threads of a group (`gs.shared(type, n)`, GPU shared memory).
     pub shared: bool,
 }
 
-/// Forme de la grille de threads.
+/// Shape of the thread grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grid {
-    /// Un thread par élément des tableaux (tous de même forme) ; les tableaux désignent l'élément courant.
+    /// One thread per element of the arrays (all of the same shape); arrays stand for the current element.
     Elementwise,
-    /// Un thread par case de la sortie ; `axes` : paramètres cachés donnant la taille de chaque axe.
+    /// One thread per output cell; `axes`: hidden parameters giving the size of each axis.
     ///
-    /// Lancement par blocs de lignes (premier axe de la sortie, ARCHITECTURE.md §9.7) : le thread
-    /// `gs_i` d'un lancement calcule la ligne `gs_i / (cases par ligne) + row0`, écrit la sortie à
-    /// `gs_i + obase`, et les tableaux `chunked` (lus seulement à la ligne courante) sont indexés à
-    /// partir de la ligne `inrow`. `row0`, `inrow` (i32) et `obase` (u32) sont des paramètres cachés
-    /// fournis par le moteur, pas par l'appelant.
+    /// Launch in blocks of rows (first axis of the output, ARCHITECTURE.md §9.7): thread
+    /// `gs_i` of a launch computes row `gs_i / (cells per row) + row0`, writes the output at
+    /// `gs_i + obase`, and the `chunked` arrays (read only at the current row) are indexed
+    /// from row `inrow`. `row0`, `inrow` (i32) and `obase` (u32) are hidden parameters
+    /// supplied by the engine, not by the caller.
     Indexed {
         axes: Vec<usize>,
         chunked: Vec<usize>,
         row0: usize,
         inrow: usize,
         obase: usize,
-        /// Mode explicite (`grid=`, ARCHITECTURE.md §4.5) : tableaux `gs.Out`, écrits seulement par
-        /// des opérations atomiques, entiers sur le périphérique et rendus comme résultats. Le
-        /// dernier est `gs_err` (u32 × 2), où une écriture hors limites est signalée.
+        /// Explicit mode (`grid=`, ARCHITECTURE.md §4.5): `gs.Out` arrays, written only by
+        /// atomic operations, whole on the device and returned as results. The
+        /// last one is `gs_err` (u32 × 2), where an out-of-bounds write is reported.
         writable: Vec<usize>,
     },
 }
 
-/// Un kernel.
+/// A kernel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Kernel {
     pub name: String,
     pub params: Vec<Param>,
-    /// Types des sorties (une ou plusieurs, de même forme).
+    /// Types of the outputs (one or more, of the same shape).
     pub outputs: Vec<Scalar>,
     pub locals: Vec<Local>,
     pub body: Block,
     pub grid: Grid,
-    /// Threads par groupe (`@gs.kernel(group=n)`, kernels avec index) : un groupe calcule `n` cases
-    /// consécutives de la sortie, partage les tableaux `gs.shared` et se synchronise par
-    /// `gs.barrier()`. `None` : taille choisie par le backend, pas de mémoire partagée.
+    /// Threads per group (`@gs.kernel(group=n)`, indexed kernels): a group computes `n` consecutive
+    /// output cells, shares the `gs.shared` arrays and synchronizes with
+    /// `gs.barrier()`. `None`: size chosen by the backend, no shared memory.
     pub group: Option<u32>,
-    /// Cases de sortie par thread (`@gs.kernel(group=g, cells=c)`, 1 par défaut) : un groupe possède
-    /// une tuile de g·c cases consécutives ; le thread de rang r du groupe écrit les cases
-    /// `début + r + k·g` (k < c) par `gs.store(k, valeur)`. Une seule sortie.
+    /// Output cells per thread (`@gs.kernel(group=g, cells=c)`, 1 by default): a group owns
+    /// a tile of g·c consecutive cells; the thread of rank r of the group writes cells
+    /// `start + r + k·g` (k < c) with `gs.store(k, value)`. A single output.
     pub cells: u32,
 }
 
 impl Kernel {
-    /// Octets de mémoire partagée par groupe.
+    /// Bytes of shared memory per group.
     pub fn shared_bytes(&self) -> usize {
         self.locals
             .iter()
@@ -208,7 +208,7 @@ impl Kernel {
             .sum()
     }
 
-    /// Paramètres fournis par le moteur d'exécution (et non par l'appelant) : `row0`, `inrow`, `obase`.
+    /// Parameters supplied by the execution engine (not by the caller): `row0`, `inrow`, `obase`.
     pub fn engine_params(&self) -> [Option<usize>; 3] {
         match &self.grid {
             Grid::Indexed {
@@ -222,7 +222,7 @@ impl Kernel {
         self.engine_params().contains(&Some(i))
     }
 
-    /// Tableaux `gs.Out` du mode explicite (dont `gs_err`, en dernier).
+    /// `gs.Out` arrays of the explicit mode (including `gs_err`, last).
     pub fn writable(&self) -> &[usize] {
         match &self.grid {
             Grid::Indexed { writable, .. } => writable,
@@ -244,7 +244,7 @@ pub enum Stmt {
         then: Block,
         otherwise: Block,
     },
-    /// `for var in range(start, stop, step)` : bornes évaluées une fois, pas nul → aucune itération.
+    /// `for var in range(start, stop, step)`: bounds evaluated once, zero step → no iteration.
     For {
         var: usize,
         start: Expr,
@@ -258,26 +258,26 @@ pub enum Stmt {
     },
     Break,
     Continue,
-    /// `buf[index] = value` sur un tableau local.
+    /// `buf[index] = value` on a local array.
     LocalStore {
         local: usize,
         index: Expr,
         value: Expr,
     },
-    /// Écrit la case courante de chaque sortie et termine le thread.
+    /// Writes the current cell of each output and ends the thread.
     Return(Vec<Expr>),
-    /// `gs.store(k, valeur)` (kernels avec `cells=`) : écrit la k-ième case du thread dans la sortie.
+    /// `gs.store(k, value)` (kernels with `cells=`): writes the thread's k-th cell to the output.
     Store {
         k: Expr,
         value: Expr,
     },
-    /// `gs.barrier()` : attend tous les threads du groupe ; leurs écritures en mémoire partagée
-    /// sont ensuite visibles. Atteinte par tous les threads du groupe (vérifié par le frontend).
+    /// `gs.barrier()`: waits for every thread of the group; their shared-memory writes
+    /// are visible afterwards. Reached by every thread of the group (checked by the frontend).
     Barrier,
-    /// `gs.matmul_u8(c, a, b, m, n, k)` : produit de matrices d'entiers 8 bits non signés, collectif
-    /// (tout le groupe, barrière avant et après), sur des tableaux `gs.shared` u32 :
-    /// `c[i·n + j] += Σ_t a[i, t]·b[j, t]` (sommes 32 bits, modulo 2³²), `a` rangé par lignes et `b` par
-    /// colonnes, 4 octets par mot (k multiple de 4). Tensor Cores en CUDA (Ampere et suivants).
+    /// `gs.matmul_u8(c, a, b, m, n, k)`: product of unsigned 8-bit integer matrices, collective
+    /// (the whole group, barrier before and after), on `gs.shared` u32 arrays:
+    /// `c[i·n + j] += Σ_t a[i, t]·b[j, t]` (32-bit sums, modulo 2³²), `a` stored by rows and `b` by
+    /// columns, 4 bytes per word (k a multiple of 4). Tensor Cores with CUDA (Ampere and later).
     MatMul {
         c: usize,
         a: usize,
@@ -286,9 +286,9 @@ pub enum Stmt {
         n: u32,
         k: u32,
     },
-    /// `gs.atomic_add(param, index, value)` (ou min, max) sur un tableau `gs.Out`. Si `in_bounds`
-    /// est faux, rien n'est écrit : `code` est signalé dans `gs_err[0]` (maximum atomique) et
-    /// l'indice dans `gs_err[1]`.
+    /// `gs.atomic_add(param, index, value)` (or min, max) on a `gs.Out` array. If `in_bounds`
+    /// is false, nothing is written: `code` is reported in `gs_err[0]` (atomic maximum) and
+    /// the index in `gs_err[1]`.
     Atomic {
         op: AtomicOp,
         param: usize,
@@ -327,24 +327,24 @@ pub struct Expr {
 pub enum ExprKind {
     Const(Const),
     Local(usize),
-    /// Paramètre : valeur du scalaire, ou élément courant du tableau.
+    /// Parameter: value of the scalar, or current element of the array.
     Param(usize),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    /// Comparaison : opérandes de même type, résultat `bool`.
+    /// Comparison: operands of the same type, `bool` result.
     Compare(CmpOp, Box<Expr>, Box<Expr>),
     /// `cond ? a : b`
     Select(Box<Expr>, Box<Expr>, Box<Expr>),
     Call(Intrinsic, Vec<Expr>),
     /// Conversion vers `ty`.
     Cast(Box<Expr>),
-    /// Lecture `param[index]` (indice aplati, i32) d'un tableau d'entrée.
+    /// Read `param[index]` (flattened index, i32) of an input array.
     Load(usize, Box<Expr>),
-    /// Lecture `local[index]` d'un tableau local.
+    /// Read `local[index]` of a local array.
     LocalLoad(usize, Box<Expr>),
-    /// Coordonnée du thread sur l'axe donné de la grille (i32).
+    /// Coordinate of the thread along the given grid axis (i32).
     GridIndex(usize),
-    /// Position du thread dans son groupe, de 0 à `group − 1` (`gs.lane()`, i32).
+    /// Position of the thread in its group, from 0 to `group − 1` (`gs.lane()`, i32).
     Lane,
 }
 
@@ -352,7 +352,7 @@ pub enum ExprKind {
 pub enum UnOp {
     Neg,
     Not,
-    /// Complément bit à bit `~x` (entiers).
+    /// Bitwise complement `~x` (integers).
     BitNot,
 }
 
@@ -367,12 +367,12 @@ pub enum BinOp {
     Pow,
     And,
     Or,
-    /// Opérations bit à bit sur des entiers (complément à deux pour les signés, comme en Python).
+    /// Bitwise operations on integers (two's complement for signed ones, as in Python).
     BitAnd,
     BitOr,
     BitXor,
-    /// Décalages : le compte (même type que la valeur) est lu comme non signé ; un compte supérieur
-    /// ou égal à la largeur donne 0 (ou −1 pour `>>` d'un négatif), comme en Python borné à la largeur.
+    /// Shifts: the count (same type as the value) is read as unsigned; a count greater
+    /// than or equal to the width gives 0 (or −1 for `>>` of a negative), as Python clamped to the width.
     Shl,
     Shr,
 }
@@ -387,7 +387,7 @@ pub enum CmpOp {
     Ge,
 }
 
-/// Fonctions intrinsèques (flottantes sauf `Abs`, `Min`, `Max`).
+/// Intrinsic functions (float except `Abs`, `Min`, `Max`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Intrinsic {
     Sqrt,
@@ -406,12 +406,12 @@ pub enum Intrinsic {
     Abs,
     Min,
     Max,
-    /// Partie haute du produit complet de deux entiers de même type (`gs.mulhi`).
+    /// High half of the full product of two integers of the same type (`gs.mulhi`).
     MulHi,
 }
 
 impl Intrinsic {
-    /// Nombre d'arguments attendus.
+    /// Number of expected arguments.
     pub fn arity(self) -> usize {
         match self {
             Intrinsic::Atan2
@@ -423,7 +423,7 @@ impl Intrinsic {
         }
     }
 
-    /// Accepte des entiers (sinon : flottants uniquement).
+    /// Accepts integers (otherwise: floats only).
     pub fn accepts_int(self) -> bool {
         matches!(
             self,
@@ -432,23 +432,23 @@ impl Intrinsic {
     }
 }
 
-/// Capacités exigées par un kernel (§6.2), comparées à celles du périphérique avant compilation.
+/// Capabilities required by a kernel (§6.2), compared with the device's before compiling.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Requirements {
-    /// Le kernel manipule des f64 (arithmétique, comparaisons, `//`, `%`, sqrt, floor, ceil, abs,
+    /// The kernel handles f64 (arithmetic, comparisons, `//`, `%`, sqrt, floor, ceil, abs,
     /// min, max, conversions).
     pub f64: bool,
-    /// Il appelle en plus une fonction transcendante en f64 (exp, log, sin, pow…) : indisponible en
-    /// Vulkan, où elle serait calculée en précision f32 sans erreur, voire ferait planter le pilote.
+    /// It also calls a transcendental function in f64 (exp, log, sin, pow…): unavailable with
+    /// Vulkan, where it would be computed at f32 precision without error, or even crash the driver.
     pub f64_math: bool,
-    /// Première opération qui exige `f64_math`, pour les messages (ex. « gs.exp »).
+    /// First operation that requires `f64_math`, for messages (e.g. "gs.exp").
     pub f64_math_op: Option<&'static str>,
-    /// Le kernel manipule des entiers 64 bits (i64, u64).
+    /// The kernel handles 64-bit integers (i64, u64).
     pub int64: bool,
 }
 
 impl Intrinsic {
-    /// Fonction transcendante (indisponible en f64 sur Vulkan).
+    /// Transcendental function (unavailable in f64 on Vulkan).
     pub fn is_transcendental(self) -> bool {
         !matches!(
             self,
@@ -527,7 +527,7 @@ impl Kernel {
     }
 }
 
-/// Parcourt toutes les expressions (et sous-expressions) d'un bloc.
+/// Walks every expression (and sub-expression) of a block.
 pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
     fn expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         f(e);
@@ -605,7 +605,7 @@ pub fn visit_exprs(block: &Block, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-/// Quotient entier « à la Python » (arrondi vers −∞), diviseur nul → 0.
+/// Python-style integer quotient (rounded toward −∞), zero divisor → 0.
 pub fn floordiv_i32(a: i32, b: i32) -> i32 {
     if b == 0 {
         return 0;
@@ -618,7 +618,7 @@ pub fn floordiv_i32(a: i32, b: i32) -> i32 {
     }
 }
 
-/// Reste entier « à la Python » (signe du diviseur), diviseur nul → 0.
+/// Python-style integer remainder (sign of the divisor), zero divisor → 0.
 pub fn mod_i32(a: i32, b: i32) -> i32 {
     if b == 0 {
         return 0;
@@ -631,7 +631,7 @@ pub fn mod_i32(a: i32, b: i32) -> i32 {
     }
 }
 
-/// Quotient entier 64 bits « à la Python » (arrondi vers −∞), diviseur nul → 0.
+/// Python-style 64-bit integer quotient (rounded toward −∞), zero divisor → 0.
 pub fn floordiv_i64(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 0;
@@ -644,7 +644,7 @@ pub fn floordiv_i64(a: i64, b: i64) -> i64 {
     }
 }
 
-/// Reste entier 64 bits « à la Python » (signe du diviseur), diviseur nul → 0.
+/// Python-style 64-bit integer remainder (sign of the divisor), zero divisor → 0.
 pub fn mod_i64(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 0;
@@ -657,7 +657,7 @@ pub fn mod_i64(a: i64, b: i64) -> i64 {
     }
 }
 
-/// Reste flottant « à la Python » : `fmod` corrigé du signe du diviseur.
+/// Python-style float remainder: `fmod` corrected to the divisor's sign.
 pub fn mod_f64(a: f64, b: f64) -> f64 {
     let r = a % b;
     if r != 0.0 && ((r < 0.0) != (b < 0.0)) {
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn division_and_modulo_like_python() {
-        // Valeurs de référence : Python 3.
+        // Reference values: Python 3.
         assert_eq!(floordiv_i32(7, 2), 3);
         assert_eq!(floordiv_i32(-7, 2), -4);
         assert_eq!(floordiv_i32(7, -2), -4);
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(mod_i32(-7, -2), -1);
         assert_eq!(floordiv_i32(5, 0), 0);
         assert_eq!(mod_i32(5, 0), 0);
-        assert_eq!(floordiv_i32(i32::MIN, -1), i32::MIN); // enroulement, pas de panique
+        assert_eq!(floordiv_i32(i32::MIN, -1), i32::MIN); // wrap-around, no panic
         assert_eq!(mod_f64(-7.5, 2.0), 0.5);
         assert_eq!(mod_f64(7.5, -2.0), -0.5);
         assert_eq!(mod_f32(-1.0, 3.0), 2.0);

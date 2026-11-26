@@ -1,9 +1,9 @@
-"""Jalon M4 : coût du premier appel d'un kernel (analyse + compilation) dans un processus neuf.
+"""Milestone M4: cost of a kernel's first call (analysis + compilation) in a fresh process.
 
     python tools/dev.py run tools/bench_m4.py
 
-Chaque mesure tourne dans un sous-processus : « froid » = premier appel du processus, « chaud » = appel
-suivant. Avec le cache disque, le premier appel d'un deuxième processus réutilise le binaire compilé.
+Each measurement runs in a subprocess: "cold" = first call of the process, "warm" = the next
+call. With the disk cache, the first call of a second process reuses the compiled binary.
 """
 
 import subprocess
@@ -28,7 +28,7 @@ print(f"{(t1-t0)*1e3:.0f} {(t3-t2)*1e3:.1f} {(t4-t3)*1e3:.2f}")
 
 
 def main():
-    print("périphérique   import+analyse   1er appel (froid)   appel suivant   [2e processus : 1er appel]")
+    print("device         import+analysis   1st call (cold)   next call   [2nd process: 1st call]")
     for d in gs.devices():
         if d.id == "cpu:0":
             continue

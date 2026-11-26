@@ -1,11 +1,11 @@
-"""Optique des nuages : extinction d'après l'eau liquide simulée et tracé de chemins (diffusion multiple).
+"""Cloud optics: extinction from the simulated liquid water and path tracing (multiple scattering).
 
-La diffusion suit le lobe de Draine de l'approximation de Mie ; le pic avant, presque sans déviation, est compté
-comme non diffusé (extinction multipliée par `1 - f`)."""
+Scattering follows the Draine lobe of the Mie approximation; the forward peak, almost undeviated, is counted
+as unscattered (extinction multiplied by `1 - f`)."""
 
 import gpusync as gs
 
-BLOCK = 4  # côté des blocs de la grille de majorants
+BLOCK = 4  # side of the blocks of the majorant grid
 
 
 @gs.kernel
@@ -17,10 +17,10 @@ def cloud_excess(
     ice: gs.f32,
     unit: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Eau liquide là où l'air est saturé, déficit (négatif) ailleurs : ce champ signé s'interpole sans baver au bord.
+    """Liquid water where the air is saturated, deficit (negative) elsewhere: this signed field interpolates without bleeding at the edge.
 
-    `ice` = 1 : la part de glace compte pour l'eau liquide de même extinction (cristaux de 30 µm de rayon efficace) ;
-    `unit` : extinction de l'eau liquide = unit (rho q)^(2/3)."""
+    `ice` = 1: the ice share counts as liquid water of the same extinction (crystals of 30 µm effective radius);
+    `unit`: extinction of liquid water = unit (rho q)^(2/3)."""
     k, j, i = gs.index()
     t_c = t[k, j, i]
     q = qc[k, j, i]
@@ -52,7 +52,7 @@ def cloud_majorant(
     ref: gs.f32["nz", "c8"],
     scale: gs.f32,
 ) -> gs.f32["bz", "by", "bx"]:
-    """Extinction maximale dans chaque bloc de 4³ mailles, voisines comprises (interpolation)."""
+    """Maximum extinction in each block of 4³ cells, neighbours included (interpolation)."""
     k, j, i = gs.index()
     top = 0.0
     for c in range(-1, 5):
@@ -81,7 +81,7 @@ def cloud_sun_depth(
     sun_z: gs.f32,
     step: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Épaisseur optique vers le soleil depuis le centre de chaque maille."""
+    """Optical depth toward the sun from the centre of each cell."""
     k, j, i = gs.index()
     nz = excess.shape[0]
     ny = excess.shape[1]
@@ -103,7 +103,7 @@ def cloud_sun_depth(
         by = int(gs.floor(gy * 0.25))
         bz = int(gz * 0.25)
         if majorant[gs.min(bz, majorant.shape[0] - 1), by % majorant.shape[1], bx % majorant.shape[2]] <= 0.0:
-            # Bloc sans nuage : sauter jusqu'au premier pas après sa sortie
+            # Cloudless block: jump to the first step after leaving it
             edge = (float(bz + 1) * 4.0 - gz) / vz
             edge = gs.min(edge, gs.max((float(bx) * 4.0 - gx) * rx, (float(bx + 1) * 4.0 - gx) * rx))
             edge = gs.min(edge, gs.max((float(by) * 4.0 - gy) * ry, (float(by + 1) * 4.0 - gy) * ry))
@@ -146,8 +146,8 @@ def cloud_sun_depth_nested(
     sun_z: gs.f32,
     step: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Épaisseur optique vers le soleil depuis la grille fine : pas à pas dans la boîte utile, puis celle de la grille
-    large au point de sortie. `box` : coin (x, y), puis bornes utiles x0, x1, y0, y1 (m)."""
+    """Optical depth toward the sun from the fine grid: step by step in the useful box, then that of the coarse
+    grid at the exit point. `box`: corner (x, y), then useful bounds x0, x1, y0, y1 (m)."""
     k, j, i = gs.index()
     nz = excess.shape[0]
     ny = excess.shape[1]
@@ -194,7 +194,7 @@ def cloud_sun_depth_nested(
         if q > 0.0:
             total += scale * gs.pow(ref[kz, 5] * q, 0.6666667) * step
         s += step
-    # Suite du trajet dans la grille large (périodique)
+    # Rest of the path in the coarse grid (periodic)
     ox = (px + sun_x * s) * out_dx - 0.5
     oy = (py + sun_y * s) * out_dy - 0.5
     oz = (pz + sun_z * s) * out_dz - 0.5
@@ -245,9 +245,9 @@ def sky_path_trace(
     haze: gs.f32,
     max_events: gs.i32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Ajoute un échantillon par pixel. `cam` : position, avant, droite, haut (3 + 3 + 3 + 3), tan(fov/2).
-    `sun` : direction, 0, éclairement RGB à l'altitude des nuages. `box` : grille fine — coin (x, y), bornes utiles
-    x0, x1, y0, y1 (m), 1/dx, 1/dz, présente (1) ou non (0)."""
+    """Adds one sample per pixel. `cam`: position, forward, right, up (3 + 3 + 3 + 3), tan(fov/2).
+    `sun`: direction, 0, RGB irradiance at cloud altitude. `box`: fine grid — corner (x, y), useful bounds
+    x0, x1, y0, y1 (m), 1/dx, 1/dz, present (1) or not (0)."""
     py, px = gs.index()
     h = acc_r.shape[0]
     w = acc_r.shape[1]
@@ -290,11 +290,11 @@ def sky_path_trace(
     for it in range(20000):
         if events >= max_events or tint_b < 1e-3:
             break
-        # Sortie par le haut ou le sol
+        # Exit through the top or the ground
         if wz >= box[10] and dz >= 0.0:
             escaped = 1
             break
-        # Hors de la couche nuageuse : aller d'un trait à sa base, à son sommet ou au sol
+        # Outside the cloud layer: go straight to its base, its top or the ground
         s = 0.0
         if wz > box[10]:
             s = (wz - box[10]) / gs.max(-dz, 1e-6) + 0.01
@@ -314,7 +314,7 @@ def sky_path_trace(
         if box[8] > 0.0 and wx >= box[2] and wx < box[3] and wy >= box[4] and wy < box[5]:
             in_fine = 1
         if wz <= 0.01 and dz <= 0.0:
-            # Surface lambertienne : soleil direct puis rebond diffus
+            # Lambertian surface: direct sun, then diffuse bounce
             if first_d < 0.0:
                 first_d = travelled
             tau_g = 0.0
@@ -333,13 +333,13 @@ def sky_path_trace(
             u1 = float(rng >> gs.u32(8)) * 5.9604645e-8
             rng = rng * gs.u32(747796405) + gs.u32(2891336453)
             u2 = float(rng >> gs.u32(8)) * 5.9604645e-8 * 6.2831853
-            sr = gs.sqrt(u1 + 1e-8)  # jamais exactement vertical : atan2(0, 0) n'est pas défini partout
+            sr = gs.sqrt(u1 + 1e-8)  # never exactly vertical: atan2(0, 0) is not defined everywhere
             dx = sr * gs.cos(u2)
             dy = sr * gs.sin(u2)
             dz = gs.sqrt(gs.max(1.0 - u1, 1e-4))
             wz = 0.02
             events += 1
-        # Grille où l'on se trouve : coordonnées en mailles
+        # Grid we are in: coordinates in cells
         sx = inv_dx
         sy = inv_dy
         sz = inv_dz
@@ -352,7 +352,7 @@ def sky_path_trace(
             gx = (wx - box[0]) * sx - 0.5
             gy = (wy - box[1]) * sy - 0.5
         gz = wz * sz - 0.5
-        # Bloc courant et distance (m) à sa sortie
+        # Current block and distance (m) to its exit
         bx = int(gs.floor(gx * 0.25))
         by = int(gs.floor(gy * 0.25))
         bz = int(gs.floor(gz * 0.25))
@@ -373,7 +373,7 @@ def sky_path_trace(
         elif vz < -1e-9:
             edge = gs.min(edge, (float(bz) * 4.0 - gz) / vz)
         if box[8] > 0.0:
-            # Entrée ou sortie de la grille fine
+            # Entering or leaving the fine grid
             rx = 1.0 / (dx if gs.abs(dx) > 1e-9 else 1e-9)
             ry = 1.0 / (dy if gs.abs(dy) > 1e-9 else 1e-9)
             tx0 = (box[2] - wx) * rx
@@ -450,7 +450,7 @@ def sky_path_trace(
         rng = rng * gs.u32(747796405) + gs.u32(2891336453)
         if float(rng >> gs.u32(8)) * 5.9604645e-8 * mj >= sigma:
             continue
-        # Diffusion : soleil direct (épaisseur optique précalculée), puis nouvelle direction
+        # Scattering: direct sun (precomputed optical depth), then a new direction
         if first_d < 0.0:
             first_d = travelled
         if in_fine != 0:
@@ -469,7 +469,7 @@ def sky_path_trace(
         out_g += tint_g * lit * sun[5]
         out_b += tint_b * lit * sun[6]
         events += 1
-        # Échantillonnage de Draine : Henyey-Greenstein avec rejet
+        # Draine sampling: Henyey-Greenstein with rejection
         ct = 1.0
         for _ in range(16):
             rng = rng * gs.u32(747796405) + gs.u32(2891336453)
@@ -483,7 +483,7 @@ def sky_path_trace(
         st = gs.sqrt(gs.max(1.0 - ct * ct, 0.0))
         rng = rng * gs.u32(747796405) + gs.u32(2891336453)
         ph = float(rng >> gs.u32(8)) * 5.9604645e-8 * 6.2831853
-        # Base orthonormée autour de la direction
+        # Orthonormal basis around the direction
         sgn = 1.0 if dz >= 0.0 else -1.0
         aa = -1.0 / (sgn + dz)
         bb = dx * dy * aa
@@ -518,7 +518,7 @@ def sky_path_trace(
         out_g += tint_g * (sky[iy, ix, 1] * w00 + sky[iy, i1, 1] * w10 + sky[iy + 1, ix, 1] * w01 + sky[iy + 1, i1, 1] * w11)
         out_b += tint_b * (sky[iy, ix, 2] * w00 + sky[iy, i1, 2] * w10 + sky[iy + 1, ix, 2] * w01 + sky[iy + 1, i1, 2] * w11)
     if first_d > 0.0:
-        # Perspective aérienne : l'air entre l'œil et le premier contact, éclairé comme l'horizon dans cette direction
+        # Aerial perspective: the air between the eye and the first contact, lit like the horizon in that direction
         su = (gs.atan2(fy0, fx0) * 0.15915494 + 0.5) * float(sky.shape[1])
         ix = int(su) % sky.shape[1]
         iy = gs.min(int(gs.sqrt(gs.max(fz0, 0.0)) * float(sky.shape[0] - 1)), sky.shape[0] - 1)
@@ -569,20 +569,20 @@ def cloud_cache_update(
     part: gs.i32,
     parts: gs.i32,
 ) -> gs.f32["tiles", "c12", "g64"]:
-    """Cache de lumière diffuse : un chemin par maille du cache, mélangé aux précédents.
+    """Diffuse light cache: one path per cache cell, blended with the previous ones.
 
-    Le cache est creux : des tuiles de 4³ mailles, dans les seuls blocs nuageux. `tiles` : première maille (x, y, z) et
-    grille (0 large, 1 fine, -1 libre) ; `source` : tuile de l'image précédente (-1 : nouvelle). `layout`, 16 valeurs
-    par grille : taille des mailles (m) en x et z, coin (x, y), mailles du cache par maille de simulation, blocs en
-    x, y, z, début dans l'index. Par maille : flux sphérique RGB `[0..2]`, flux vectoriel de luminance `[3..5]`,
-    nombre de chemins `[6]`, second moment de la luminance `[7..11]` (xx, yy, xy, xz, yz). Le soleil direct, et la part
-    `forward` à peine déviée, n'y sont pas : le lancer de rayons les ajoute avec la fonction de phase exacte."""
+    The cache is sparse: tiles of 4³ cells, only in the cloud blocks. `tiles`: first cell (x, y, z) and
+    grid (0 coarse, 1 fine, -1 free); `source`: tile of the previous frame (-1: new). `layout`, 16 values
+    per grid: cell size (m) in x and z, corner (x, y), cache cells per simulation cell, blocks in
+    x, y, z, start in the index. Per cell: RGB spherical flux `[0..2]`, vector radiance flux `[3..5]`,
+    number of paths `[6]`, second moment of radiance `[7..11]` (xx, yy, xy, xz, yz). Direct sun, and the
+    barely deviated `forward` share, are not in it: ray marching adds them with the exact phase function."""
     tile, c_first, rank = gs.index()
     cell_id = tile * 64 + rank
     from_tile = source[tile]
     grid = tiles[tile, 3]
     if grid < 0 or tile % parts != part:
-        # Place libre, ou tour d'une autre partie : on garde l'ancienne valeur
+        # Free slot, or another part's turn: keep the old value
         for slot in range(12):
             if grid >= 0 and from_tile >= 0:
                 gs.store(slot, old[from_tile, slot, rank])
@@ -603,7 +603,7 @@ def cloud_cache_update(
     hash_cell = gs.u32(cell_id) * gs.u32(2654435769) + gs.u32(12345)
     hash_cell = (hash_cell ^ (hash_cell >> gs.u32(16))) * gs.u32(2246822519)
     hash_cell = hash_cell ^ (hash_cell >> gs.u32(13))
-    # Départ et direction : suite à faible discrépance, décalée au hasard dans chaque maille
+    # Start and direction: low-discrepancy sequence, randomly shifted within each cell
     turn = gs.u32(sample // parts)
     u_x = float((hash_cell + turn * gs.u32(3859688306)) >> gs.u32(8)) * 5.9604645e-8
     hash_cell = hash_cell * gs.u32(747796405) + gs.u32(2891336453)
@@ -628,7 +628,7 @@ def cloud_cache_update(
     lx = dx
     ly = dy
     lz = dz
-    # Départ dans le nuage : au bord, l'air clair de la maille fausserait la moyenne lue par la caméra
+    # Start inside the cloud: at the edge, the cell's clear air would distort the mean read by the camera
     wx = 0.0
     wy = 0.0
     wz = 0.0
@@ -671,7 +671,7 @@ def cloud_cache_update(
         u_y = float(rng >> gs.u32(8)) * 5.9604645e-8
         rng = rng * gs.u32(747796405) + gs.u32(2891336453)
         u_z = float(rng >> gs.u32(8)) * 5.9604645e-8
-    # Soleil au point de départ : la part à peine déviée (`forward`) est comptée avec le soleil direct, pas ici
+    # Sun at the starting point: the barely deviated share (`forward`) is counted with the direct sun, not here
     lo = 0.0
     hi = 0.0
     if box[8] > 0.0 and wx >= box[2] and wx < box[3] and wy >= box[4] and wy < box[5]:
@@ -710,14 +710,14 @@ def cloud_cache_update(
     g_mean = g_draine * (1.0 + alpha * (3.0 + 2.0 * g_draine * g_draine) * 0.2) / norm
     g_mean = (g_mean - forward) / (1.0 - forward)
     chi2 = (chi2_full - forward) / (1.0 - forward)
-    # Nouvelle maille : chemin complet ; sinon on s'arrête dans le cache après `gather` diffusions
+    # New cell: full path; otherwise stop in the cache after `gather` scatterings
     stop_at = 1000000
     if from_tile >= 0:
         if old[from_tile, 6, rank] > 7.5:
             stop_at = gather
     thin = 1.0
     if stop_at <= 1:
-        # Milieu réduit dès le départ : la lumière du pic est dans le faisceau, il n'y a rien à en retrancher
+        # Medium scaled from the start: the peak's light is in the beam, there is nothing to subtract
         thin = 1.0 - forward
         beam = 0.0
         beam_lum = 0.0
@@ -734,11 +734,11 @@ def cloud_cache_update(
     for it in range(600):
         if events >= max_events or tint_b < 1e-3:
             break
-        # Sortie par le haut ou le sol
+        # Exit through the top or the ground
         if wz >= box[10] and dz >= 0.0:
             escaped = 1
             break
-        # Hors de la couche nuageuse : aller d'un trait à sa base, à son sommet ou au sol
+        # Outside the cloud layer: go straight to its base, its top or the ground
         s = 0.0
         if wz > box[10]:
             s = (wz - box[10]) / gs.max(-dz, 1e-6) + 0.01
@@ -758,7 +758,7 @@ def cloud_cache_update(
         if box[8] > 0.0 and wx >= box[2] and wx < box[3] and wy >= box[4] and wy < box[5]:
             in_fine = 1
         if wz <= 0.01 and dz <= 0.0:
-            # Surface lambertienne : soleil direct puis rebond diffus
+            # Lambertian surface: direct sun, then diffuse bounce
             if first_d < 0.0:
                 first_d = travelled
             tau_g = 0.0
@@ -777,13 +777,13 @@ def cloud_cache_update(
             u1 = float(rng >> gs.u32(8)) * 5.9604645e-8
             rng = rng * gs.u32(747796405) + gs.u32(2891336453)
             u2 = float(rng >> gs.u32(8)) * 5.9604645e-8 * 6.2831853
-            sr = gs.sqrt(u1 + 1e-8)  # jamais exactement vertical : atan2(0, 0) n'est pas défini partout
+            sr = gs.sqrt(u1 + 1e-8)  # never exactly vertical: atan2(0, 0) is not defined everywhere
             dx = sr * gs.cos(u2)
             dy = sr * gs.sin(u2)
             dz = gs.sqrt(gs.max(1.0 - u1, 1e-4))
             wz = 0.02
             events += 1
-        # Grille où l'on se trouve : coordonnées en mailles
+        # Grid we are in: coordinates in cells
         sx = inv_dx
         sy = inv_dy
         sz = inv_dz
@@ -796,7 +796,7 @@ def cloud_cache_update(
             gx = (wx - box[0]) * sx - 0.5
             gy = (wy - box[1]) * sy - 0.5
         gz = wz * sz - 0.5
-        # Bloc courant et distance (m) à sa sortie
+        # Current block and distance (m) to its exit
         bx = int(gs.floor(gx * 0.25))
         by = int(gs.floor(gy * 0.25))
         bz = int(gs.floor(gz * 0.25))
@@ -817,7 +817,7 @@ def cloud_cache_update(
         elif vz < -1e-9:
             edge = gs.min(edge, (float(bz) * 4.0 - gz) / vz)
         if box[8] > 0.0:
-            # Entrée ou sortie de la grille fine
+            # Entering or leaving the fine grid
             rx = 1.0 / (dx if gs.abs(dx) > 1e-9 else 1e-9)
             ry = 1.0 / (dy if gs.abs(dy) > 1e-9 else 1e-9)
             tx0 = (box[2] - wx) * rx
@@ -895,7 +895,7 @@ def cloud_cache_update(
         rng = rng * gs.u32(747796405) + gs.u32(2891336453)
         if float(rng >> gs.u32(8)) * 5.9604645e-8 * mj >= sigma:
             continue
-        # Diffusion : soleil direct (épaisseur optique précalculée), puis nouvelle direction
+        # Scattering: direct sun (precomputed optical depth), then a new direction
         if first_d < 0.0:
             first_d = travelled
         if in_fine != 0:
@@ -964,7 +964,7 @@ def cloud_cache_update(
                     if prev >= 0:
                         lcount = old[prev, 6, rk]
                     if lcount > 0.5:
-                        # Les mailles toutes neuves, encore bruitées, pèsent moins
+                        # Brand-new cells, still noisy, weigh less
                         wt = (fcx if ca == 1 else 1.0 - fcx) * (fcy if cb == 1 else 1.0 - fcy) * (fcz if cc == 1 else 1.0 - fcz) * gs.min(lcount, 64.0)
                         wsum += wt
                         phi_r += wt * old[prev, 0, rk]
@@ -984,20 +984,20 @@ def cloud_cache_update(
                 phi_b = gs.max(phi_b, 0.0)
                 flux = flux_x * dx + flux_y * dy + flux_z * dz
                 llum = gs.max(0.2126 * phi_r + 0.7152 * phi_g + 0.0722 * phi_b, 1e-9)
-                # La caméra voit la lumière qui se propage vers elle, soit vers -d
+                # The camera sees the light travelling toward it, i.e. toward -d
                 q_zz = llum - q_xx - q_yy
                 quad = q_xx * dx * dx + q_yy * dy * dy + q_zz * dz * dz + 2.0 * (q_xy * dx * dy + q_xz * dx * dz + q_yz * dy * dz)
                 aniso = 1.0 - 3.0 * g_mean * flux / llum + 2.5 * chi2 * (3.0 * quad / llum - 1.0)
                 aniso = gs.min(gs.max(aniso, 0.0), 1.0 + 3.0 * g_mean + 5.0 * chi2)
                 aniso = aniso * 0.07957747 / wsum
-                # La part peu déviée du soleil est comptée avec le direct (TMS), le reste vient du cache
+                # The barely deviated share of the sun is counted with the direct light (TMS), the rest comes from the cache
                 part_peak = gs.pow(gs.max(0.5 + 0.5 * mu, 1e-6), peak)
                 lit = phase * (1.0 - part_peak) * gs.exp(-(1.0 - forward) * tau) / (1.0 - forward)
                 out_r += tint_r * (lit * sun[4] + phi_r * aniso)
                 out_g += tint_g * (lit * sun[5] + phi_g * aniso)
                 out_b += tint_b * (lit * sun[6] + phi_b * aniso)
                 break
-            # Cache encore vide ici : on continue le chemin
+            # Cache still empty here: continue the path
             thin = 1.0
             stop_at = 1000000
         lit = phase * gs.exp(-tau)
@@ -1007,7 +1007,7 @@ def cloud_cache_update(
         events += 1
         if events + 1 >= stop_at:
             thin = 1.0 - forward
-        # Échantillonnage de Draine : Henyey-Greenstein avec rejet
+        # Draine sampling: Henyey-Greenstein with rejection
         ct = 1.0
         for _ in range(16):
             rng = rng * gs.u32(747796405) + gs.u32(2891336453)
@@ -1021,7 +1021,7 @@ def cloud_cache_update(
         st = gs.sqrt(gs.max(1.0 - ct * ct, 0.0))
         rng = rng * gs.u32(747796405) + gs.u32(2891336453)
         ph = float(rng >> gs.u32(8)) * 5.9604645e-8 * 6.2831853
-        # Base orthonormée autour de la direction
+        # Orthonormal basis around the direction
         sgn = 1.0 if dz >= 0.0 else -1.0
         aa = -1.0 / (sgn + dz)
         bb = dx * dy * aa
@@ -1055,9 +1055,9 @@ def cloud_cache_update(
         out_r += tint_r * (sky[iy, ix, 0] * w00 + sky[iy, i1, 0] * w10 + sky[iy + 1, ix, 0] * w01 + sky[iy + 1, i1, 0] * w11)
         out_g += tint_g * (sky[iy, ix, 1] * w00 + sky[iy, i1, 1] * w10 + sky[iy + 1, ix, 1] * w01 + sky[iy + 1, i1, 1] * w11)
         out_b += tint_b * (sky[iy, ix, 2] * w00 + sky[iy, i1, 2] * w10 + sky[iy + 1, ix, 2] * w01 + sky[iy + 1, i1, 2] * w11)
-    # Estimateur : flux sphérique = 4 pi <L> ; la lumière vue vers `l` se propage vers `-l`
+    # Estimator: spherical flux = 4 pi <L>; light seen toward `l` travels toward `-l`
     lum = (0.2126 * out_r + 0.7152 * out_g + 0.0722 * out_b) * 12.566371
-    # Moyenne à poids croissants (les premiers chemins, bruités, s'effacent), puis oubli exponentiel
+    # Mean with growing weights (the first, noisy paths fade away), then exponential forgetting
     count = 1.0
     if from_tile >= 0:
         count = gs.min(old[from_tile, 6, rank] + 1.0, 1.0 / gs.max(1.0 - blend, 1e-4))
@@ -1096,7 +1096,7 @@ def cloud_cache_update(
 def sky_tonemap(
     acc_r: gs.f32["h", "w"], acc_g: gs.f32["h", "w"], acc_b: gs.f32["h", "w"], gain: gs.f32
 ) -> gs.u32["h", "w"]:
-    """Exposition et courbe filmique (Hable), codage sRGB approché."""
+    """Exposure and filmic curve (Hable), approximate sRGB encoding."""
     y, x = gs.index()
     packed = gs.u32(4278190080)
     for c in range(3):
@@ -1118,7 +1118,7 @@ def sky_tonemap(
 def sky_decay(
     acc_r: gs.f32["h", "w"], acc_g: gs.f32["h", "w"], acc_b: gs.f32["h", "w"], factor: gs.f32
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Oublie une part des échantillons anciens (nuages en mouvement)."""
+    """Forgets part of the old samples (moving clouds)."""
     y, x = gs.index()
     return acc_r[y, x] * factor, acc_g[y, x] * factor, acc_b[y, x] * factor
 
@@ -1128,7 +1128,7 @@ def sky_blend(
     new_r: gs.f32["h", "w"], new_g: gs.f32["h", "w"], new_b: gs.f32["h", "w"],
     old_r: gs.f32["h", "w"], old_g: gs.f32["h", "w"], old_b: gs.f32["h", "w"], keep: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Moyenne glissante de deux images."""
+    """Running average of two images."""
     y, x = gs.index()
     return (
         new_r[y, x] * (1.0 - keep) + old_r[y, x] * keep,
@@ -1137,7 +1137,7 @@ def sky_blend(
     )  # fmt: skip
 
 
-# ───────────────────────── Temps réel : lancer de rayons sur le cache de lumière ─────────────────────────
+# ───────────────────────── Real time: ray marching over the light cache ─────────────────────────
 
 
 @gs.kernel
@@ -1174,8 +1174,8 @@ def sky_ray_march(
     chi2_full: gs.f32,
     peak: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Image sans tracé de chemins : intégration le long du rayon, soleil direct avec sa phase exacte, et lumière
-    diffuse lue dans le cache (flux sphérique + flux vectoriel, premier ordre de la fonction de phase)."""
+    """Image without path tracing: integration along the ray, direct sun with its exact phase, and diffuse
+    light read from the cache (spherical flux + vector flux, first order of the phase function)."""
     py, px = gs.index()
     h = target.shape[0]
     w = target.shape[1]
@@ -1191,7 +1191,7 @@ def sky_ray_march(
     dx = dx * inv_l
     dy = dy * inv_l
     dz = dz * inv_l
-    # Décalage par pixel (bruit à gradient entrelacé), différent à chaque image
+    # Per-pixel offset (interleaved gradient noise), different at each frame
     jit = 52.9829189 * ((0.06711056 * (float(px) + 5.588238 * float(frame % 64)) + 0.00583715 * (float(py) + 5.588238 * float(frame % 64))) % 1.0)
     jit = jit - gs.floor(jit)
     t_end = 60000.0
@@ -1207,13 +1207,13 @@ def sky_ray_march(
     norm = 1.0 + alpha * (1.0 + 2.0 * g_draine * g_draine) * 0.33333333
     den = 1.0 + g_draine * g_draine - 2.0 * g_draine * mu
     phase = 0.07957747 * (1.0 - g_draine * g_draine) / (den * gs.sqrt(den)) * (1.0 + alpha * mu * mu) / norm
-    # Cosinus moyen de la phase de Draine
+    # Mean cosine of the Draine phase
     g2 = g_draine * g_draine
     g_mean = g_draine * (1.0 + alpha * (3.0 + 2.0 * g2) * 0.2) / norm
     g_mean = (g_mean - forward) / (1.0 - forward)
     chi2 = (chi2_full - forward) / (1.0 - forward)
     phase = phase / (1.0 - forward)
-    # Pic avant : compté à sa première diffusion seulement (énergie 1 - exp(-f tau)), le reste en TMS
+    # Forward peak: counted at its first scattering only (energy 1 - exp(-f tau)), the rest in TMS
     part_peak = gs.pow(gs.max(0.5 + 0.5 * mu, 1e-6), peak)
     rx = 1.0 / (dx if gs.abs(dx) > 1e-9 else 1e-9)
     ry = 1.0 / (dy if gs.abs(dy) > 1e-9 else 1e-9)
@@ -1294,7 +1294,7 @@ def sky_ray_march(
         if mj <= 0.0:
             t += edge
             continue
-        # Pas : une fraction de maille, plus long au loin, jamais plus que le bloc
+        # Step: a fraction of a cell, longer far away, never more than the block
         step = gs.max(gs.min(1.0 / sx, 1.0 / sz), 0.0015 * t) / quality
         step = gs.min(step, edge)
         tm = t + step * jit
@@ -1350,7 +1350,7 @@ def sky_ray_march(
             hi = (sun_depth[kz + 1, y0, x0] * (1.0 - tx) + sun_depth[kz + 1, y0, x1] * tx) * (1.0 - ty) + (sun_depth[kz + 1, y1, x0] * (1.0 - tx) + sun_depth[kz + 1, y1, x1] * tx) * ty
         tau = lo * (1.0 - tz) + hi * tz
         direct = phase * ((1.0 - part_peak) * gs.exp(-(1.0 - forward) * tau) + part_peak * gs.exp(-tau))
-        # Cache : interpolation pondérée par les mailles qui ont reçu de la lumière
+        # Cache: interpolation weighted by the cells that received light
         base = 16 * in_fine
         sub = int(layout[base + 4])
         side = 4 * sub
@@ -1403,7 +1403,7 @@ def sky_ray_march(
                 rk = (jz & 3) * 16 + (jy & 3) * 4 + (jx & 3)
                 count = cache[tl, 6, rk]
                 if count > 0.5:
-                    # Les mailles toutes neuves, encore bruitées, pèsent moins
+                    # Brand-new cells, still noisy, weigh less
                     wt = (cx if a == 1 else 1.0 - cx) * (cy if b == 1 else 1.0 - cy) * (cz if c == 1 else 1.0 - cz) * gs.min(count, 64.0)
                     wsum += wt
                     phi_r += wt * cache[tl, 0, rk]
@@ -1426,7 +1426,7 @@ def sky_ray_march(
             phi_b = gs.max(phi_b, 0.0)
             flux = flux_x * dx + flux_y * dy + flux_z * dz
             lum = gs.max(0.2126 * phi_r + 0.7152 * phi_g + 0.0722 * phi_b, 1e-9)
-            # La caméra voit la lumière qui se propage vers elle, soit vers -d
+            # The camera sees the light travelling toward it, i.e. toward -d
             q_zz = lum - q_xx - q_yy
             quad = q_xx * dx * dx + q_yy * dy * dy + q_zz * dz * dz + 2.0 * (q_xy * dx * dy + q_xz * dx * dz + q_yz * dy * dz)
             aniso = 1.0 - 3.0 * g_mean * flux / lum + 2.5 * chi2 * (3.0 * quad / lum - 1.0)
@@ -1457,7 +1457,7 @@ def sky_ray_march(
     k_r = sky[iy, ix, 0] * w00 + sky[iy, i1, 0] * w10 + sky[iy + 1, ix, 0] * w01 + sky[iy + 1, i1, 0] * w11
     k_g = sky[iy, ix, 1] * w00 + sky[iy, i1, 1] * w10 + sky[iy + 1, ix, 1] * w01 + sky[iy + 1, i1, 1] * w11
     k_b = sky[iy, ix, 2] * w00 + sky[iy, i1, 2] * w10 + sky[iy + 1, ix, 2] * w01 + sky[iy + 1, i1, 2] * w11
-    # Couleur de l'air vers l'horizon dans cette direction (perspective aérienne), comme dans la référence
+    # Colour of the air toward the horizon in that direction (aerial perspective), as in the reference
     h_r = sky[0, ix, 0]
     h_g = sky[0, ix, 1]
     h_b = sky[0, ix, 2]
@@ -1493,7 +1493,7 @@ def sky_ray_march(
             y1 = (ky + 1) % ny
             tau_g = (gs.exp(-sun_depth[0, y0, x0]) * (1.0 - tx) + gs.exp(-sun_depth[0, y0, x1]) * tx) * (1.0 - ty) + (gs.exp(-sun_depth[0, y1, x0]) * (1.0 - tx) + gs.exp(-sun_depth[0, y1, x1]) * tx) * ty
         lit = 0.31830989 * gs.max(sun[2], 0.0) * tau_g
-        # Ciel : éclairement moyen fourni avec le soleil (colonnes 7 du soleil : facteur), couleur du zénith
+        # Sky: mean irradiance given with the sun (sun columns 7: factor), zenith colour
         top = sky.shape[0] - 1
         b_r = albedo_r * (lit * sun[4] + sun[7] * sky[top, 0, 0])
         b_g = albedo_g * (lit * sun[5] + sun[7] * sky[top, 0, 1])

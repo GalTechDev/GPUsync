@@ -1,12 +1,12 @@
-//! Runtime GPUsync : périphériques, backends et (plus tard) buffers, streams et ordonnancement.
+//! GPUsync runtime: devices, backends and (later) buffers, streams and scheduling.
 //!
-//! M0 : découverte des périphériques. Chaque backend implémente [`Backend`] ; le runtime agrège
-//! leurs périphériques et retient l'état de chaque backend (disponible ou non, et pourquoi).
+//! M0: device discovery. Each backend implements [`Backend`]; the runtime gathers
+//! their devices and keeps each backend's status (available or not, and why).
 //! Voir `ARCHITECTURE.md` §8.
 
 use std::fmt;
 
-/// Catégorie de périphérique, telle que rapportée par le driver.
+/// Device category, as reported by the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceKind {
     DiscreteGpu,
@@ -27,7 +27,7 @@ impl DeviceKind {
         }
     }
 
-    /// Rang pour un ordre stable : GPU dédiés, intégrés, virtuels, CPU, autres.
+    /// Rank for a stable order: discrete, integrated, virtual GPUs, CPU, others.
     pub fn rank(self) -> u8 {
         match self {
             DeviceKind::DiscreteGpu => 0,
@@ -46,40 +46,40 @@ impl DeviceKind {
     }
 }
 
-/// Description d'un périphérique de calcul découvert par un backend.
+/// Description of a compute device discovered by a backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceInfo {
-    /// Nom commercial, ex. « NVIDIA GeForce RTX 4080 SUPER ».
+    /// Commercial name, e.g. "NVIDIA GeForce RTX 4080 SUPER".
     pub name: String,
-    /// API utilisée : "metal", "vulkan", "dx12" (via wgpu) ou "opencl".
+    /// API used: "metal", "vulkan", "dx12" (through wgpu) or "opencl".
     pub backend: &'static str,
-    /// Index parmi les périphériques du même backend (`"opencl:1"`).
+    /// Index among the devices of the same backend (`"opencl:1"`).
     pub index: usize,
     pub kind: DeviceKind,
-    /// Fabricant tel que rapporté par le driver.
+    /// Vendor as reported by the driver.
     pub vendor: String,
-    /// Version de l'API ou du driver, ex. « OpenCL 3.0 CUDA » ou « 610.88 ».
+    /// API or driver version, e.g. "OpenCL 3.0 CUDA" or "610.88".
     pub version: String,
-    /// Le périphérique sait-il calculer en float64 (arithmétique) ?
+    /// Can the device compute in float64 (arithmetic)?
     pub f64: bool,
-    /// … y compris les fonctions transcendantes (exp, log, sin…) en f64 ?
+    /// … including transcendental functions (exp, log, sin…) in f64?
     pub f64_math: bool,
-    /// Entiers 64 bits (i64, u64) dans les kernels ?
+    /// 64-bit integers (i64, u64) in kernels?
     pub int64: bool,
-    /// Mémoire partagée avec l'hôte (zéro-copie possible, §8.4 de l'architecture).
+    /// Memory shared with the host (zero-copy possible, §8.4 of the architecture).
     pub unified_memory: bool,
-    /// Mémoire globale en octets, si le backend l'expose (wgpu ne l'expose pas).
+    /// Global memory in bytes, if the backend exposes it (wgpu does not).
     pub memory_bytes: Option<u64>,
-    /// Taille max d'un buffer, en octets (contraint le découpage out-of-core).
+    /// Largest buffer size, in bytes (constrains out-of-core chunking).
     pub max_buffer_bytes: Option<u64>,
-    /// Threads au plus par groupe (`@gs.kernel(group=n)`).
+    /// Most threads per group (`@gs.kernel(group=n)`).
     pub max_group: u32,
-    /// Mémoire partagée (`gs.shared`) au plus par groupe, en octets.
+    /// Most shared memory (`gs.shared`) per group, in bytes.
     pub shared_bytes: u64,
 }
 
 impl DeviceInfo {
-    /// Identifiant court : `"opencl:0"`, `"metal:0"`…
+    /// Short identifier: `"opencl:0"`, `"metal:0"`…
     pub fn id(&self) -> String {
         format!("{}:{}", self.backend, self.index)
     }
@@ -91,7 +91,7 @@ impl fmt::Display for DeviceInfo {
     }
 }
 
-/// Erreur d'un backend (bibliothèque absente, driver en échec…).
+/// Backend error (missing library, failing driver…).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendError(pub String);
 
@@ -103,25 +103,25 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-/// Un backend de calcul (wgpu, OpenCL, CUDA…).
+/// A compute backend (wgpu, OpenCL, CUDA…).
 ///
-/// M0 ne demande que la découverte. Les opérations (allocation, lancement, attente) viendront
-/// avec M1, selon le trait décrit au §8.2 de l'architecture.
+/// M0 only requires discovery. Operations (allocation, launch, wait) came
+/// with M1, following the trait described in §8.2 of the architecture.
 pub trait Backend: Send + Sync {
-    /// Nom du backend : "wgpu", "opencl"…
+    /// Name of the backend: "wgpu", "opencl"…
     fn name(&self) -> &'static str;
 
-    /// Liste les périphériques. Une erreur signifie « backend indisponible sur cette machine » :
-    /// elle ne doit jamais faire planter l'appelant.
+    /// Lists the devices. An error means "backend unavailable on this machine":
+    /// it must never crash the caller.
     fn devices(&self) -> Result<Vec<DeviceInfo>, BackendError>;
 }
 
-/// État d'un backend après découverte.
+/// Status of a backend after discovery.
 #[derive(Debug, Clone)]
 pub struct BackendStatus {
     pub name: &'static str,
     pub devices: Vec<DeviceInfo>,
-    /// `None` si le backend est disponible ; sinon la raison.
+    /// `None` if the backend is available; otherwise the reason.
     pub error: Option<String>,
 }
 
@@ -131,12 +131,12 @@ impl BackendStatus {
     }
 }
 
-/// Interroge chaque backend. Un backend en erreur est signalé, jamais fatal (objectif O1).
+/// Queries every backend. A failing backend is reported, never fatal (goal O1).
 pub fn discover(backends: &[&dyn Backend]) -> Vec<BackendStatus> {
     backends
         .iter()
         .map(|b| {
-            // Un driver défaillant peut paniquer dans du code tiers : on l'isole aussi.
+            // A broken driver may panic in third-party code: isolate that too.
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.devices())) {
                 Ok(Ok(devices)) => BackendStatus {
                     name: b.name(),
@@ -151,14 +151,14 @@ pub fn discover(backends: &[&dyn Backend]) -> Vec<BackendStatus> {
                 Err(_) => BackendStatus {
                     name: b.name(),
                     devices: vec![],
-                    error: Some("le backend a paniqué pendant la découverte".into()),
+                    error: Some("the backend panicked during discovery".into()),
                 },
             }
         })
         .collect()
 }
 
-/// Liste à plat de tous les périphériques, dans l'ordre de préférence des backends fournis.
+/// Flat list of every device, in the order of preference of the given backends.
 pub fn all_devices(statuses: &[BackendStatus]) -> Vec<DeviceInfo> {
     statuses
         .iter()
@@ -208,18 +208,18 @@ mod tests {
             "panique"
         }
         fn devices(&self) -> Result<Vec<DeviceInfo>, BackendError> {
-            panic!("driver cassé")
+            panic!("broken driver")
         }
     }
 
     #[test]
     fn failing_or_panicking_backend_does_not_block_others() {
         let ok = Fake("ok", Ok(2));
-        let ko = Fake("ko", Err("bibliothèque introuvable"));
+        let ko = Fake("ko", Err("library not found"));
         let st = discover(&[&ko, &Panics, &ok]);
         assert_eq!(st.len(), 3);
-        assert_eq!(st[0].error.as_deref(), Some("bibliothèque introuvable"));
-        assert!(st[1].error.as_deref().unwrap().contains("paniqué"));
+        assert_eq!(st[0].error.as_deref(), Some("library not found"));
+        assert!(st[1].error.as_deref().unwrap().contains("panicked"));
         assert!(st[2].available());
         let devs = all_devices(&st);
         assert_eq!(devs.len(), 2);

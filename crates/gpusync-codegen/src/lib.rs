@@ -1,11 +1,11 @@
-//! Génération de code : IR → OpenCL C (≥ 1.2) et WGSL (ARCHITECTURE.md §7).
+//! Code generation: IR → OpenCL C (≥ 1.2) and WGSL (ARCHITECTURE.md §7).
 //!
-//! Disposition des arguments (commune à l'exécution) :
-//! - **OpenCL** : paramètres dans l'ordre déclaré (tableaux = buffers, scalaires = valeurs, dont les
-//!   dimensions cachées des kernels avec index, en dernier), puis un buffer par sortie, puis `n` (uint).
-//! - **WGSL** : un binding par tableau d'entrée (ordre déclaré), puis un par sortie, puis un buffer
-//!   `array<u32>` contenant les scalaires non f64 (un mot chacun) suivis de `n`, puis — seulement si le
-//!   kernel a des scalaires f64 — un buffer `array<f64>` avec ces scalaires.
+//! Argument layout (shared with execution):
+//! - **OpenCL**: parameters in declared order (arrays = buffers, scalars = values, including the
+//!   hidden dimensions of indexed kernels, last), then one buffer per output, then `n` (uint).
+//! - **WGSL**: one binding per input array (declared order), then one per output, then an
+//!   `array<u32>` buffer holding the non-f64 scalars (one word each) followed by `n`, then — only if the
+//!   kernel has f64 scalars — an `array<f64>` buffer with those scalars.
 
 mod opencl;
 mod wgsl;
@@ -17,19 +17,19 @@ use gpusync_ir::*;
 pub use opencl::{emit_c_variant, emit_cuda, emit_opencl};
 pub use wgsl::{WGSL_WORKGROUP_SIZE, emit_wgsl, emit_wgsl_variant, has_f64_params};
 
-/// Paramètres scalaires remplacés par une constante dans le code généré (spécialisation, §5.4) :
-/// (indice du paramètre, valeur). Le paramètre reste dans la signature, inutilisé.
+/// Scalar parameters replaced by a constant in the generated code (specialization, §5.4):
+/// (parameter index, value). The parameter stays in the signature, unused.
 pub type Spec = [(usize, i64)];
 
 pub(crate) fn spec_value(spec: &Spec, i: usize) -> Option<i64> {
     spec.iter().find(|(p, _)| *p == i).map(|(_, v)| *v)
 }
 
-/// Code généré, prêt à compiler.
+/// Generated code, ready to compile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KernelSource {
     pub code: String,
-    /// Nom du point d'entrée.
+    /// Name of the entry point.
     pub entry: String,
 }
 
@@ -44,7 +44,7 @@ impl std::fmt::Display for CodegenError {
 
 impl std::error::Error for CodegenError {}
 
-/// Identifiant ASCII sûr dans toutes les cibles (les noms Python peuvent contenir « é »…).
+/// ASCII identifier safe in every target (Python names may contain "é"…).
 fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -59,7 +59,7 @@ pub(crate) fn param_name(k: &Kernel, i: usize) -> String {
     format!("p{i}_{}", sanitize(&k.params[i].name))
 }
 
-/// Fonctions d'aide nécessaires au kernel (émises seulement si utilisées).
+/// Helper functions the kernel needs (emitted only when used).
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Helper {
     #[default]
@@ -74,7 +74,7 @@ pub(crate) enum Helper {
     FloorDivU64,
     ModI64,
     ModU64,
-    /// Opération sur les bits : (opération, type entier) — voir `BITS_SHL`… et `int_index`.
+    /// Bit operation: (operation, integer type) — see `BITS_SHL`… and `int_index`.
     Bits(u8, u8),
 }
 
@@ -82,7 +82,7 @@ pub(crate) const BITS_SHL: u8 = 0;
 pub(crate) const BITS_SHR: u8 = 1;
 pub(crate) const BITS_MULHI: u8 = 2;
 
-/// Rang d'un type entier (i32, u32, i64, u64) pour `Helper::Bits`.
+/// Rank of an integer type (i32, u32, i64, u64) for `Helper::Bits`.
 pub(crate) fn int_index(t: Scalar) -> u8 {
     match t {
         Scalar::I32 => 0,
@@ -94,7 +94,7 @@ pub(crate) fn int_index(t: Scalar) -> u8 {
 
 pub(crate) const INT_TYPES: [Scalar; 4] = [Scalar::I32, Scalar::U32, Scalar::I64, Scalar::U64];
 
-/// Compte de décalage constant et inférieur à la largeur : le décalage s'écrit directement.
+/// Constant shift count below the width: the shift is written directly.
 pub(crate) fn const_shift(count: &Expr) -> Option<u32> {
     let w = if count.ty.is_int64() { 64 } else { 32 };
     let v = match count.kind {
@@ -164,7 +164,7 @@ pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
             let t = int_index(args[0].ty);
             set.insert(Helper::Bits(BITS_MULHI, t));
             if t == 0 || t == 2 {
-                set.insert(Helper::Bits(BITS_MULHI, t + 1)); // le signé s'appuie sur le non signé
+                set.insert(Helper::Bits(BITS_MULHI, t + 1)); // the signed one relies on the unsigned one
             }
         }
         if let ExprKind::Call(Intrinsic::Pow, args) = &e.kind {
@@ -176,7 +176,7 @@ pub(crate) fn helpers(k: &Kernel) -> BTreeSet<Helper> {
     set
 }
 
-/// Opérations atomiques du kernel : (opération, type de la sortie), sans doublon.
+/// Atomic operations of the kernel: (operation, output type), without duplicates.
 pub(crate) fn atomics(k: &Kernel) -> Vec<(u8, Scalar)> {
     fn walk(b: &Block, k: &Kernel, out: &mut Vec<(u8, Scalar)>) {
         for s in b {
@@ -203,7 +203,7 @@ pub(crate) fn atomics(k: &Kernel) -> Vec<(u8, Scalar)> {
     out
 }
 
-/// Indentation simple pour un code lisible (`kernel.source("opencl")`).
+/// Simple indentation for readable code (`kernel.source("opencl")`).
 pub(crate) struct Out {
     pub buf: String,
     pub depth: usize,
@@ -231,7 +231,7 @@ mod tests {
         Expr { ty, kind }
     }
 
-    /// normalize(x: f32[:], mean: f32, std: f32) avec un peu de tout : boucle, //, %, **, ternaire.
+    /// normalize(x: f32[:], mean: f32, std: f32) with a bit of everything: loop, //, %, **, ternary.
     pub(crate) fn sample() -> Kernel {
         let x = || Box::new(e(Scalar::F32, ExprKind::Param(0)));
         let c = |v: f32| Box::new(e(Scalar::F32, ExprKind::Const(Const::F32(v))));

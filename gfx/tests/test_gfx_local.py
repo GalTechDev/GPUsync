@@ -1,4 +1,4 @@
-"""Raccord entre la carte météo et les nuages 3D : suivi, déplacement, pas découpé, glace, soleil."""
+"""Coupling between the weather map and the 3D clouds: tracking, moving, split steps, ice, sun."""
 
 import numpy as np
 import pytest
@@ -75,7 +75,7 @@ def test_rebase_keeps_the_air_and_moves_the_pressure():
 
 
 def test_ice_saturation_matches_the_exact_adjustment():
-    """Saturation mixte : température et eau nuageuse comparées à la solution numérique en double précision."""
+    """Mixed saturation: temperature and cloud water compared with the double-precision numerical solution."""
     theta, q = (lambda z: 300.0 + 0.004 * z), (lambda z: 12e-3 * np.exp(-z / 3500.0))
     a = gfx.Atmosphere(gfx.AtmosphereConfig(nx=16, ny=16, nz=60, dz=200.0, theta_l=theta, qt=q, ice=True))
     t, qc = atm.saturation_adjust(theta(a.z), q(a.z), a.p0, True)
@@ -107,7 +107,7 @@ def test_sun_position_at_the_solstice():
     assert el == pytest.approx(45.0 + 23.44, abs=0.1) and az == pytest.approx(180.0, abs=1.0)
     w.time = 4 * 3600.0
     el, az = w.sun_position(0.0, 0.0)
-    assert 30.0 < el < 45.0 and 250.0 < az < 290.0  # à l'ouest l'après-midi
+    assert 30.0 < el < 45.0 and 250.0 < az < 290.0  # in the west in the afternoon
 
 
 def test_clouds_follow_the_column_of_the_map():
@@ -124,7 +124,7 @@ def test_clouds_follow_the_column_of_the_map():
 
 
 def test_moving_takes_the_air_of_the_new_place():
-    """Un déplacement de 600 km vers le nord refroidit aussitôt le pavé de la différence des deux colonnes."""
+    """A 600 km move to the north immediately cools the tile by the difference between the two columns."""
     w = _weather(temperature=lambda y, p: wx.jet_temperature(y, p, width=5e5))
     loc = gfx.LocalClouds(w, 6e5, -3e5, **_SMALL)
     loc.run(120.0)
@@ -140,7 +140,7 @@ def test_moving_takes_the_air_of_the_new_place():
 
 
 def test_camera_stays_above_the_player():
-    """Le pavé glisse avec le vent : la position de la caméra dans le pavé recule d'autant, modulo sa largeur."""
+    """The tile slides with the wind: the camera position in the tile moves back by as much, modulo its width."""
     w = _weather()
     loc = gfx.LocalClouds(w, 6e5, 1e5, **_SMALL)
     p0 = loc.camera_position(50.0)
@@ -240,7 +240,7 @@ def test_nest_follows_a_frame_change_and_an_air_shift():
     nest.follow()
     assert (nest.config.frame_u, nest.config.frame_v) == (10.0, -2.0)
     inner = (slice(None), slice(8, -8), slice(8, -8))
-    # Vent réel inchangé, air déplacé du même écart, sans divergence ajoutée
+    # True wind unchanged, air shifted by the same amount, no divergence added
     assert np.allclose(nest.u.numpy()[inner], 2.0, atol=1e-3) and np.allclose(nest.v.numpy()[inner], 5.0, atol=1e-3)
     assert np.allclose(nest.s.numpy() - before, 0.5, atol=1e-4)
     for _ in range(3):
@@ -252,7 +252,7 @@ def test_nest_moves_by_the_shortest_way_on_a_periodic_parent():
     parent = gfx.Atmosphere(gfx.AtmosphereConfig(nx=32, ny=32, nz=8, dx=200.0, dz=200.0))
     nest = gfx.NestedAtmosphere(parent, size=1600.0, dx=50.0, dz=100.0, center=(400.0, 3200.0))
     start = nest.origin
-    nest.move_to(6400.0 - 200.0, 3200.0)  # à 600 m par-delà le bord, pas à 5,8 km
+    nest.move_to(6400.0 - 200.0, 3200.0)  # 600 m beyond the edge, not 5.8 km
     assert np.isclose(nest.origin[0] - start[0], -600.0) and nest.origin[1] == start[1]
     x, y = gfx.nest.nearest(nest, 6400.0 - 150.0, 3200.0)
     assert np.isclose(x, -150.0) and y == 3200.0
@@ -267,9 +267,9 @@ def test_local_clouds_with_a_nest_around_the_player():
     for _ in range(30):
         loc.step()
         assert loc.clock <= loc.time + 1e-6 and loc.time - loc.clock < loc.dt + 1e-6
-        assert abs(w.time - loc.time) < 2.0 * w.dt  # la carte avance avec le pavé
+        assert abs(w.time - loc.time) < 2.0 * w.dt  # the map advances along with the tile
     assert np.isfinite(nest.t.numpy()).all() and np.abs(nest.divergence()).max() < 1e-4
-    # Le joueur part de 3 km : la grille fine le rejoint, et la caméra reste dedans
+    # The player moves 3 km away: the fine grid catches up, and the camera stays inside it
     loc.move_to(loc.x + 3000.0, loc.y)
     for _ in range(3):
         loc.step()

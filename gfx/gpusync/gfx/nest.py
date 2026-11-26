@@ -1,4 +1,4 @@
-"""Grille fine emboîtée dans une `Atmosphere` large : le détail près du joueur, la météo tout autour."""
+"""Fine grid nested in a coarse `Atmosphere`: detail near the player, the weather all around."""
 
 from __future__ import annotations
 
@@ -28,14 +28,14 @@ from .kernels.knest import (
     nest_shift,
 )
 
-HALO = 6  # mailles imposées au bord (l'advection d'ordre 9 en lit cinq)
+HALO = 6  # cells imposed at the edge (the order-9 advection reads five of them)
 
 
 class NestedAtmosphere(Atmosphere):
-    """Grille fine, sens unique : elle reçoit la grille large `parent` à ses bords et ne lui rend rien.
+    """One-way fine grid: it receives the coarse `parent` grid at its edges and gives nothing back.
 
-    `size` : côté utile (m) ; `center` : centre dans les coordonnées du parent (m). Les bords latéraux sont imposés,
-    avec une zone de raccord ; la pression est résolue avec des parois de Neumann."""
+    `size`: useful side (m); `center`: centre in the parent's coordinates (m). The lateral edges are imposed,
+    with a blending zone; the pressure is solved with Neumann walls."""
 
     def __init__(
         self,
@@ -54,18 +54,18 @@ class NestedAtmosphere(Atmosphere):
         dz = float(dz or dx)
         nz = round(top / dz)
         if abs(nz * dz - top) > 1e-6 * top:
-            raise ValueError(f"NestedAtmosphere : dz={dz} ne divise pas la hauteur du domaine ({top} m)")
+            raise ValueError(f"NestedAtmosphere: dz={dz} does not divide the domain height ({top} m)")
         inner = 4 * max(4, round(size / dx / 4))
         n = inner + 2 * HALO
         if n * dx > min(pc.nx * pc.dx, pc.ny * pc.dy):
-            raise ValueError("NestedAtmosphere : la grille fine doit tenir dans la grille large")
+            raise ValueError("NestedAtmosphere: the fine grid must fit inside the coarse grid")
         self._inner = inner
         self._relax = (float(relax_width), 1.0 / float(relax_time))
         cx, cy = center or (0.5 * pc.nx * pc.dx, 0.5 * pc.ny * pc.dy)
-        # Coin de la grille fine, halo compris, aligné sur ses propres mailles
+        # Corner of the fine grid, halo included, aligned on its own cells
         self.origin = (dx * round((cx - 0.5 * n * dx) / dx), dx * round((cy - 0.5 * n * dx) / dx))
         self._targets: list[gs.Array] | None = None
-        self._window: tuple | None = None  # (état ancien, nouveau, début, fin) du dernier pas large
+        self._window: tuple | None = None  # (old state, new state, start, end) of the last coarse step
         self._dt: tuple[float, float] | None = None
         cfg = replace(pc, nx=n, ny=n, nz=nz, dx=dx, dy=dx, dz=dz, initial={}, max_dt=min(8.0, 0.2 * dx))
         super().__init__(cfg, device=parent.device)
@@ -147,7 +147,7 @@ class NestedAtmosphere(Atmosphere):
     # ── Avance ──
 
     def run(self, seconds: float, *, every: int = 40) -> None:
-        """Avance la grille fine de `seconds` (la grille large peut finir un pas en avance)."""
+        """Advances the fine grid by `seconds` (the coarse grid may end one step ahead)."""
         end = self.time + seconds
         k = 0
         while self.time < end - 1e-6:
@@ -156,21 +156,21 @@ class NestedAtmosphere(Atmosphere):
             k += 1
             self.tick(end - self.time)
             if k % 4 == 0:
-                gs.sync(self.device)  # borne la file : sinon les tampons en attente remplissent la mémoire du GPU
+                gs.sync(self.device)  # bounds the queue: otherwise pending buffers fill up GPU memory
 
     def refresh_steps(self) -> None:
-        """Réévalue les pas de temps stables des deux grilles (attend le GPU)."""
+        """Re-evaluates the stable time steps of both grids (waits for the GPU)."""
         self._dt = (self.parent.stable_dt(), self.stable_dt())
 
     def tick(self, limit: float = math.inf) -> float:
-        """Un seul pas fin, précédé d'un pas large s'il le faut ; renvoie sa durée. Régulier, donc adapté à une image."""
+        """A single fine step, preceded by a coarse step if needed; returns its duration. Regular, so suited to a frame."""
         before = self.time
         for _ in self.tick_parts(limit, split=False):
             pass
         return self.time - before
 
     def tick_parts(self, limit: float = math.inf, *, split: bool = True):
-        """Le même pas en petits morceaux (générateur), à répartir sur plusieurs images."""
+        """The same step in small pieces (a generator), to spread over several frames."""
         if self._dt is None:
             self.refresh_steps()
         self._catch_up()
@@ -182,7 +182,7 @@ class NestedAtmosphere(Atmosphere):
             else:
                 self.parent.step(self._dt[0])
             self._window = (old, parent_state(self.parent), start, self.parent.time)
-            # La grille fine repart exactement de l'instant de la grille large
+            # The fine grid restarts exactly from the coarse grid's instant
             self.time = start if self.time > start - 1e-6 else self.time
         _, _, start, end = self._window
         left = end - self.time
@@ -196,8 +196,8 @@ class NestedAtmosphere(Atmosphere):
             yield
 
     def _catch_up(self) -> None:
-        """La grille large a changé hors de ses pas (air décalé, repère changé) : la fenêtre et la grille fine suivent,
-        du même écart interpolé."""
+        """The coarse grid changed outside its steps (air shifted, frame changed): the window and the fine grid follow,
+        by the same interpolated difference."""
         if self._window is None:
             return
         old, new, start, end = self._window
@@ -220,8 +220,8 @@ class NestedAtmosphere(Atmosphere):
             self.diagnose()
 
     def follow(self) -> None:
-        """Reprend de la grille large ce qui a changé entre deux pas : son air (`_catch_up`), son repère, ses flux de
-        surface, ses forçages de grande échelle et son état de référence. À appeler entre deux pas fins."""
+        """Takes from the coarse grid what changed between two steps: its air (`_catch_up`), its frame, its surface
+        fluxes, its large-scale forcings and its reference state. To be called between two fine steps."""
         p, cfg, pc = self.parent, self.config, self.parent.config
         self._catch_up()
         cfg.frame_u, cfg.frame_v = pc.frame_u, pc.frame_v
@@ -233,7 +233,7 @@ class NestedAtmosphere(Atmosphere):
         self.rebase(*(np.interp(z, p.z, a) for a in (p.t0, p.qv0, p.qc0)), pc.surface_pressure)
 
     def _blend(self) -> tuple:
-        """Grille large vue à l'instant de la grille fine : `(ancien, nouveau, poids)`."""
+        """Coarse grid seen at the fine grid's instant: `(old, new, weight)`."""
         if self._window is None:
             state = parent_state(self.parent)
             return state, state, 1.0
@@ -241,11 +241,11 @@ class NestedAtmosphere(Atmosphere):
         return old, new, min(max((self.time - start) / (end - start), 0.0), 1.0)
 
     def move_to(self, x: float, y: float) -> bool:
-        """Recentre la grille fine sur `(x, y)` (coordonnées du parent) par mailles entières ; `True` si elle a bougé."""
+        """Recentres the fine grid on `(x, y)` (parent coordinates) by whole cells; `True` if it moved."""
         cfg, pc = self.config, self.parent.config
         half = 0.5 * cfg.nx * cfg.dx
-        # La grille large est périodique : le plus court chemin. Le coin n'est pas ramené dans le domaine (le rendu et
-        # le cache le suivent d'un seul tenant) ; `nearest` donne l'image d'un point la plus proche de la grille fine
+        # The coarse grid is periodic: take the shortest way. The corner is not wrapped back into the domain (rendering and
+        # the cache follow it in one piece); `nearest` gives the image of a point closest to the fine grid
         sides = (pc.nx * pc.dx, pc.ny * pc.dy)
         sx, sy = (round(((c - half - o + 0.5 * L) % L - 0.5 * L) / cfg.dx) for c, o, L in zip((x, y), self.origin, sides))
         if sx == 0 and sy == 0:
@@ -266,7 +266,7 @@ class NestedAtmosphere(Atmosphere):
 
 
 def nearest(nest: NestedAtmosphere, x: float, y: float) -> tuple[float, float]:
-    """Image périodique de `(x, y)` (coordonnées de la grille large) la plus proche du centre de la grille fine."""
+    """Periodic image of `(x, y)` (coarse-grid coordinates) closest to the centre of the fine grid."""
     cfg, pc = nest.config, nest.parent.config
     half = 0.5 * cfg.nx * cfg.dx
     return tuple(
@@ -275,5 +275,5 @@ def nearest(nest: NestedAtmosphere, x: float, y: float) -> tuple[float, float]:
 
 
 def parent_state(a: Atmosphere) -> tuple[gs.Array, ...]:
-    """Champs transmis à une grille emboîtée."""
+    """Fields passed to a nested grid."""
     return a.u, a.v, a.w, a.s, a.qt, a.qr

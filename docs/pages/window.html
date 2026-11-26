@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Window — GPUsync</title>
+<meta name="description" content="gs.Window opens a native window (no Pygame, no Tkinter) and shows an image in it. An image computed by a kernel on the same GPU as the window goes straight from the GPU to the screen, without going th">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0..1,0&display=block">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="assets/site.js"></script>
+</head>
+<body>
+<aside class="side" aria-label="Navigation">
+<a class="brand" href="index.html">GPUsync <small>v0.1.0</small></a>
+<nav class="nav">
+<a href="index.html"><span class="icon">home</span>Home</a>
+<div class="nav-group">Guide</div>
+<a href="installation.html"><span class="icon">download</span>Installation</a>
+<a href="kernels.html"><span class="icon">code</span>Writing a kernel</a>
+<a href="results.html"><span class="icon">database</span>Results and data</a>
+<a href="devices.html"><span class="icon">developer_board</span>Devices</a>
+<a href="atomics.html"><span class="icon">scatter_plot</span>Atomics</a>
+<a href="groups.html"><span class="icon">hub</span>Thread groups</a>
+<a href="window.html" aria-current="page"><span class="icon">desktop_windows</span>Window</a>
+<a href="errors.html"><span class="icon">bug_report</span>Errors and performance</a>
+<div class="nav-group">API</div>
+<a href="reference.html"><span class="icon">menu_book</span>Reference</a>
+</nav>
+<div class="side-foot">MIT licence · <a href="https://github.com/GalTechDev/GPUsync/tree/new-rust">Source code</a></div>
+</aside>
+<div class="scrim"></div>
+<div class="page">
+<header class="top">
+<button class="menu-toggle" type="button" aria-label="Menu" aria-expanded="false"><span class="icon">menu</span></button>
+<h1 class="top-title">Window</h1>
+<button class="btn btn-plain theme-toggle" type="button" aria-label="Theme"><span class="icon">dark_mode</span></button>
+<a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
+</header>
+<main class="content">
+<article class="doc"><h2 class="lead-title">Window</h2><p class="lead"><code>gs.Window</code> opens a native window (no Pygame, no Tkinter) and shows an image in it. An image computed by a kernel on the same GPU as the window goes <strong>straight from the GPU to the screen</strong>, without going through main memory: enough to animate a simulation or a renderer at full speed from Python.</p><hr class="rule"><div class="code"><div class="code-head"><span>Python</span><span class="badge badge-muted" title="Excerpt not run by the tests">Excerpt</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code><span class="tk-kw">import</span> numpy <span class="tk-kw">as</span> np
+<span class="tk-kw">import</span> gpusync <span class="tk-kw">as</span> gs
+
+<span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">def</span> waves(xy: <span class="tk-gs">gs.f32</span>[<span class="tk-str">"h"</span>, <span class="tk-str">"w"</span>], t: <span class="tk-gs">gs.f32</span>) -&gt; <span class="tk-gs">gs.u32</span>[<span class="tk-str">"h"</span>, <span class="tk-str">"w"</span>]:
+    y, x = <span class="tk-gs">gs.index</span>()
+    v = <span class="tk-num">0.5</span> + <span class="tk-num">0.5</span> * <span class="tk-gs">gs.sin</span>(<span class="tk-num">0.05</span> * float(x) + t) * <span class="tk-gs">gs.cos</span>(<span class="tk-num">0.04</span> * float(y) - <span class="tk-num">0.7</span> * t)
+    c = <span class="tk-gs">gs.u32</span>(<span class="tk-gs">gs.min</span>(<span class="tk-num">255.0</span> * v, <span class="tk-num">255.0</span>))
+    <span class="tk-kw">return</span> c | (c &lt;&lt; <span class="tk-num">8</span>) | (<span class="tk-gs">gs.u32</span>(<span class="tk-num">255</span>) &lt;&lt; <span class="tk-num">16</span>) | (<span class="tk-gs">gs.u32</span>(<span class="tk-num">255</span>) &lt;&lt; <span class="tk-num">24</span>)   <span class="tk-com"># R | G&lt;&lt;8 | B&lt;&lt;16 | A&lt;&lt;24</span>
+
+<span class="tk-dec">@gs.kernel</span>
+<span class="tk-kw">def</span> blank(x: <span class="tk-gs">gs.f32</span>[:]) -&gt; <span class="tk-gs">gs.f32</span>[:]:
+    <span class="tk-kw">return</span> <span class="tk-num">0.0</span> * x
+
+<span class="tk-kw">with</span> <span class="tk-gs">gs.Window</span>(<span class="tk-num">960</span>, <span class="tk-num">540</span>, title=<span class="tk-str">"Waves"</span>) <span class="tk-kw">as</span> win:
+    t, canvas = <span class="tk-num">0.0</span>, <span class="tk-kw">None</span>
+    <span class="tk-kw">while</span> win.open:
+        <span class="tk-kw">for</span> ev <span class="tk-kw">in</span> win.poll():
+            <span class="tk-kw">if</span> ev[<span class="tk-str">"type"</span>] == <span class="tk-str">"key_down"</span> <span class="tk-kw">and</span> ev[<span class="tk-str">"key"</span>] == <span class="tk-str">"escape"</span>:
+                win.close()
+        <span class="tk-kw">if</span> canvas <span class="tk-kw">is</span> <span class="tk-kw">None</span> <span class="tk-kw">or</span> canvas.shape != (win.height, win.width):   <span class="tk-com"># at start and when the window changes</span>
+            canvas = blank(np.zeros((win.height, win.width), np.float32), device=win.device)
+        win.present(waves(canvas, t, device=win.device))   <span class="tk-com"># `canvas` only gives the size</span>
+        t += <span class="tk-num">0.05</span></code></pre></div>
+<p>The image goes through without a copy when two conditions hold (<code>win.zero_copy</code> tells after each <code>present</code>):</p>
+<ul><li>it is computed <strong>on the window's device</strong> (<code>device=win.device</code>): the window uses wgpu, hence Metal, Vulkan or DX12;</li><li>it <strong>stays on the GPU</strong> (<code>resident</code> mode), so it is computed from inputs that are already there. Computed straight from a NumPy array on a unified-memory GPU, it would be written to main memory (<code>direct</code> mode) and then copied: that is why the example goes through <code>canvas</code>, a kernel result kept from one frame to the next.</li></ul>
+<h2 id="images-accepted-by-present"><a class="anchor" href="#images-accepted-by-present" aria-hidden="true">#</a>Images accepted by <code>present</code></h2>
+<div class="table-wrap"><table><thead><tr><th>Image</th><th>Format</th></tr></thead><tbody><tr><td><code>gs.Array</code> <code>uint32</code> <code>(H, W)</code></td><td>RGBA packed in one integer (red in the least significant byte, see the example); no copy if it stayed on the window's GPU</td></tr><tr><td><code>np.ndarray</code> <code>uint32</code> <code>(H, W)</code></td><td>same packing</td></tr><tr><td><code>np.ndarray</code> <code>uint8</code> <code>(H, W, 4)</code></td><td>RGBA</td></tr><tr><td><code>np.ndarray</code> <code>uint8</code> <code>(H, W, 3)</code></td><td>RGB</td></tr></tbody></table></div>
+<h2 id="events"><a class="anchor" href="#events" aria-hidden="true">#</a>Events</h2>
+<p><code>win.poll()</code> processes system events without blocking and returns a list of dictionaries:</p>
+<div class="table-wrap"><table><thead><tr><th><code>type</code></th><th>Other keys</th></tr></thead><tbody><tr><td><code>"key_down"</code>, <code>"key_up"</code></td><td><code>key</code>: lowercase character (<code>"z"</code>, <code>"+"</code>…) or <code>"space"</code>, <code>"escape"</code>, <code>"enter"</code>, <code>"tab"</code>, <code>"backspace"</code>, <code>"up"</code>, <code>"down"</code>, <code>"left"</code>, <code>"right"</code>, <code>"shift"</code>, <code>"ctrl"</code>, <code>"alt"</code>, <code>"super"</code></td></tr><tr><td><code>"mouse_down"</code>, <code>"mouse_up"</code></td><td><code>button</code>: <code>"left"</code>, <code>"right"</code>, <code>"middle"</code></td></tr><tr><td><code>"mouse_move"</code></td><td><code>x</code>, <code>y</code> (position), <code>dx</code>, <code>dy</code> (motion)</td></tr><tr><td><code>"mouse_wheel"</code></td><td><code>dx</code>, <code>dy</code></td></tr><tr><td><code>"resize"</code></td><td><code>width</code>, <code>height</code></td></tr><tr><td><code>"close"</code></td><td></td></tr></tbody></table></div>
+<p>Current state, without going through events:</p>
+<div class="table-wrap"><table><tbody><tr><td><code>win.key_down("z")</code></td><td>key held right now (for continuous movement)</td></tr><tr><td><code>win.keys</code>, <code>win.mouse_buttons</code></td><td>sets of keys and buttons held</td></tr><tr><td><code>win.mouse_pos</code></td><td>mouse position <code>(x, y)</code> (an attribute, not a function)</td></tr><tr><td><code>win.size</code>, <code>win.width</code>, <code>win.height</code></td><td>logical size of the drawing area</td></tr><tr><td><code>win.physical_size</code></td><td>size in real pixels (Retina / HiDPI screens)</td></tr><tr><td><code>win.open</code></td><td><code>False</code> once closed</td></tr></tbody></table></div>
+<h2 id="settings"><a class="anchor" href="#settings" aria-hidden="true">#</a>Settings</h2>
+<p><code>gs.Window(width, height, title=..., vsync=False, resizable=True, device=None)</code>. <code>win.vsync</code> can be changed on the fly; <code>win.set_title(...)</code> changes the title (handy to show frames per second); <code>win.close()</code> closes.</p>
+<p>The window must be created and used on the main thread (a macOS requirement).</p><nav class="pager"><a href="groups.html"><span class="dir">← Previous</span><span class="name">Thread groups</span></a><a class="next" href="errors.html"><span class="dir">Next →</span><span class="name">Errors and performance</span></a></nav></article>
+<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#images-accepted-by-present">Images accepted by <code>present</code></a><a href="#events">Events</a><a href="#settings">Settings</a></aside>
+</main>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
+</div>
+</body>
+</html>

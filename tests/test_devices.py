@@ -1,8 +1,8 @@
-"""Tests de la découverte des périphériques (jalon M0).
+"""Tests of device discovery (milestone M0).
 
-Variable optionnelle GS_EXPECT : backends qui DOIVENT avoir au moins un périphérique sur la machine
-de test, ex. GS_EXPECT=metal,opencl (Mac) ou GS_EXPECT=vulkan,opencl (PC). Sans elle, seule la
-cohérence est vérifiée (utile sur une CI sans GPU).
+Optional variable GS_EXPECT: backends that MUST have at least one device on the test
+machine, e.g. GS_EXPECT=metal,opencl (Mac) or GS_EXPECT=vulkan,opencl (PC). Without it, only
+consistency is checked (useful on a CI without a GPU).
 """
 
 import os
@@ -51,13 +51,13 @@ def test_cache_and_refresh():
 def test_objects_are_immutable():
     devs = gs.devices()
     if not devs:
-        pytest.skip("aucun périphérique sur cette machine")
+        pytest.skip("no device on this machine")
     with pytest.raises(AttributeError):
         devs[0].name = "autre"
 
 
-@pytest.mark.skipif(not os.environ.get("GS_EXPECT"), reason="GS_EXPECT non défini")
+@pytest.mark.skipif(not os.environ.get("GS_EXPECT"), reason="GS_EXPECT not set")
 def test_expected_devices_on_this_machine():
     found = {d.backend for d in gs.devices()}
     missing = [b for b in os.environ["GS_EXPECT"].split(",") if b and b not in found]
-    assert not missing, f"backends attendus mais sans périphérique : {missing} — état : {gs.backends()}"
+    assert not missing, f"backends expected but without a device: {missing} — status: {gs.backends()}"

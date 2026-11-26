@@ -1,7 +1,7 @@
-"""Optique d'une surface d'eau : Fresnel, réfraction vers le bassin, absorption, caustiques et reflets.
+"""Optics of a water surface: Fresnel, refraction toward the pool, absorption, caustics and reflections.
 
-La surface est un maillage quelconque, tracé à part de la scène opaque. Le bassin (fond et murs) est une boîte
-alignée sur les axes ; les objets immergés sont cherchés dans l'image opaque déjà rendue."""
+The surface is any mesh, drawn apart from the opaque scene. The pool (bottom and walls) is an axis-aligned
+box; submerged objects are looked up in the already rendered opaque image."""
 
 import gpusync as gs
 
@@ -16,7 +16,7 @@ def water_depth_map(
     amb_freq: gs.f32,
     amb_t: gs.f32,
 ) -> gs.f32["gh", "gw"]:
-    """Épaisseur d'eau (m) au-dessus du fond, houle comprise : entrée du calcul des caustiques."""
+    """Water depth (m) above the bottom, swell included: input of the caustics computation."""
     y, x = gs.index()
     h = h_grid[y, x] * h_scale
     if amb_amp > 0.0:
@@ -36,7 +36,7 @@ def water_merge(
     vis_w: gs.u32["h", "w"],
     first_tri: gs.i32,
 ) -> (gs.u32["h", "w"], gs.u32["h", "w"]):
-    """Ajoute l'eau à la profondeur et aux numéros de triangles (sélection à la souris, fluides suivants)."""
+    """Adds the water to the depth and triangle numbers (mouse selection, later fluids)."""
     y, x = gs.index()
     if vis_w[y, x] != gs.u32(4294967295) and zbuf_w[y, x] < zbuf[y, x]:
         return zbuf_w[y, x], vis_w[y, x] + gs.u32(first_tri)
@@ -113,7 +113,7 @@ def water_optics(
     roughness: gs.f32,
     caustic_strength: gs.f32,
 ) -> (gs.f32["h", "w"], gs.f32["h", "w"], gs.f32["h", "w"]):
-    """Couleur de l'eau pour chaque pixel où elle est visible ; l'image opaque ailleurs."""
+    """Colour of the water for each pixel where it is visible; the opaque image elsewhere."""
     py, px = gs.index()
     h = zbuf.shape[0]
     w = zbuf.shape[1]
@@ -122,7 +122,7 @@ def water_optics(
     if vis == gs.u32(4294967295) or zw >= zbuf[py, px]:
         return hdr_r[py, px], hdr_g[py, px], hdr_b[py, px]
 
-    # 1) Rayon caméra et point de la surface
+    # 1) Camera ray and point on the surface
     aspect = float(w) / float(h)
     ndc_x = ((float(px) + 0.5) / float(w) * 2.0 - 1.0) * aspect * tan_hfov
     ndc_y = (1.0 - (float(py) + 0.5) / float(h) * 2.0) * tan_hfov
@@ -140,7 +140,7 @@ def water_optics(
     rdz = vdz * inv_len
     dist = surf_z / inv_len
 
-    # 2) Normale interpolée (barycentriques homogènes : valables aussi quand le triangle traverse le plan proche)
+    # 2) Interpolated normal (homogeneous barycentrics: valid even when the triangle crosses the near plane)
     t = gs.i32(vis)
     nx = 0.0
     ny = 0.0
@@ -199,7 +199,7 @@ def water_optics(
     cos_i = -(rdx * nx + rdy * ny + rdz * nz)
     cos_i = gs.max(cos_i, 0.02)
 
-    # 3) Fresnel exact d'un diélectrique et direction réfractée
+    # 3) Exact Fresnel of a dielectric and refracted direction
     eta = 1.0 / gs.max(ior, 1.001)
     k_s = 1.0 - eta * eta * (1.0 - cos_i * cos_i)
     fres = 1.0
@@ -216,7 +216,7 @@ def water_optics(
         ty = eta * rdy + bend * ny
         tz = eta * rdz + bend * nz
 
-    # 4) Ombre portée sur la surface (soleil)
+    # 4) Shadow cast on the surface (sun)
     shadow = 1.0
     if use_shadows != 0:
         ls_x = light_vp[0] * hx + light_vp[1] * hy + light_vp[2] * hz + light_vp[3]
@@ -232,7 +232,7 @@ def water_optics(
     refr_r = 0.0
     refr_g = 0.0
     refr_b = 0.0
-    # 5) Bassin : sortie de la boîte (fond ou mur)
+    # 5) Pool: exit from the box (bottom or wall)
     inv_tx = 1.0 / (tx if gs.abs(tx) > 1e-5 else 1e-5)
     inv_tz = 1.0 / (tz if gs.abs(tz) > 1e-5 else 1e-5)
     to_x = gs.max((pool_x - half - hx) * inv_tx, (pool_x + half - hx) * inv_tx)
@@ -243,7 +243,7 @@ def water_optics(
         path = gs.max(gs.min(to_f, to_x, to_z), 0.0)
     path = gs.min(path, 60.0)
 
-    # 6) Objets immergés : le rayon réfracté est suivi dans l'image opaque
+    # 6) Submerged objects: the refracted ray is followed in the opaque image
     hit = 0
     obj_r = 0.0
     obj_g = 0.0
@@ -277,7 +277,7 @@ def water_optics(
             o_x = cam_x + (fwd_x + right_x * nqx + up_x * nqy) * z_s
             o_y = cam_y + (fwd_y + right_y * nqx + up_y * nqy) * z_s
             o_z = cam_z + (fwd_z + right_z * nqx + up_z * nqy) * z_s
-            # Un objet dans l'eau, strictement à l'intérieur du bassin (ni margelle, ni sol extérieur)
+            # An object in the water, strictly inside the pool (neither the coping nor the ground outside)
             if vz_q >= z_s and vz_q - z_s < 0.5 and o_y < hy + 0.05 and o_y > floor_y - 0.05:
                 if gs.abs(o_x - pool_x) < half - 0.08 and gs.abs(o_z - pool_z) < half - 0.08:
                     behind = 1
@@ -308,7 +308,7 @@ def water_optics(
         refr_g = obj_g
         refr_b = obj_b
     else:
-        # 7) Fond ou mur carrelé, éclairé par le soleil à travers la surface
+        # 7) Tiled bottom or wall, lit by the sun through the surface
         bx = hx + tx * path
         by = hy + ty * path
         bz = hz + tz * path
@@ -336,11 +336,11 @@ def water_optics(
             c_hi = caustic_map[mj + 1, mi] * (1.0 - fu) + caustic_map[mj + 1, mi + 1] * fu
             c_val = gs.min(c_lo * (1.0 - fv) + c_hi * fv, 3.5)
             caust = 1.0 + caustic_strength * (c_val - 1.0)
-        # Le soleil parcourt aussi l'eau avant d'atteindre ce point
+        # The sunlight also travels through the water before reaching this point
         sin2 = (1.0 - sun_y * sun_y) / (ior * ior)
         cos_s = gs.sqrt(gs.max(1.0 - sin2, 0.05))
         sun_path = gs.max(hy - by, 0.0) / cos_s
-        # Ombres au fond : objet flottant au point d'entrée du rayon de soleil, objet immergé sur le trajet
+        # Shadows on the bottom: a floating object at the sun ray's entry point, a submerged object along the path
         lit_sh = 1.0
         if use_shadows != 0:
             row2 = gs.sqrt(light_vp[8] * light_vp[8] + light_vp[9] * light_vp[9] + light_vp[10] * light_vp[10])
@@ -362,7 +362,7 @@ def water_optics(
                     for j in range(9):
                         z_o = float(shadow_map[qv + j // 3 - 1, qu + j % 3 - 1]) / 4294967040.0
                         if z_o < lq_z - 0.0022:
-                            # Hauteur de ce qui fait de l'ombre, le long du soleil
+                            # Height of what casts the shadow, along the sun direction
                             y_o = qy + (lq_z - z_o) / gs.max(row2, 1e-6) * sun_y
                             if k == 0 or y_o < hy:
                                 blocked += 0.11111111
@@ -375,7 +375,7 @@ def water_optics(
         refr_g = alb_g * (0.38 + lit * sun_g * gs.exp(-sun_path * abs_g))
         refr_b = alb_b * (0.38 + lit * sun_b * gs.exp(-sun_path * abs_b))
 
-    # 8) Absorption de Beer-Lambert et lumière diffusée par l'eau
+    # 8) Beer-Lambert absorption and light scattered by the water
     tr_r = gs.exp(-path * abs_r)
     tr_g = gs.exp(-path * abs_g)
     tr_b = gs.exp(-path * abs_b)
@@ -384,7 +384,7 @@ def water_optics(
     refr_g = refr_g * tr_g + tint_g * (1.0 - tr_g) * scat
     refr_b = refr_b * tr_b + tint_b * (1.0 - tr_b) * scat
 
-    # 9) Reflets : image opaque si le rayon y touche quelque chose, ciel sinon
+    # 9) Reflections: the opaque image if the ray hits something there, the sky otherwise
     rx = rdx + 2.0 * cos_i * nx
     ry = rdy + 2.0 * cos_i * ny
     rz = rdz + 2.0 * cos_i * nz
@@ -397,7 +397,7 @@ def water_optics(
     fade = 0.0
     r_prev = 0.02
     for k in range(28):
-        # Pas qui s'allonge avec la distance
+        # Step that grows with distance
         r_s2 = 0.05 + 0.045 * float(k) + 0.011 * float(k) * float(k)
         ax = hx + rx * r_s2 - cam_x
         ay = hy + ry * r_s2 - cam_y
@@ -417,7 +417,7 @@ def water_optics(
         if zq != gs.u32(4294967295):
             z_s = near + float(zq) / 16777215.0 * depth_range
             o_y = cam_y + (fwd_y + right_y * nqx + up_y * nqy) * z_s
-            # Seulement ce qui dépasse de l'eau, à peu près à la profondeur du rayon
+            # Only what sticks out of the water, roughly at the ray's depth
             if vz_q >= z_s and vz_q - z_s < 0.25 + (r_s2 - r_prev) * 1.5 and o_y > hy - 0.02:
                 found = 1
                 refl_r = hdr_r[syq, sxq]
@@ -468,7 +468,7 @@ def water_optics(
         sky_r = sky_r * (1.0 - fade) + refl_r * fade
         sky_g = sky_g * (1.0 - fade) + refl_g * fade
         sky_b = sky_b * (1.0 - fade) + refl_b * fade
-    # Éclat du soleil
+    # Sun glint
     hsx = sun_x - rdx
     hsy = sun_y - rdy
     hsz = sun_z - rdz
@@ -488,7 +488,7 @@ def water_optics(
     return out_r, out_g, out_b
 
 
-# ───────────────────────── Flotteurs : simulation entière sur GPU ─────────────────────────
+# ───────────────────────── Floaters: simulation entirely on the GPU ─────────────────────────
 
 
 @gs.kernel
@@ -504,11 +504,11 @@ def floating_step(
     amb_t: gs.f32,
     dt: gs.f32,
 ) -> gs.f32["m", "c16"]:
-    """Un pas des flotteurs : Archimède, pente des vagues, frottements, bords du bassin.
+    """One step of the floaters: Archimedes, wave slope, friction, pool edges.
 
-    `state` : `[px, py, pz, rx, ry, rz, échelle, visible, vx, vy, vz, immersion, 0, 0, 0, 0]`.
-    `params` : `[rayon, flottabilité, gravité, poussée, frottement, frottement vertical, sillage, 0]`.
-    `kicks` : `[ajout xyz, 0, facteur xyz, 0]`, appliqué aux vitesses avant le pas."""
+    `state`: `[px, py, pz, rx, ry, rz, scale, visible, vx, vy, vz, immersion, 0, 0, 0, 0]`.
+    `params`: `[radius, buoyancy, gravity, thrust, friction, vertical friction, wake, 0]`.
+    `kicks`: `[xyz addition, 0, xyz factor, 0]`, applied to the velocities before the step."""
     i, c = gs.index()
     if c == 6 or c == 7 or c > 11:
         return state[i, c]
@@ -520,7 +520,7 @@ def floating_step(
     vz = state[i, 10] * kicks[i, 6] + kicks[i, 2]
     radius = params[i, 0]
 
-    # Hauteur et pente de l'eau sous le flotteur
+    # Height and slope of the water under the floater
     n = h_grid.shape[1] - 1
     cell = size / float(n)
     gx = gs.min(gs.max((px / size + 0.5) * float(n), 1.0), float(n) - 1.001)
@@ -597,7 +597,7 @@ def floating_wakes(
     size: gs.f32,
     dt: gs.f32,
 ) -> gs.f32["m", "c8"]:
-    """Sillage de chaque flotteur : `[cx, cy, 1/r², force, couronne, 0, 0, 0]` (même forme que `water_add_splash`)."""
+    """Wake of each floater: `[cx, cy, 1/r², strength, ring, 0, 0, 0]` (same layout as `water_add_splash`)."""
     i, c = gs.index()
     n = float(h_grid.shape[1] - 1)
     cx = gs.min(gs.max(state[i, 0] / size + 0.5, 0.02), 0.98) * n
@@ -642,7 +642,7 @@ def water_add_wakes(
     h_prev: gs.f32["gh", "gw"],
     wakes: gs.f32["m", "c8"],
 ) -> (gs.f32["gh", "gw"], gs.f32["gh", "gw"]):
-    """Ajoute tous les sillages d'un coup aux deux instants de la grille."""
+    """Adds every wake at once at both instants of the grid."""
     y, x = gs.index()
     add = 0.0
     for i in range(wakes.shape[0]):
@@ -659,7 +659,7 @@ def floating_collide(
     state: gs.f32["m", "c16"],
     params: gs.f32["m", "c8"],
 ) -> gs.f32["m", "c16"]:
-    """Collisions douces entre flotteurs : chacun recule de la moitié du recouvrement et échange sa vitesse."""
+    """Soft collisions between floaters: each moves back by half the overlap and exchanges its velocity."""
     i, c = gs.index()
     if not (c < 3 or (c >= 8 and c < 11)):
         return state[i, c]

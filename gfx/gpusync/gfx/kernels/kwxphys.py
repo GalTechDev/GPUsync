@@ -1,10 +1,10 @@
-"""Physique en colonnes de la météo de grande échelle : sol et couche limite, convection en panaches, condensation.
+"""Column physics of the large-scale weather: ground and boundary layer, plume convection, condensation.
 
-Chaque noyau traite une colonne par thread et rend un paquet `(j, bloc, c, rang)` (voir `kweather`)."""
+Each kernel handles one column per thread and returns a packet `(j, block, c, rank)` (see `kweather`)."""
 
 import gpusync as gs
 
-# Colonnes des tables
+# Table columns
 SURF_LAND, SURF_Z0, SURF_ALBEDO, SURF_WET, SURF_LAT, SURF_HOUR, SURF_Z, SURF_DEEP = range(8)
 SFC_TS, SFC_WTH, SFC_WQ, SFC_H, SFC_WSTAR, SFC_SW, SFC_CLOUD, SFC_USTAR, SFC_RN, SFC_T2, SFC_WIND, SFC_LW = range(12)
 CNV_RAIN, CNV_CAPE, CNV_CIN, CNV_BASE, CNV_TOP, CNV_MASS, CNV_WMAX, CNV_DOWN, CNV_COLD, CNV_KIND, CNV_EVAP, CNV_LFC, CNV_MEMORY = range(13)
@@ -29,8 +29,8 @@ def _surface_columns(
     dt: gs.f32,
     tpl: gs.f32["ny", "nb", "cc", "g"],
 ) -> gs.f32["ny", "nb", "cc", "g"]:
-    """Flux de surface (Louis 1979), bilan d'énergie du sol, mélange turbulent implicite (profil K de Troen & Mahrt
-    1986 dans la couche limite, Louis au-dessus), refroidissement radiatif imposé de la troposphère."""
+    """Surface fluxes (Louis 1979), ground energy budget, implicit turbulent mixing (Troen & Mahrt 1986
+    K profile in the boundary layer, Louis above), imposed radiative cooling of the troposphere."""
     j, b, c0, r = gs.index()
     i = b * 16 + r
     nz = u.shape[0]
@@ -55,7 +55,7 @@ def _surface_columns(
     c_low = 0.0
     c_mid = 0.0
     c_high = 0.0
-    # Profils (z au-dessus du sol)
+    # Profiles (z above the ground)
     for m in range(nz):
         k = nz - 1 - m
         pm = 5000.0 + lev[k, 1] * pi
@@ -72,14 +72,14 @@ def _surface_columns(
         p_up = 5000.0 + lev[k, 0] * pi
         z[k] = h_low + 29.2599 * tv * gs.log(p_low / pm)
         h_low += 29.2599 * tv * gs.log(p_low / p_up)
-        # Nébulosité de la couche (Sundqvist) : maximum par étage, étages indépendants
+        # Layer cloudiness (Sundqvist): maximum per tier, independent tiers
         es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
         if t < 273.15:
             mix = gs.max((t - 250.16) / 23.0, 0.0)
             mix = gs.min(mix * mix, 1.0)
             es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
         rh = gs.min(qq[k] / (0.62197 * es / gs.max(pm - 0.378 * es, 1.0)), 1.0)
-        rc = 0.94 if pm > 70000.0 else 0.88  # bas : couverture du cas BOMEX 3D
+        rc = 0.94 if pm > 70000.0 else 0.88  # low: cover of the 3D BOMEX case
         if rh > rc and pm > 15000.0:
             fr = 1.0 - gs.sqrt((1.0 - rh) / (1.0 - rc))
             if pm > 70000.0:
@@ -87,13 +87,13 @@ def _surface_columns(
             elif pm > 40000.0:
                 c_mid = gs.max(c_mid, fr)
             else:
-                # Un cirrus ne compte qu'à proportion de sa glace (pleine à 20 mg/kg)
+                # A cirrus counts only in proportion to its ice (full at 20 mg/kg)
                 c_high = gs.max(c_high, fr * gs.min(cc[k] / 2e-5, 1.0))
     conv = 1.0 - conv_cover[j, i]
     cloud = 1.0 - (1.0 - c_low) * (1.0 - c_mid) * (1.0 - c_high) * conv
-    dim = 1.0 - (1.0 - c_low) * (1.0 - c_mid) * (1.0 - 0.35 * c_high) * conv  # vu du soleil
+    dim = 1.0 - (1.0 - c_low) * (1.0 - c_mid) * (1.0 - 0.35 * c_high) * conv  # seen from the sun
     n = nz - 1
-    # Rayonnement au sol
+    # Radiation at the ground
     hour = sun[0] + surf[j, i, 5]
     cosz = gs.sin(surf[j, i, 4]) * sun[1] + gs.cos(surf[j, i, 4]) * sun[2] * gs.cos((hour - 12.0) * 0.2617994)
     cosz = gs.max(cosz, 0.0)
@@ -117,7 +117,7 @@ def _surface_columns(
     thv1 = tt[n] * (1.0 + 0.608 * qq[n])
     thvs = tg / ex_s * (1.0 + 0.608 * q_s)
     wind = gs.sqrt(uu[n] * uu[n] + vv[n] * vv[n])
-    # Rafales convectives : ajout d'une vitesse liée au déficit
+    # Convective gusts: added speed tied to the deficit
     gust = gs.pow(gs.max(9.81 / thv1 * (thvs - thv1) * 1000.0 * 0.002 * (wind + 1.0), 0.0), 0.333333)
     wnd = gs.max(gs.sqrt(wind * wind + 1.44 * gust * gust), 0.5)
     ri = 9.81 * z[n] * (thv1 - thvs) / (thv1 * wnd * wnd)
@@ -144,22 +144,22 @@ def _surface_columns(
     rn = (1.0 - surf[j, i, 2]) * sw + lw - 0.96 * 5.67e-8 * tg * tg * tg * tg - 0.04 * lw
     tg_new = tg
     if land > 0.5:
-        # Sol de Blackadar (1979) : force-rappel vers la température profonde, implicite dans le rappel et l'émission
+        # Blackadar (1979) ground: force-restore toward the deep temperature, implicit in the restore and the emission
         cg = 1.2e5
         stiff = 4.0 * 5.67e-8 * tg * tg * tg + rho * ch * wnd * 1004.64 + rho * ch * wnd * 2.501e6 * surf[j, i, 3] * q_sat * 4302.6 / ((tg - 29.65) * (tg - 29.65))
         tg_new = tg + dt * ((rn - heat - evap) / cg - 8.58e-5 * (tg - surf[j, i, 7])) / (1.0 + dt * (stiff / cg + 8.58e-5))
-        # Flux cohérents avec la nouvelle température
+        # Fluxes consistent with the new temperature
         dtg = tg_new - tg
         wth += ch * wnd * dtg / ex_s
         wq += ch * wnd * surf[j, i, 3] * q_sat * 4302.6 / ((tg - 29.65) * (tg - 29.65)) * dtg if q_sat > qq[n] else 0.0
     if sun[3] > 0.5:
-        # Flux imposés (cas de comparaison) : chaleur (K m/s), humidité (m/s), vitesse de frottement
+        # Imposed fluxes (comparison cases): heat (K m/s), humidity (m/s), friction velocity
         tg_new = tg
         wth = sun[4]
         wq = sun[5]
         cd = sun[6] * sun[6] / (wnd * wnd)
     ustar = gs.sqrt(cd) * wnd
-    # Hauteur de couche limite : nombre de Richardson global
+    # Boundary-layer height: bulk Richardson number
     wthv = wth + 0.608 * tt[n] * wq
     h = z[n]
     th_par = thv1
@@ -193,7 +193,7 @@ def _surface_columns(
     if wthv > 0.0:
         counter = gs.min(7.2 * wstar * gs.max(wth, 0.0) / (ws * ws * h), 2e-3)
         counter_q = gs.min(7.2 * wstar * gs.max(wq, 0.0) / (ws * ws * h), 2e-6)
-    # Coefficients d'échange aux interfaces k (entre k et k+1)
+    # Exchange coefficients at interfaces k (between k and k+1)
     for k in range(nz - 1):
         zi = 0.5 * (z[k] + z[k + 1])
         dz = z[k] - z[k + 1]
@@ -221,7 +221,7 @@ def _surface_columns(
             kh[k] = gs.max(kh[k], prof * (1.25 if wthv > 0.0 else 1.0))
         km[k] = gs.min(km[k], 1000.0)
         kh[k] = gs.min(kh[k], 1000.0)
-    # Diffusion implicite : quatre champs, quantité de mouvement puis scalaires
+    # Implicit diffusion: four fields, momentum then scalars
     for pass_ in range(5):
         for k in range(nz):
             mass = (lev[k, 2] * pi) / 9.81  # kg/m²
@@ -295,7 +295,7 @@ def _surface_columns(
     gs.store(o + 6, cloud)
     gs.store(o + 7, ustar)
     gs.store(o + 8, rn)
-    # Température à 2 m : interpolation logarithmique entre sol et premier niveau
+    # 2-m temperature: logarithmic interpolation between the ground and the first level
     gs.store(o + 9, (tg / ex_s + (tt[n] - tg / ex_s) * gs.log(gs.max(2.0 / z0, 1.1)) / gs.max(ln, 0.1)) * ex_s if z0 < 1.5 else t1)
     gs.store(o + 10, wind)
     gs.store(o + 11, lw)
@@ -315,15 +315,15 @@ def _convection_columns(
     dt: gs.f32,
     tpl: gs.f32["ny", "nb", "cc", "g"],
 ) -> gs.f32["ny", "nb", "cc", "g"]:
-    """Un panache entraînant par colonne, bas-fond ou profond, avec courant descendant et pluie.
+    """One entraining plume per column, shallow or deep, with a downdraft and rain.
 
-    `sfc` : flux de chaleur (K m/s), d'humidité (m/s), hauteur de couche limite, w*. `lift` : vitesse de soulèvement
-    (rafales, reliefs, convergence). `par` : 0 entraînement profond, 1 entraînement des bas-fonds, 2 accélération,
-    3 freinage, 4 conversion en pluie (1/m), 5 seuil de conversion, 6 part du courant descendant, 7 part de glace
-    dans la saturation, 8 durée de dissipation, 9 inertie (m⁴/kg), 10 w minimal, 11 évaporation de la pluie, 12 humidité
-    relative des descentes, 13 flux maximal, 14 part d'air du nuage dans les descentes, 15 croissance du flux (1/m),
-    16 excès des thermiques, 17 vitesse des thermiques / w*, 18 soulèvement entretenu par les orages (m/s), 19 dilution en plus
-    avant organisation, 20 flux de masse d'organisation, 21 évaporation de la pluie dans la couche nuageuse."""
+    `sfc`: heat flux (K m/s), humidity flux (m/s), boundary-layer height, w*. `lift`: lifting speed
+    (gusts, terrain, convergence). `par`: 0 deep entrainment, 1 shallow entrainment, 2 acceleration,
+    3 braking, 4 conversion to rain (1/m), 5 conversion threshold, 6 downdraft share, 7 ice share
+    in the saturation, 8 dissipation time, 9 inertia (m⁴/kg), 10 minimal w, 11 rain evaporation, 12 relative
+    humidity of downdrafts, 13 maximal flux, 14 share of cloud air in downdrafts, 15 flux growth (1/m),
+    16 thermal excess, 17 thermal speed / w*, 18 lifting sustained by storms (m/s), 19 extra dilution
+    before organization, 20 organization mass flux, 21 rain evaporation in the cloud layer."""
     j, b, c0, r = gs.index()
     i = b * 16 + r
     nz = th.shape[0]
@@ -331,14 +331,14 @@ def _convection_columns(
     p = gs.local(gs.f32, 64)
     t = gs.local(gs.f32, 64)
     q = gs.local(gs.f32, 64)
-    hh = gs.local(gs.f32, 64)  # énergie statique humide de l'environnement
-    dm = gs.local(gs.f32, 64)  # masse de la couche (kg/m²)
+    hh = gs.local(gs.f32, 64)  # moist static energy of the environment
+    dm = gs.local(gs.f32, 64)  # mass of the layer (kg/m²)
     hu = gs.local(gs.f32, 64)
-    qu = gs.local(gs.f32, 64)  # eau totale du panache
-    lu = gs.local(gs.f32, 64)  # eau liquide du panache
+    qu = gs.local(gs.f32, 64)  # total water of the plume
+    lu = gs.local(gs.f32, 64)  # liquid water of the plume
     wu = gs.local(gs.f32, 64)
-    et = gs.local(gs.f32, 64)  # flux de masse relatif au bas du nuage, au-dessus de la couche k
-    gr = gs.local(gs.f32, 64)  # pluie formée par unité de flux de base
+    et = gs.local(gs.f32, 64)  # mass flux relative to the cloud base, above layer k
+    gr = gs.local(gs.f32, 64)  # rain formed per unit of base flux
     bu = gs.local(gs.f32, 64)
     md = gs.local(gs.f32, 64)
     ice = par[7]
@@ -366,7 +366,7 @@ def _convection_columns(
         gr[k] = 0.0
         bu[k] = 0.0
         md[k] = 0.0
-    # Air de départ : moyenne de la basse couche, plus l'excès des thermiques
+    # Starting air: mean of the low layer, plus the thermal excess
     depth = gs.min(gs.max(0.6 * sfc[j, i, 2], 200.0), 1000.0)
     sm = 0.0
     sh = 0.0
@@ -387,7 +387,7 @@ def _convection_columns(
         ex_q = gs.min(par[16] * gs.max(sfc[j, i, 1], 0.0) / wstar, 1.5e-3)
     h_src = sh / sm + 1004.64 * ex_t + 2.501e6 * ex_q
     q_src = sq / sm + ex_q
-    grown = par[18] * (1.0 - gs.exp(-mass_old[j, i] / 0.01))  # orages déjà en place : leur air froid soulève l'air voisin
+    grown = par[18] * (1.0 - gs.exp(-mass_old[j, i] / 0.01))  # storms already in place: their cold air lifts the neighbouring air
     w_src = gs.sqrt(par[10] * par[10] + par[17] * par[17] * wstar * wstar + lift[j, i] * lift[j, i] + grown * grown)
     kind = 0
     k_base = -1
@@ -396,9 +396,9 @@ def _convection_columns(
     cin = 0.0
     lfc = 0.0
     wmax = 0.0
-    # Convection qui débute : nuages étroits, très dilués ; elle s'élargit en s'organisant (Mapes & Neale 2011)
+    # Starting convection: narrow, very diluted clouds; it widens as it organizes (Mapes & Neale 2011)
     entr = par[0] * (1.0 + par[19] * gs.exp(-mass_old[j, i] / par[20]))
-    # Deux essais : panache profond, puis panache de bas-fond s'il n'est pas monté assez haut
+    # Two attempts: deep plume, then a shallow plume if it did not rise high enough
     for trial in range(2):
         if kind == 0:
             k_base = -1
@@ -426,7 +426,7 @@ def _convection_columns(
                         hc = (hc + lam * hh[k]) / (1.0 + lam)
                         qt = (qt + lam * q[k]) / (1.0 + lam)
                         w2 = w2 / (1.0 + 2.0 * par[3] * lam)
-                    # Température du panache : h et eau totale connues
+                    # Plume temperature: h and total water known
                     tu = (hc - 9.81 * z[k] - 2.501e6 * qt) / 1004.64
                     ql = 0.0
                     es = 611.2 * gs.exp(17.67 * (tu - 273.15) / (tu - 29.65))
@@ -493,13 +493,13 @@ def _convection_columns(
     evap_total = 0.0
     eps_s = par[1]
     if kind > 0:
-        # Profil du flux de masse (relatif) au sommet de chaque couche
+        # Profile of the (relative) mass flux at the top of each layer
         total_g = 0.0
         flux = 1.0
         for m in range(nz):
             k = n - m
             if k > k_base:
-                # Sous la base : croissance linéaire en pression depuis le sol
+                # Below the base: linear growth in pressure from the ground
                 et[k] = (5000.0 + pi - (5000.0 + lev[k, 0] * pi)) / (5000.0 + pi - (5000.0 + lev[k_base + 1, 0] * pi))
                 hu[k] = h_src
                 qu[k] = q_src
@@ -517,17 +517,17 @@ def _convection_columns(
                 total_g += gr[k]
         # Fermeture
         if kind == 2:
-            # Énergie cinétique des panaches pronostique (Pan & Randall 1998) : nourrie par la flottabilité, dissipée
+            # Prognostic plume kinetic energy (Pan & Randall 1998): fed by buoyancy, dissipated
             mass = (mass_old[j, i] + dt * cape / (2.0 * par[9])) / (1.0 + dt / (2.0 * par[8]))
         else:
             mass = 0.03 * wstar * p[k_base] / (287.04 * t[k_base])
-        # Bornes : au plus 40 % de la masse d'une couche par pas
+        # Bounds: at most 40 % of a layer's mass per step
         for k in range(nz):
             if et[k] > 0.0:
                 mass = gs.min(mass, 0.4 * gs.min(dm[k], dm[gs.max(k - 1, 0)]) / (et[k] * dt))
         mass = gs.min(mass, par[13])
         rate = total_g * mass
-        # Courant descendant saturé, parti du minimum d'énergie statique humide
+        # Saturated downdraft, starting from the minimum of moist static energy
         down = 0.0
         h_d = 0.0
         q_l = 0.0
@@ -541,7 +541,7 @@ def _convection_columns(
             if k_d >= 0:
                 h_d = hh[k_d] + par[14] * (hu[k_d] - hh[k_d])
                 down = par[6] * mass
-                # Eau nécessaire pour rester saturé jusqu'au sol
+                # Water needed to stay saturated down to the ground
                 td = t[n]
                 qs = 0.0
                 for _ in range(8):
@@ -557,7 +557,7 @@ def _convection_columns(
                 if cold > -0.005:
                     down = 0.0
                     cold = 0.0
-        # Humidité du courant descendant à chaque niveau : saturée (90 %) à énergie constante, sous k_d
+        # Downdraft humidity at each level: saturated (90 %) at constant energy, below k_d
         if down > 0.0:
             for k in range(nz):
                 if k >= k_d:
@@ -569,10 +569,10 @@ def _convection_columns(
                         f = 1004.64 * td + 9.81 * z[k] + 2.501e6 * par[12] * qs - h_d
                         td = td - f / (1004.64 + 2.501e6 * par[12] * qs * 4302.6 / ((td - 29.65) * (td - 29.65)))
                     md[k] = par[12] * qs
-        # Tendances en forme flux, puis pluie qui tombe et s'évapore
+        # Tendencies in flux form, then rain that falls and evaporates
         rain = 0.0
         for k in range(nz):
-            # Flux vers le haut de h et d'eau à travers le haut et le bas de la couche
+            # Upward flux of h and water through the top and bottom of the layer
             fh_up = 0.0
             fq_up = 0.0
             fh_lo = 0.0
@@ -602,7 +602,7 @@ def _convection_columns(
             made = gr[k] * mass if k >= k_top and k <= k_base else 0.0
             dq -= made * dt / dm[k]
             rain += made
-            # Eau évaporée dans le courant descendant : prise à la pluie
+            # Water evaporated in the downdraft: taken from the rain
             ev_d = 0.0
             if down > 0.0 and k > k_d and k <= n:
                 md_f = down
@@ -612,7 +612,7 @@ def _convection_columns(
             if down > 0.0 and k == k_d:
                 ev_d = down * gs.max(md[k] - (q[k] + par[14] * (qu[k] - lu[k] - q[k])), 0.0)
             ev_d = gs.min(ev_d, rain)
-            # Évaporation directe de la pluie dans l'air sous la base
+            # Direct evaporation of rain in the air below the base
             ev_e = 0.0
             if k > k_top and rain > 0.0:
                 es = 611.2 * gs.exp(17.67 * (t[k] - 273.15) / (t[k] - 29.65))
@@ -621,15 +621,15 @@ def _convection_columns(
                 ev_e = gs.min(ev_e, 0.3 * gs.max(rain - ev_d, 0.0))
             rain -= ev_d + ev_e
             evap_total += ev_d + ev_e
-            # L'eau évaporée revient à l'air à énergie constante (h compte la vapeur)
+            # The evaporated water returns to the air at constant energy (h counts the vapour)
             dq += (ev_d + ev_e) * dt / dm[k]
-            # Eau nuageuse détrainée
+            # Detrained cloud water
             dl = 0.0
             if k >= k_top and k <= k_base:
                 det = gs.max((et[k + 1] if k < n else 1.0) - et[k], 0.0)
                 dl = det * mass * lu[k] * dt / dm[k]
             dqv = dq - dl
-            # Pas de vapeur négative
+            # No negative vapour
             dtk = (dh - 2.501e6 * dqv) / 1004.64
             gs.store(k, (t[k] + dtk) * gs.pow(p[k] * 1e-5, -0.285714))
             gs.store(nz + k, qv[k, j, i] + dqv)
@@ -672,7 +672,7 @@ def _condensation_columns(
     dt: gs.f32,
     tpl: gs.f32["ny", "nb", "cc", "g"],
 ) -> gs.f32["ny", "nb", "cc", "g"]:
-    """Nuages résolus : ajustement à saturation, conversion en pluie, chute immédiate avec évaporation (Sundqvist)."""
+    """Resolved clouds: saturation adjustment, conversion to rain, immediate fall with evaporation (Sundqvist)."""
     j, b, c0, r = gs.index()
     i = b * 16 + r
     nz = th.shape[0]
@@ -688,7 +688,7 @@ def _condensation_columns(
         snow = 0.0
         t = th[k, j, i] * ex
         total = v0 + c1
-        # Tout évaporer, puis condenser ce qui dépasse la saturation
+        # Evaporate everything, then condense what exceeds saturation
         t = t - 2489.4489 * c1
         tl = t
         ql = 0.0
@@ -711,11 +711,11 @@ def _condensation_columns(
             ql = gs.max(total - qs, 0.0)
             t = tl + 2489.4489 * ql
         vap = total - ql
-        # Conversion (Kessler, seuil 0,3 g/kg) et chute
+        # Conversion (Kessler, threshold 0.3 g/kg) and fall
         made = 0.0
         thr = 3e-4
         if t < 258.0 and ql > 0.0:
-            # Cristaux : chute de Heymsfield & Donner (1990) vers la couche du dessous, fraction glace de 258 à 238 K
+            # Crystals: Heymsfield & Donner (1990) fall into the layer below, ice fraction from 258 to 238 K
             dens = p / (287.04 * t)
             fall = 3.29 * gs.pow(dens * ql, 0.16) * gs.min((258.0 - t) / 20.0, 1.0)
             made = ql * (1.0 - gs.exp(-fall * dt * dens / dm))
@@ -742,7 +742,7 @@ def _condensation_columns(
 def wx_wind_tendency(
     wind: gs.f32["nz", "ny", "nx"], col: gs.f32["ny", "nb", "cc", "g"], field: gs.i32, comp: gs.i32
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Ajoute au vent des faces la moyenne des variations calculées au centre des mailles."""
+    """Adds to the face winds the mean of the changes computed at the cell centres."""
     k, j, i = gs.index()
     nz = wind.shape[0]
     c = field * nz + k
@@ -756,7 +756,7 @@ def wx_wind_tendency(
 
 @gs.kernel
 def wx_surface_inputs(col: gs.f32["ny", "nb", "cc", "g"], tpl: gs.f32["ny", "nx", "c4"], base: gs.i32) -> gs.f32["ny", "nx", "c4"]:
-    """Flux de chaleur, d'humidité, hauteur de couche limite et w* pour la convection."""
+    """Heat flux, humidity flux, boundary-layer height and w* for convection."""
     j, i, c = gs.index()
     return col[j, i // 16, base + 1 + c, i % 16]
 
@@ -765,14 +765,14 @@ def wx_surface_inputs(col: gs.f32["ny", "nb", "cc", "g"], tpl: gs.f32["ny", "nx"
 def wx_accumulate(
     acc: gs.f32["ny", "nx"], a: gs.f32["ny", "nb", "ca", "g"], ka: gs.i32, b: gs.f32["ny", "nb", "cb", "g"], kb: gs.i32, dt: gs.f32
 ) -> gs.f32["ny", "nx"]:
-    """Cumul de pluie (mm) : convective et résolue."""
+    """Accumulated rain (mm): convective and resolved."""
     j, i = gs.index()
     return acc[j, i] + dt * (a[j, i // 16, ka, i % 16] + b[j, i // 16, kb, i % 16])
 
 
 @gs.kernel
 def wx_convective_cover(cnv: gs.f32["ny", "nb", "cc", "g"], tpl: gs.f32["ny", "nx"], base: gs.i32) -> gs.f32["ny", "nx"]:
-    """Couverture convective vue du soleil : 5 % d'un champ de cumulus, plus l'enclume des nuages profonds."""
+    """Convective cover seen from the sun: 5 % of a cumulus field, plus the anvil of deep clouds."""
     j, i = gs.index()
     kind = cnv[j, i // 16, base + 9, i % 16]
     mass = cnv[j, i // 16, base + 5, i % 16]
@@ -784,7 +784,7 @@ def wx_convective_cover(cnv: gs.f32["ny", "nb", "cc", "g"], tpl: gs.f32["ny", "n
     return 0.0
 
 
-# ───────────────────────── Air froid des orages (couche 2D fine) ─────────────────────────
+# ───────────────────────── Storm cold air (thin 2D layer) ─────────────────────────
 
 
 @gs.kernel
@@ -803,10 +803,10 @@ def wx_cold_pool(
     dt: gs.f32,
     epoch: gs.i32,
 ) -> (gs.f32["fy", "fx"], gs.f32["fy", "fx"], gs.f32["fy", "fx"], gs.f32["fy", "fx"]):
-    """Étalement de l'air froid : eau peu profonde à flottabilité variable (équations de Ripa, flux de Rusanov).
+    """Spreading of the cold air: shallow water with variable buoyancy (Ripa equations, Rusanov flux).
 
-    L'air apporté par les courants descendants naît dans une maille fine tirée au hasard (renouvelée à chaque `epoch`)
-    de chaque maille large, avec la vitesse du vent bas. Il se réchauffe, frotte et se dilue."""
+    Air brought by the downdrafts is born in a fine cell drawn at random (renewed at each `epoch`)
+    in each coarse cell, with the speed of the low-level wind. It warms, drags and dilutes."""
     j, i = gs.index()
     fy = h.shape[0]
     fx = h.shape[1]
@@ -843,7 +843,7 @@ def wx_cold_pool(
         v_n = hv[jn, i_n] * inv_n
         b_n = hb[jn, i_n] * inv_n
         if jn == j and i_n == i:
-            v_n = -v_n  # paroi
+            v_n = -v_n  # wall
         un_c = u_c * sx + v_c * sy
         un_n = u_n * sx + v_n * sy
         wave = gs.max(gs.abs(un_c) + gs.sqrt(gs.max(b_c * h_c, 0.0)), gs.abs(un_n) + gs.sqrt(gs.max(b_n * h_n, 0.0)))
@@ -858,7 +858,7 @@ def wx_cold_pool(
     mu = hu[j, i] - r * f1
     mv = hv[j, i] - r * f2
     mb = gs.max(hb[j, i] - r * f3, 0.0)
-    # Frottement, réchauffement, dilution
+    # Friction, warming, dilution
     speed = gs.sqrt(u_c * u_c + v_c * v_c)
     drag = 1.0 / (1.0 + dt * 3e-3 * speed / gs.max(h_c, 50.0))
     mu = mu * drag
@@ -909,7 +909,7 @@ def wx_front_lift(
     front: gs.f32,
     resolved: gs.f32,
 ) -> gs.f32["ny", "nx"]:
-    """Vitesse de soulèvement (m/s) : bord d'une poche d'air froid, ascendance résolue vers 850 hPa, pente du relief."""
+    """Lifting speed (m/s): edge of a cold pool, resolved ascent near 850 hPa, terrain slope."""
     j, i = gs.index()
     fy = h.shape[0]
     fx = h.shape[1]
@@ -936,13 +936,13 @@ def wx_front_lift(
                     if h[jn, i_n] > 100.0:
                         best = gs.max(best, front * gs.sqrt(gs.max(hb[jn, i_n], 0.0)))
     pi = pi0[j, i] + pip[j, i]
-    # Pression décroissante en suivant l'air = ascendance : omega ≈ pi · dσ/dt vers σ = 0,85
+    # Pressure decreasing along the air = ascent: omega ≈ pi · dσ/dt toward σ = 0.85
     k = nz - 1
     while k > 0 and lev[k, 0] > 0.85:
         k -= 1
     om = col[j, i // 16, nz + k - 1, i % 16]
     up = gs.max(-om / (9.81 * 1.05), 0.0)
-    # Vent contre la pente
+    # Wind against the slope
     km = nz - 3
     ie = (i + 1) % nx
     iw = (i - 1) % nx
@@ -954,7 +954,7 @@ def wx_front_lift(
 
 
 
-# ───────────────────────── Raccord avec la simulation 3D ─────────────────────────
+# ───────────────────────── Coupling with the 3D simulation ─────────────────────────
 
 
 @gs.kernel
@@ -976,8 +976,8 @@ def wx_sample_column(
     width: gs.f32,
     tpl: gs.f32["nz", "c9"],
 ) -> gs.f32["nz", "c9"]:
-    """Colonne autour du point `(x, y)` (en mailles), pondérée par une gaussienne : θ, qv, qc, u, v, πσ̇ (milieu de
-    couche), variation de θ et d'eau pendant les pas dynamiques (`a` → `b`), poids."""
+    """Column around point `(x, y)` (in cells), Gaussian-weighted: θ, qv, qc, u, v, πσ̇ (mid-layer),
+    change of θ and water during the dynamics steps (`a` → `b`), weight."""
     k, c = gs.index()
     ny = u.shape[1]
     nx = u.shape[2]
@@ -1036,8 +1036,8 @@ def wx_sample_surface(
     width: gs.f32,
     tpl: gs.f32["c10"],
 ) -> gs.f32["c10"]:
-    """Au sol, même pondération : pression, flux de chaleur et d'humidité, frottement, altitude, T à 2 m, nébulosité,
-    pluie (kg/m²/s), hauteur de couche limite, part de terre."""
+    """At the ground, same weighting: pressure, heat and humidity fluxes, friction, altitude, 2-m T, cloudiness,
+    rain (kg/m²/s), boundary-layer height, land share."""
     c = gs.index()
     ny = pip.shape[0]
     nx = pip.shape[1]
@@ -1088,7 +1088,7 @@ def wx_sample_surface(
 
 @gs.kernel
 def wx_qnh(pip: gs.f32["ny", "nx"], pi0: gs.f32["ny", "nx"], terrain: gs.f32["ny", "nx"]) -> gs.f32["ny", "nx"]:
-    """QNH (hPa), atmosphère standard, lissé sur les mailles voisines."""
+    """QNH (hPa), standard atmosphere, smoothed over neighbouring cells."""
     j, i = gs.index()
     ny = pip.shape[0]
     nx = pip.shape[1]
@@ -1118,7 +1118,7 @@ def wx_map(
     lines: gs.i32,
     tpl: gs.u32["h", "w"],
 ) -> gs.u32["h", "w"]:
-    """Carte : relief et mer, nuages (mode 0) ou température à 2 m (mode 1), pluie, bord de l'air froid, isobares (4 hPa)."""
+    """Map: terrain and sea, clouds (mode 0) or 2-m temperature (mode 1), rain, cold-air edge, isobars (4 hPa)."""
     y, x = gs.index()
     ny = qnh.shape[0]
     nx = qnh.shape[1]
@@ -1133,7 +1133,7 @@ def wx_map(
     t2 = 0.0
     rain = 0.0
     crain = 0.0
-    # Interpolation au pixel et à ses voisins de droite et du bas (pente des isobares)
+    # Interpolation at the pixel and its right and lower neighbours (isobar slope)
     for n in range(3):
         px = gx + (float(nx) / ww if n == 1 else 0.0)
         py = gy + (float(ny) / hh if n == 2 else 0.0)
@@ -1159,7 +1159,7 @@ def wx_map(
                     rain += wt * cond[jj, bb, 3 * nz, rr] * 3600.0
                     crain += wt * cnv[jj, bb, 4 * nz, rr] * 3600.0
         val[n] = acc
-    # Fond
+    # Bottom
     r = 0.05
     g = 0.16
     b_ = 0.33

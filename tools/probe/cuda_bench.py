@@ -1,4 +1,4 @@
-"""Sonde M6 : CUDA contre OpenCL et Vulkan sur le même GPU (RTX), à chaud, meilleur de 5."""
+"""M6 probe: CUDA against OpenCL and Vulkan on the same GPU (RTX), warm, best of 5."""
 import sys, time
 import numpy as np
 import gpusync as gs
@@ -26,5 +26,5 @@ for dev in ["cuda:0", "opencl:0", "vulkan:0"]:
     for _ in range(200):
         np.asarray(normalize(small, 0.0, 1.0, device=dev))
     lat = (time.perf_counter() - t0) / 200 * 1e3
-    print(f"{dev:9} appel 1000 élém. {lat:6.3f} ms | 10 M {best(lambda: normalize(big, 0.0, 1.0, device=dev)):6.1f} ms"
+    print(f"{dev:9} call 1000 elem. {lat:6.3f} ms | 10 M {best(lambda: normalize(big, 0.0, 1.0, device=dev)):6.1f} ms"
           f" | DTW 400 {best(lambda: dtw(d400, 5, device=dev)):6.1f} ms | DTW 4000 {best(lambda: dtw(d4000, 5, device=dev), 2):7.1f} ms", flush=True)

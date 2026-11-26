@@ -1,13 +1,13 @@
-//! Moteur de transferts (ARCHITECTURE.md §9) : un seul chemin d'exécution, planifié en blocs.
+//! Transfer engine (ARCHITECTURE.md §9): a single execution path, planned in chunks.
 //!
-//! | Mode | Quand | Transferts |
+//! | Mode | When | Transfers |
 //! |---|---|---|
-//! | Direct | OpenCL sur mémoire unifiée | aucun : le GPU lit et écrit la mémoire de l'hôte |
-//! | Résident | GPU dédié (ou wgpu), l'appel tient dans le budget | entrées envoyées par blocs ; résultat gardé sur le périphérique |
-//! | Flux | au-delà du budget ou d'une taille de buffer | bloc par bloc, transferts recouverts par le calcul ; résultat écrit directement dans sa destination |
+//! | Direct | OpenCL on unified memory | none: the GPU reads and writes host memory |
+//! | Resident | discrete GPU (or wgpu), the call fits in the budget | inputs uploaded in chunks; result kept on the device |
+//! | Flux | beyond the budget or a buffer size | chunk by chunk, transfers overlapped with computation; result written straight to its destination |
 //!
-//! Dans tous les modes, la mémoire hôte en plus est bornée (anneau de 3 blocs) : aucune copie
-//! complète des données n'est faite en RAM.
+//! In every mode, the extra host memory is bounded (ring of 3 chunks): no full
+//! copy of the data is ever made in RAM.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,14 +24,14 @@ use gpusync_runtime::Backend;
 
 use crate::{Compiled, CoreError, Device, Imp, R, dev_err};
 
-/// Réglages du moteur de transferts (§9.2, §9.3), modifiables (tests, `gs.set_memory_budget`).
+/// Settings of the transfer engine (§9.2, §9.3), adjustable (tests, `gs.set_memory_budget`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferLimits {
-    /// Taille cible d'un bloc transféré, par tableau (octets).
+    /// Target size of a transferred chunk, per array (bytes).
     pub chunk_bytes: usize,
-    /// Budget mémoire du périphérique (octets). `None` : 50 % de sa mémoire.
+    /// Memory budget of the device (bytes). `None`: 50 % of its memory.
     pub budget_bytes: Option<u64>,
-    /// Taille max d'un bloc en mode Direct (octets). `None` : taille max d'une allocation.
+    /// Largest chunk in Direct mode (bytes). `None`: largest allocation.
     pub direct_chunk_bytes: Option<usize>,
 }
 
@@ -49,7 +49,7 @@ pub fn set_transfer_limits(l: TransferLimits) {
     *LIMITS.write().unwrap_or_else(|e| e.into_inner()) = l;
 }
 
-/// Mode d'exécution retenu pour un appel.
+/// Execution mode chosen for a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Direct,
@@ -69,45 +69,45 @@ impl Mode {
     }
 }
 
-/// Où se trouve le résultat d'un kernel.
+/// Where the result of a kernel lives.
 pub enum Storage {
-    /// Mode Direct (OpenCL, mémoire unifiée) : blocs adossés à la mémoire hôte `ptr`.
-    /// `done` : fin du dernier lancement (un autre kernel peut lire le résultat sans attendre l'hôte).
+    /// Direct mode (OpenCL, unified memory): chunks backed by host memory `ptr`.
+    /// `done`: end of the last launch (another kernel can read the result without waiting for the host).
     ClDirect {
         bufs: Vec<ClBuffer>,
         ptr: *mut u8,
         done: Option<Arc<ClEvent>>,
     },
-    /// Mode Résident (OpenCL) : en mémoire du périphérique ; `done` signale la fin du calcul.
+    /// Resident mode (OpenCL): in device memory; `done` signals the end of the computation.
     Cl { buf: ClBuffer, done: Arc<ClEvent> },
-    /// Mode Résident (CUDA).
+    /// Resident mode (CUDA).
     Cu { buf: CuBuffer, done: Arc<CuEvent> },
-    /// Mode Résident (wgpu).
+    /// Resident mode (wgpu).
     Wg(WgBuffer),
-    /// Mode Direct (Metal, `newBufferWithBytesNoCopy`) : blocs adossés à la mémoire hôte `ptr`.
+    /// Direct mode (Metal, `newBufferWithBytesNoCopy`): chunks backed by host memory `ptr`.
     WgDirect { bufs: Vec<WgBuffer>, ptr: *mut u8 },
-    /// Déjà en mémoire hôte (mode Flux, interpréteur).
+    /// Already in host memory (Flux mode, interpreter).
     Host { ptr: *mut u8 },
-    /// Mémoire hôte allouée paresseusement côté Rust (repli Flux / CPU si l'appelant n'a pas pré-alloué).
+    /// Host memory allocated lazily on the Rust side (Flux / CPU fallback if the caller did not pre-allocate).
     HostOwned(Vec<u8>),
 }
 
 unsafe impl Send for Storage {}
 unsafe impl Sync for Storage {}
 
-/// Résultat d'un kernel.
+/// Result of a kernel.
 pub struct DeviceArray {
     pub device: Device,
     pub storage: Storage,
     pub dtype: Scalar,
     pub len: usize,
     pub mode: Mode,
-    /// Des buffers utilisent encore la mémoire de l'hôte : attendre la fin des calculs avant
-    /// que l'appelant ne la libère (remis à false dès que `read_into` a synchronisé).
+    /// Buffers still use host memory: wait for the computations before
+    /// the caller frees it (set back to false as soon as `read_into` has synchronized).
     host_backed_io: AtomicBool,
-    /// Un kernel suivant lit directement la mémoire hôte de ce résultat Direct (zéro-copie) : attendre la
-    /// fin des calculs avant de la libérer. Porté par la source, pas par les résultats du kernel suivant :
-    /// ceux-ci la gardent en vie et peuvent être libérés sans attendre.
+    /// A later kernel reads this Direct result's host memory directly (zero-copy): wait for the
+    /// computations before freeing it. Carried by the source, not by the later kernel's results:
+    /// those keep it alive and can be released without waiting.
     read_in_place: AtomicBool,
 }
 
@@ -116,7 +116,7 @@ impl DeviceArray {
         self.len * self.dtype.size()
     }
 
-    /// Pointeur hôte si le résultat est (ou sera) directement dans la mémoire de l'hôte.
+    /// Host pointer if the result is (or will be) directly in host memory.
     pub fn host_ptr(&self) -> Option<*mut u8> {
         match &self.storage {
             Storage::ClDirect { ptr, .. }
@@ -127,11 +127,11 @@ impl DeviceArray {
         }
     }
 
-    /// Attend la fin du calcul et place le résultat à `dst` (`bytes()` octets). Si `dst` est déjà la
-    /// mémoire du résultat (Direct, Flux), seule la synchronisation a lieu.
+    /// Waits for the computation and puts the result at `dst` (`bytes()` bytes). If `dst` already is the
+    /// result's memory (Direct, Flux), only the synchronization happens.
     ///
     /// # Safety
-    /// `dst` doit pointer vers `bytes()` octets accessibles en écriture.
+    /// `dst` must point to `bytes()` writable bytes.
     pub unsafe fn read_into(&self, dst: *mut u8) -> R<()> {
         let n = self.bytes();
         let chunk = transfer_limits().chunk_bytes;
@@ -171,7 +171,7 @@ impl DeviceArray {
             }
             _ => {
                 return Err(CoreError::Device(
-                    "résultat incohérent avec son périphérique".into(),
+                    "result inconsistent with its device".into(),
                 ));
             }
         }
@@ -188,15 +188,15 @@ impl Drop for DeviceArray {
     }
 }
 
-/// Un tableau d'entrée.
+/// An input array.
 pub enum Input<'a> {
-    /// Mémoire de l'hôte (tableau NumPy contigu, memmap…), gardée en vie par l'appelant.
+    /// Host memory (contiguous NumPy array, memmap…), kept alive by the caller.
     Host { ptr: *const u8, bytes: usize },
-    /// Résultat d'un kernel précédent.
+    /// Result of a previous kernel.
     Device(&'a DeviceArray),
 }
 
-/// Entrée résolue pour le périphérique cible.
+/// Input resolved for the target device.
 enum In<'a> {
     Host(*const u8, usize),
     Dev(&'a DeviceArray),
@@ -211,15 +211,15 @@ impl In<'_> {
     }
 }
 
-/// Lance `c` sur une grille de `n` éléments (taille de chaque sortie) ; `outs` sont les
-/// destinations finales des sorties (`n` éléments chacune), dans l'ordre du kernel.
+/// Launches `c` over a grid of `n` elements (size of each output); `outs` are the
+/// final destinations of the outputs (`n` elements each), in kernel order.
 ///
-/// Kernel élément par élément : chaque entrée a `n` éléments. Kernel avec index : les entrées ont
-/// leur propre taille (les dimensions sont passées en paramètres cachés, dans `scalars`).
+/// Element-wise kernel: each input has `n` elements. Indexed kernel: inputs have
+/// their own size (dimensions are passed as hidden parameters, in `scalars`).
 ///
 /// # Safety
-/// Les pointeurs hôte doivent rester valides jusqu'à la fin du calcul (lecture des résultats ou
-/// destruction des `DeviceArray` renvoyés).
+/// Host pointers must stay valid until the computation ends (results read or
+/// returned `DeviceArray`s dropped).
 pub unsafe fn launch(
     dev: &Device,
     c: &Compiled,
@@ -234,7 +234,7 @@ pub unsafe fn launch(
     let n_scalars = k.params.len() - arrays.len() - n_engine;
     if inputs.len() != arrays.len() || scalars.len() != n_scalars {
         return Err(CoreError::Type(format!(
-            "'{}' attend {} tableau(x) et {} scalaire(s)",
+            "'{}' expects {} array(s) and {} scalar(s)",
             k.name,
             arrays.len(),
             n_scalars
@@ -242,7 +242,7 @@ pub unsafe fn launch(
     }
     if outs.len() != k.outputs.len() {
         return Err(CoreError::Type(format!(
-            "'{}' a {} sortie(s), {} destination(s) fournie(s)",
+            "'{}' has {} output(s), {} destination(s) given",
             k.name,
             k.outputs.len(),
             outs.len()
@@ -253,8 +253,8 @@ pub unsafe fn launch(
         let tile = g as usize * k.cells.max(1) as usize;
         if !n.is_multiple_of(tile) {
             return Err(CoreError::Shape(format!(
-                "'{}' : group={g}{}, mais la sortie a {n} cases, qui ne se découpent pas en tuiles complètes de {tile} \
-                 (choisissez des dimensions dont le produit est un multiple de {tile}, ex. une dernière dimension multiple de {tile})",
+                "'{}': group={g}{}, but the output has {n} cells, which do not split into whole tiles of {tile} \
+                 (choose dimensions whose product is a multiple of {tile}, e.g. a last dimension that is a multiple of {tile})",
                 k.name,
                 if k.cells > 1 {
                     format!(", cells={}", k.cells)
@@ -276,10 +276,10 @@ pub unsafe fn launch(
         };
         if !ok {
             return Err(CoreError::Shape(format!(
-                "tableau '{}' : {bytes} octets pour {} éléments de type {}",
+                "array '{}': {bytes} bytes for {} elements of type {}",
                 p.name,
                 if indexed {
-                    "des".to_string()
+                    "its".to_string()
                 } else {
                     n.to_string()
                 },
@@ -288,8 +288,8 @@ pub unsafe fn launch(
         }
     }
 
-    // Résolution des entrées : un résultat déjà en mémoire hôte est relu sur place ; un résultat
-    // resté sur un autre périphérique repasse par l'hôte.
+    // Resolving the inputs: a result already in host memory is read in place; a result
+    // left on another device goes back through the host.
     let mut staged: Vec<Vec<u8>> = Vec::new();
     let mut idx_staged: Vec<Option<usize>> = Vec::new();
     for i in inputs {
@@ -309,15 +309,15 @@ pub unsafe fn launch(
         ins.push(match (i, st) {
             (_, Some(s)) => In::Host(staged[*s].as_ptr(), staged[*s].len()),
             (Input::Host { ptr, bytes }, None) => In::Host(*ptr, *bytes),
-            // Résultat Direct de ce périphérique, d'un seul bloc : son buffer resert tel quel (en
-            // lecture seule ou copié côté GPU vers un buffer frais pour gs.Out), sans attendre l'hôte.
+            // Direct result of this device, in a single chunk: its buffer is reused as is (read-only
+            // or copied on the GPU into a fresh buffer for gs.Out), without waiting for the host.
             (Input::Device(a), None) if reusable_direct(a, dev) => {
                 a.read_in_place.store(true, Ordering::Release);
                 In::Dev(a)
             }
             (Input::Device(a), None) => match a.host_ptr() {
                 Some(p) => {
-                    unsafe { a.read_into(p)? }; // synchronisation seulement
+                    unsafe { a.read_into(p)? }; // synchronization only
                     In::Host(p, a.bytes())
                 }
                 None => In::Dev(a),
@@ -328,7 +328,7 @@ pub unsafe fn launch(
     let limits = transfer_limits();
     let out_elems: Vec<usize> = k.outputs.iter().map(|t| t.size()).collect();
     let scalars = &full_scalars(k, scalars);
-    // Indices 64 bits si un tableau lu par indice dépasse 2³¹ − 1 éléments (kernels avec index).
+    // 64-bit indices if an array read by index exceeds 2³¹ − 1 elements (indexed kernels).
     let wide = indexed
         && ins
             .iter()
@@ -336,8 +336,8 @@ pub unsafe fn launch(
             .any(|(i, t)| (i.bytes() / t.size()) as u64 > wide_index_limit());
     let imp = c.variant(dev, wide, specialization(k, scalars))?;
     let fits_dev = fits(dev, &ins, n, &out_elems, &limits);
-    // Si l'appelant a omis l'allocation hôte (pointeurs nuls pour le chemin Résident GPU) et qu'on
-    // bascule finalement sur Flux, Direct ou CPU, allouer les tampons hôte de repli ici.
+    // If the caller skipped the host allocation (null pointers for the GPU Resident path) and
+    // we end up in Flux, Direct or CPU, allocate the fallback host buffers here.
     let mut fallback_bufs: Vec<Option<Vec<u8>>> = Vec::new();
     let mut resolved_outs: Vec<*mut u8> = outs.to_vec();
     let needs_host_fallback = outs.iter().any(|p| p.is_null())
@@ -417,7 +417,7 @@ pub unsafe fn launch(
                 }
             },
             _ => Err(CoreError::Device(
-                "kernel compilé pour un autre périphérique".into(),
+                "kernel compiled for another device".into(),
             )),
         }
     } else {
@@ -488,12 +488,12 @@ pub unsafe fn launch(
                 }
             }
             _ => Err(CoreError::Device(
-                "kernel compilé pour un autre périphérique".into(),
+                "kernel compiled for another device".into(),
             )),
         }
     };
     let (mut storages, mode, mut host_backed_io) = result?;
-    // Si des tampons hôte de repli ont été alloués côté Rust, transférer leur propriété dans Storage::HostOwned.
+    // If fallback host buffers were allocated on the Rust side, move their ownership into Storage::HostOwned.
     if !fallback_bufs.is_empty() {
         if host_backed_io {
             dev.finish()?;
@@ -505,12 +505,12 @@ pub unsafe fn launch(
             }
         }
     }
-    // Entrées rapatriées d'un autre périphérique : copies locales libérées au retour.
+    // Inputs brought back from another device: local copies freed on return.
     if !staged.is_empty() && host_backed_io {
         dev.finish()?;
         host_backed_io = false;
     }
-    // Résultats : les sorties (n cases chacune), puis les tableaux gs.Out du mode explicite.
+    // Results: the outputs (n cells each), then the gs.Out arrays of the explicit mode.
     let mut shapes: Vec<(Scalar, usize)> = k.outputs.iter().map(|t| (*t, n)).collect();
     for (pos, (i, p)) in k.array_params().enumerate() {
         if k.writable().contains(&i) {
@@ -535,26 +535,26 @@ pub unsafe fn launch(
 fn host_ptr(i: &In) -> *mut u8 {
     match i {
         In::Host(p, _) => *p as *mut u8,
-        In::Dev(_) => unreachable!("gs.Out : toujours en mémoire hôte"),
+        In::Dev(_) => unreachable!("gs.Out: always in host memory"),
     }
 }
 
-/// Stockage hôte des tableaux gs.Out (mode explicite), dans l'ordre des paramètres.
+/// Host storage of the gs.Out arrays (explicit mode), in parameter order.
 fn writable_host(k: &Kernel, ins: &[In]) -> Vec<Storage> {
     k.array_params()
         .zip(ins)
         .filter(|((i, _), _)| k.writable().contains(i))
         .map(|(_, input)| match input {
             In::Host(p, _) => Storage::Host { ptr: *p as *mut u8 },
-            In::Dev(_) => unreachable!("gs.Out : toujours en mémoire hôte"),
+            In::Dev(_) => unreachable!("gs.Out: always in host memory"),
         })
         .collect()
 }
 
-/// Tailles remplacées par des constantes pour cet appel (§5.4) : dimensions d'un kernel avec index qui
-/// ne sont pas des axes de la grille (ex. la longueur `t` des séries) et valent au plus 1024. Les axes
-/// de la grille restent des paramètres : changer leur taille ne recompile rien.
-/// `GPUSYNC_SPECIALIZE=0` désactive la spécialisation (mesures).
+/// Sizes replaced by constants for this call (§5.4): dimensions of an indexed kernel that
+/// are not grid axes (e.g. the length `t` of series) and are at most 1024. The grid
+/// axes stay parameters: changing their size recompiles nothing.
+/// `GPUSYNC_SPECIALIZE=0` disables specialization (measurements).
 fn specialization(k: &Kernel, scalars: &[Const]) -> Vec<(usize, i64)> {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let on = *ON.get_or_init(|| std::env::var("GPUSYNC_SPECIALIZE").map_or(true, |v| v != "0"));
@@ -582,8 +582,8 @@ fn specialization(k: &Kernel, scalars: &[Const]) -> Vec<(usize, i64)> {
     out
 }
 
-/// Nombre d'éléments au-delà duquel un tableau demande des indices 64 bits : 2³¹ − 1, ou la valeur de
-/// `GPUSYNC_WIDE_INDEX_LIMIT` (tests : forcer la variante large sur de petits tableaux).
+/// Number of elements beyond which an array needs 64-bit indices: 2³¹ − 1, or the value of
+/// `GPUSYNC_WIDE_INDEX_LIMIT` (tests: force the wide variant on small arrays).
 fn wide_index_limit() -> u64 {
     static L: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *L.get_or_init(|| {
@@ -594,12 +594,12 @@ fn wide_index_limit() -> u64 {
     })
 }
 
-/// Stockage de chaque sortie, mode retenu, buffers encore adossés à la mémoire hôte.
+/// Storage of each output, chosen mode, buffers still backed by host memory.
 type Planned = R<(Vec<Storage>, Mode, bool)>;
 
-/// Buffer wgpu d'un résultat lisible par un autre kernel : Résident, ou Direct d'un seul bloc (le
-/// buffer `NoCopy` déjà créé sur la mémoire de l'hôte resert tel quel ; la file unique de wgpu
-/// ordonne les deux calculs, sans attente de l'hôte).
+/// wgpu buffer of a result that another kernel can read: Resident, or Direct in a single chunk (the
+/// `NoCopy` buffer already created on host memory is reused as is; wgpu's single queue
+/// orders both computations, without waiting for the host).
 fn wg_buf(s: &Storage) -> Option<&WgBuffer> {
     match s {
         Storage::Wg(b) => Some(b),
@@ -608,8 +608,8 @@ fn wg_buf(s: &Storage) -> Option<&WgBuffer> {
     }
 }
 
-/// Résultat Direct de `dev` couvert par un seul buffer (tout le tableau) : réutilisable comme
-/// entrée d'un kernel sur le même périphérique.
+/// Direct result of `dev` covered by a single buffer (the whole array): reusable as
+/// the input of a kernel on the same device.
 fn reusable_direct(a: &DeviceArray, dev: &Device) -> bool {
     if a.device.id() != dev.id() {
         return false;
@@ -625,14 +625,14 @@ fn reusable_direct(a: &DeviceArray, dev: &Device) -> bool {
     }
 }
 
-/// Entrées toutes en mémoire hôte : mode Direct possible sur mémoire unifiée. Sinon (chaîne de
-/// kernels), les résultats restent dans des buffers du périphérique réutilisés (mode Résident).
+/// All inputs in host memory: Direct mode possible on unified memory. Otherwise (a chain of
+/// kernels), results stay in reused device buffers (Resident mode).
 fn all_host(ins: &[In]) -> bool {
     ins.iter().all(|i| matches!(i, In::Host(..)))
 }
 
 fn other_kind() -> CoreError {
-    CoreError::Device("entrée sur un autre type de périphérique".into())
+    CoreError::Device("input on another kind of device".into())
 }
 
 fn elem_max(arrays: &[Scalar], out_elems: &[usize]) -> usize {
@@ -644,9 +644,9 @@ fn elem_max(arrays: &[Scalar], out_elems: &[usize]) -> usize {
         .unwrap_or(4)
 }
 
-/// Mémoire du périphérique pour le budget : connue en OpenCL ; pour wgpu, celle du même GPU vu
-/// par OpenCL s'il existe, sinon 4 Gio (prudent). Mise en cache : évite une énumération FFI OpenCL
-/// à chaque lancement de kernel wgpu.
+/// Device memory for the budget: known with OpenCL; for wgpu, that of the same GPU as seen
+/// by OpenCL if it exists, otherwise 4 GiB (cautious). Cached: avoids an OpenCL FFI enumeration
+/// at every wgpu kernel launch.
 fn device_memory(dev: &Device) -> u64 {
     let info = dev.info();
     if let Some(m) = info.memory_bytes {
@@ -671,7 +671,7 @@ fn budget(dev: &Device, limits: &TransferLimits) -> u64 {
         .unwrap_or_else(|| device_memory(dev) / 2)
 }
 
-/// L'appel tient-il en mode Résident (budget, taille max d'un buffer, une seule grille) ?
+/// Does the call fit in Resident mode (budget, largest buffer, a single grid)?
 fn fits(dev: &Device, ins: &[In], n: usize, out_elems: &[usize], limits: &TransferLimits) -> bool {
     let budget = limits.budget_bytes.unwrap_or(device_memory(dev) / 2);
     let max_buf = dev.info().max_buffer_bytes.unwrap_or(u64::MAX);
@@ -691,7 +691,7 @@ fn fits(dev: &Device, ins: &[In], n: usize, out_elems: &[usize], limits: &Transf
     n <= u32::MAX as usize && new_bytes <= budget && biggest <= max_buf
 }
 
-/// Blocs `(début, longueur)` de la grille élément par élément.
+/// Chunks `(start, length)` of the element-wise grid.
 fn blocks(n: usize, chunk: usize) -> Vec<(usize, usize)> {
     (0..n)
         .step_by(chunk.max(1))
@@ -699,8 +699,8 @@ fn blocks(n: usize, chunk: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Liste complète des scalaires (ordre des paramètres) : ceux de l'appelant, et des zéros à la
-/// place des paramètres du moteur (remplis à chaque lancement).
+/// Full list of scalars (parameter order): the caller's, and zeros in place
+/// of the engine's parameters (filled in at each launch).
 fn full_scalars(k: &Kernel, user: &[Const]) -> Vec<Const> {
     let mut u = user.iter();
     k.params
@@ -738,7 +738,7 @@ fn wg_params(k: &Kernel, scalars: &[Const]) -> R<(Vec<u32>, Vec<f64>)> {
             Const::F32(v) => w.push(v.to_bits()),
             Const::Bool(v) => w.push(v as u32),
             Const::F64(v) => f.push(v),
-            // Entier 64 bits : deux mots, poids faible puis fort (relus par le code WGSL).
+            // 64-bit integer: two words, low then high (read back by the WGSL code).
             Const::I64(v) => w.extend([v as u64 as u32, ((v as u64) >> 32) as u32]),
             Const::U64(v) => w.extend([v as u32, (v >> 32) as u32]),
         }
@@ -758,8 +758,8 @@ fn gscalar<'a, B>(c: Const) -> GArg<'a, B> {
     }
 }
 
-/// Arguments de lancement (OpenCL, CUDA) dans l'ordre des paramètres : tableaux = `bufs` (dans
-/// l'ordre), puis les sorties et n.
+/// Launch arguments (OpenCL, CUDA) in parameter order: arrays = `bufs` (in
+/// order), then the outputs and n.
 fn gargs<'a, B>(
     k: &Kernel,
     bufs: &[&'a B],
@@ -794,7 +794,7 @@ unsafe fn run_cpu(
         .map(|i| match i {
             In::Host(p, b) => Ok(unsafe { std::slice::from_raw_parts(*p, *b) }),
             In::Dev(_) => Err(CoreError::Device(
-                "cpu:0 : entrée restée sur un périphérique".into(),
+                "cpu:0: input left on a device".into(),
             )),
         })
         .collect::<R<_>>()?;
@@ -824,7 +824,7 @@ unsafe fn run_cpu(
     Ok((storages, Mode::Cpu, false))
 }
 
-/// Mode Direct (OpenCL, mémoire unifiée) : chaque bloc utilise directement la mémoire de l'hôte.
+/// Direct mode (OpenCL, unified memory): each chunk uses host memory directly.
 #[allow(clippy::too_many_arguments)]
 unsafe fn cl_direct(
     d: &ClDevice,
@@ -855,7 +855,7 @@ unsafe fn cl_direct(
         for (i, ty) in ins.iter().zip(arrays) {
             let In::Host(p, _) = i else {
                 return Err(CoreError::Device(
-                    "mode Direct : entrée restée sur un périphérique".into(),
+                    "Direct mode: input left on a device".into(),
                 ));
             };
             let (off, bytes) = (start * ty.size(), len * ty.size());
@@ -897,20 +897,20 @@ unsafe fn cl_direct(
     ))
 }
 
-/// En dessous de ce total (entrées et sorties), Metal passe par des copies plutôt que par le mode Direct :
-/// une copie si petite ne coûte rien, alors que libérer une mémoire lue sur place oblige à attendre le GPU.
-/// Sans ce seuil, un petit tableau NumPy placé par hasard en début de page bloquait l'hôte à chaque image.
+/// Below this total (inputs and outputs), Metal uses copies rather than Direct mode:
+/// such a small copy costs nothing, while freeing memory read in place forces a wait for the GPU.
+/// Without this threshold, a small NumPy array that happened to start on a page boundary blocked the host every frame.
 const SMALL_DIRECT: usize = 64 << 10;
 
-/// Trop petit pour le mode Direct (jamais le cas quand les tests imposent la taille des blocs).
+/// Too small for Direct mode (never the case when tests force the chunk size).
 fn too_small_for_direct(ins: &[In], out_bytes: usize, limits: &TransferLimits) -> bool {
     let total = ins.iter().map(In::bytes).sum::<usize>() + out_bytes;
     limits.direct_chunk_bytes.is_none() && total < SMALL_DIRECT
 }
 
-/// Mode Direct sur Metal : chaque bloc est un buffer `NoCopy` sur la mémoire de l'hôte (aucune copie).
-/// `None` si impossible (pas Metal, adresse non alignée sur 16 Kio, entrée restée sur un
-/// périphérique, kernel avec index trop gros pour un seul buffer).
+/// Direct mode on Metal: each chunk is a `NoCopy` buffer over host memory (no copy).
+/// `None` if impossible (not Metal, address not aligned on 16 KiB, input left on a
+/// device, indexed kernel too large for a single buffer).
 #[allow(clippy::too_many_arguments)]
 unsafe fn wg_direct(
     d: &gpusync_backend_wgpu::WgDevice,
@@ -947,9 +947,9 @@ unsafe fn wg_direct(
         .unwrap_or(u64::MAX)
         .min(usize::MAX as u64) as usize;
     let chunk_bytes = limits.direct_chunk_bytes.unwrap_or(max_buf).min(max_buf);
-    let step = PAGE / 4; // débuts de blocs alignés sur une page pour des éléments de 4 ou 8 o
+    let step = PAGE / 4; // chunk starts aligned on a page for 4- or 8-byte elements
     let chunk = ((chunk_bytes / elem_max(arrays, out_elems)) / step * step).max(step);
-    let refused = || CoreError::Device("Metal a refusé une partie de la mémoire hôte".into());
+    let refused = || CoreError::Device("Metal refused part of the host memory".into());
     let mut out_bufs: Vec<Vec<WgBuffer>> = outs.iter().map(|_| Vec::new()).collect();
     for (start, len) in blocks(n, chunk) {
         let mut bufs = Vec::new();
@@ -991,7 +991,7 @@ unsafe fn wg_direct(
     )))
 }
 
-/// Mode Résident (wgpu) : entrées envoyées par blocs, sorties gardées sur le périphérique.
+/// Resident mode (wgpu): inputs uploaded in chunks, outputs kept on the device.
 #[allow(clippy::too_many_arguments)]
 unsafe fn wg_resident(
     d: &gpusync_backend_wgpu::WgDevice,
@@ -1038,11 +1038,11 @@ unsafe fn wg_resident(
     ))
 }
 
-/// Envois d'au plus cette taille : sans attente de l'hôte.
+/// Uploads up to this size: without waiting for the host.
 const SMALL_UPLOAD: usize = 1 << 20;
 
-/// Anneau de 3 tampons épinglés pour envoyer `bytes` octets de `src` vers `dst` (file de transfert).
-/// Renvoie l'événement de la dernière écriture.
+/// Ring of 3 pinned buffers to upload `bytes` bytes from `src` to `dst` (transfer queue).
+/// Returns the event of the last write.
 unsafe fn q_upload<G: Gpu>(
     d: &G,
     dst: &G::Buf,
@@ -1054,8 +1054,8 @@ unsafe fn q_upload<G: Gpu>(
         return Ok(None);
     }
     let chunk = chunk.min(bytes).max(4);
-    // Petit envoi : la file de transfert le fait sans que l'hôte attende ; le tampon revient en réserve
-    // avec son événement (taille arrondie, pour resservir).
+    // Small upload: the transfer queue does it without the host waiting; the buffer goes back to the pool
+    // with its event (rounded size, for reuse).
     if bytes <= SMALL_UPLOAD && chunk >= bytes {
         let p = d
             .pinned(bytes.next_power_of_two().max(4096))
@@ -1077,7 +1077,7 @@ unsafe fn q_upload<G: Gpu>(
         let len = chunk.min(bytes - off);
         let slot = i % ring.len();
         if let Some(e) = ring[slot].1.take() {
-            G::wait(&e).map_err(dev_err)?; // le tampon est réutilisable
+            G::wait(&e).map_err(dev_err)?; // the buffer is reusable
         }
         let p = &ring[slot].0;
         unsafe { std::ptr::copy_nonoverlapping(src.add(off), G::pin_ptr(p), len) };
@@ -1097,7 +1097,7 @@ unsafe fn q_upload<G: Gpu>(
     Ok(last)
 }
 
-/// Rapatrie un résultat Résident par l'anneau épinglé, après `done`.
+/// Copies a Resident result back through the pinned ring, after `done`.
 unsafe fn q_download<G: Gpu>(
     d: &G,
     src: &G::Buf,
@@ -1143,7 +1143,7 @@ unsafe fn q_download<G: Gpu>(
     Ok(())
 }
 
-/// Mode Résident (OpenCL, GPU dédié) : entrées envoyées par l'anneau épinglé, sorties gardées en VRAM.
+/// Resident mode (OpenCL, discrete GPU): inputs uploaded through the pinned ring, outputs kept in VRAM.
 #[allow(clippy::too_many_arguments)]
 unsafe fn q_resident<G: Gpu>(
     d: &G,
@@ -1175,7 +1175,7 @@ unsafe fn q_resident<G: Gpu>(
                 .ok_or_else(other_kind),
         })
         .collect::<R<_>>()?;
-    // Entrées d'un calcul précédent sur ce périphérique : attendre qu'elles soient prêtes.
+    // Inputs from a previous computation on this device: wait until they are ready.
     let mut waits: Vec<&G::Ev> = last.iter().collect();
     for i in ins {
         if let In::Dev(a) = i {
@@ -1204,9 +1204,9 @@ unsafe fn q_resident<G: Gpu>(
     ))
 }
 
-/// Mode Flux (OpenCL, GPU dédié, kernels élément par élément) : pipeline à 3 emplacements sur deux
-/// files ; pendant le calcul du bloc k, le bloc k+1 est envoyé et le bloc k−1 revient dans sa
-/// destination finale.
+/// Flux mode (OpenCL, discrete GPU, element-wise kernels): 3-slot pipeline on two
+/// queues; while chunk k is computed, chunk k+1 is uploaded and chunk k−1 comes back to its
+/// final destination.
 #[allow(clippy::too_many_arguments)]
 unsafe fn q_flux<G: Gpu>(
     d: &G,
@@ -1228,7 +1228,7 @@ unsafe fn q_flux<G: Gpu>(
         pins: Vec<Option<G::Pin>>,
         outs: Vec<G::Buf>,
         pin_outs: Vec<G::Pin>,
-        /// Bloc en cours : début, longueur, une lecture par sortie.
+        /// Chunk in flight: start, length, one read per output.
         busy: Option<(usize, usize, Vec<G::Ev>)>,
     }
     let mut ring: Vec<Slot<G>> = Vec::new();
@@ -1351,32 +1351,32 @@ unsafe fn q_flux<G: Gpu>(
     ))
 }
 
-// ───────────────────── Kernels avec index : blocs de lignes (§9.7) ─────────────────────
+// ───────────────────── Indexed kernels: blocks of rows (§9.7) ─────────────────────
 
-/// Plan par lignes d'un kernel avec index : la grille (forme de la sortie) est découpée le long de
-/// son premier axe. Les entrées `chunked` (lues seulement à la ligne courante) suivent le même
-/// découpage ; les autres restent entières sur le périphérique.
+/// Row plan of an indexed kernel: the grid (output shape) is split along
+/// its first axis. `chunked` inputs (read only at the current row) follow the same
+/// split; the others stay whole on the device.
 struct Rows {
-    /// Lignes de la sortie (taille du premier axe).
+    /// Rows of the output (size of the first axis).
     total: usize,
-    /// Cases par ligne.
+    /// Cells per row.
     rest: usize,
-    /// Par entrée : découpée par lignes ?
+    /// Per input: split by rows?
     chunked: Vec<bool>,
-    /// Par entrée : tableau gs.Out (mode explicite), entier et rendu comme résultat ?
+    /// Per input: gs.Out array (explicit mode), whole and returned as a result?
     writable: Vec<bool>,
-    /// Octets par ligne : de chaque entrée découpée (0 sinon), de chaque sortie.
+    /// Bytes per row: of each split input (0 otherwise), of each output.
     in_row: Vec<usize>,
     out_row: Vec<usize>,
-    /// Positions de row0, inrow, obase dans la liste des scalaires.
+    /// Positions of row0, inrow, obase in the list of scalars.
     slots: [usize; 3],
-    /// Nom de chaque entrée (messages d'erreur).
+    /// Name of each input (error messages).
     names: Vec<String>,
-    /// Lignes par lancement : multiple de `granule` (groupes complets, `group=`).
+    /// Rows per launch: a multiple of `granule` (whole groups, `group=`).
     granule: usize,
 }
 
-/// Lignes d'un lancement multiple de ceci : chaque lancement couvre des groupes complets.
+/// Rows of a launch are a multiple of this: each launch covers whole groups.
 fn granule(k: &Kernel, rest: usize) -> usize {
     match k.group {
         Some(g) => {
@@ -1431,8 +1431,8 @@ impl Rows {
         }
     }
 
-    /// Scalaires d'un lancement : lignes `row0…`, entrées découpées à partir de la ligne `inrow`,
-    /// sorties écrites à partir de la case `obase` de leur buffer.
+    /// Scalars of a launch: rows `row0…`, split inputs starting at row `inrow`,
+    /// outputs written starting at cell `obase` of their buffer.
     fn with(&self, scalars: &[Const], row0: usize, inrow: usize, obase: usize) -> Vec<Const> {
         let mut s = scalars.to_vec();
         s[self.slots[0]] = Const::I32(row0 as i32);
@@ -1441,7 +1441,7 @@ impl Rows {
         s
     }
 
-    /// Plus grand nombre d'octets par ligne parmi les tableaux découpés (entrées et sorties).
+    /// Largest number of bytes per row among the split arrays (inputs and outputs).
     fn max_row(&self) -> usize {
         self.in_row
             .iter()
@@ -1452,12 +1452,12 @@ impl Rows {
             .max(1)
     }
 
-    /// Octets par ligne, tous tableaux découpés confondus.
+    /// Bytes per row, all split arrays combined.
     fn sum_row(&self) -> usize {
         (self.in_row.iter().sum::<usize>() + self.out_row.iter().sum::<usize>()).max(1)
     }
 
-    /// Blocs de lignes `(début, lignes)` de `rows` lignes au plus.
+    /// Blocks of rows `(start, rows)` of at most `rows` rows.
     fn blocks(&self, rows: usize) -> Vec<(usize, usize)> {
         let g = self.granule;
         let rows = (rows.clamp(1, self.total) / g * g).max(g);
@@ -1476,10 +1476,10 @@ impl Rows {
         dev: &str,
     ) -> CoreError {
         CoreError::Unsupported(format!(
-            "'{}' : l'entrée '{}' ({}) est lue à n'importe quelle ligne de la sortie, elle doit \
-             donc tenir entière sur {dev} ({} disponibles). Pour qu'elle soit découpée, indexez-la \
-             par la ligne courante ({}[i, …] avec i, … = gs.index()) ; sinon augmentez gs.set_memory_budget() \
-             ou utilisez un autre périphérique",
+            "'{}': input '{}' ({}) is read at any row of the output, so it must \
+             fit whole on {dev} ({} available). For it to be split, index it \
+             by the current row ({}[i, …] with i, … = gs.index()); otherwise raise gs.set_memory_budget() \
+             or use another device",
             k.name,
             self.names[i],
             human(bytes as u64),
@@ -1489,7 +1489,7 @@ impl Rows {
     }
 }
 
-/// Taille lisible : « 1,50 Gio », « 12,0 Mio », « 300 o ».
+/// Readable size: "1.50 GiB", "12.0 MiB", "300 B".
 fn human(b: u64) -> String {
     let f = b as f64;
     let s = if b >= 1 << 30 {
@@ -1504,34 +1504,34 @@ fn human(b: u64) -> String {
     s.replace('.', ",")
 }
 
-/// Cases lancées sans mesure (appel court) ou lors de la première mesure.
+/// Cells launched without measuring (short call) or during the first measurement.
 const PROBE_CELLS: usize = 1 << 16;
-/// Durée visée d'un lancement : bien en deçà du délai de garde des drivers (TDR Windows : ~2 s).
+/// Target duration of a launch: well below the drivers' watchdog delay (Windows TDR: ~2 s).
 const TARGET_LAUNCH_S: f64 = 0.1;
-/// Cases au plus par lancement (indices u32, limites de la grille wgpu).
+/// Most cells per launch (u32 indices, wgpu grid limits).
 const MAX_LAUNCH_CELLS: usize = 1 << 30;
 
-/// Durée minimale d'un lancement chronométré pour que la mesure du débit soit fiable.
+/// Shortest timed launch for the throughput measurement to be reliable.
 const MIN_TIMED_S: f64 = 0.02;
 
-/// Découpe les lancements d'un kernel avec index pour qu'aucun ne dure plus de ~0,1 s (délai de
-/// garde des drivers) : les premiers, petits puis grandissants, sont chronométrés jusqu'à une mesure
-/// fiable du débit ; les suivants, dimensionnés d'après elle, partent en file sans attente.
+/// Splits the launches of an indexed kernel so that none lasts more than ~0.1 s (the driver
+/// watchdog delay): the first ones, small then growing, are timed until the throughput is
+/// measured reliably; the next ones, sized from it, are queued without waiting.
 #[derive(Default)]
 struct Pacer {
-    /// Débit mesuré (lignes par seconde), et s'il est fiable (lancement d'au moins MIN_TIMED_S).
+    /// Measured throughput (rows per second), and whether it is reliable (a launch of at least MIN_TIMED_S).
     rate: Option<f64>,
     calibrated: bool,
     last: usize,
-    /// (kernel, périphérique) et cases par ligne : le débit est retenu d'un appel à l'autre.
+    /// (kernel, device) and cells per row: the throughput is kept from one call to the next.
     key: Option<((usize, usize), usize)>,
-    /// Lignes par lancement multiple de ceci (groupes complets).
+    /// Rows per launch are a multiple of this (whole groups).
     granule: usize,
 }
 
-/// Débits mesurés (cases par seconde, fiable ?) par (kernel, périphérique) : sans eux, chaque appel
-/// chronométrerait de nouveau ses premiers lancements, en attendant leur fin (aucun recouvrement
-/// entre appels successifs, ex. une boucle de 240 étages de NTT).
+/// Measured throughputs (cells per second, reliable?) per (kernel, device): without them, each call
+/// would time its first launches again, waiting for them to finish (no overlap
+/// between successive calls, e.g. a loop of 240 NTT stages).
 type RateMap = HashMap<(usize, usize), (f64, bool)>;
 
 static RATES: std::sync::LazyLock<Mutex<RateMap>> = std::sync::LazyLock::new(Default::default);
@@ -1556,7 +1556,7 @@ impl Pacer {
         }
     }
 
-    /// Calcule les lignes `[a, b)` ; `step(première ligne, lignes, attendre la fin)`.
+    /// Computes rows `[a, b)`; `step(first row, rows, wait for the end)`.
     fn run(
         &mut self,
         a: usize,
@@ -1597,7 +1597,7 @@ impl Drop for Pacer {
     fn drop(&mut self) {
         if let (Some((key, rest)), Some(r)) = (self.key, self.rate) {
             let mut g = RATES.lock().unwrap_or_else(|e| e.into_inner());
-            // Une mesure fiable n'est pas remplacée par une moins fiable.
+            // A reliable measurement is not replaced by a less reliable one.
             if self.calibrated || !g.get(&key).is_some_and(|(_, c)| *c) {
                 g.insert(key, (r * rest as f64, self.calibrated));
             }
@@ -1609,8 +1609,8 @@ fn max_buffer(info_max: Option<u64>) -> usize {
     info_max.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize
 }
 
-/// Kernel avec index, OpenCL sur mémoire unifiée : chaque bloc de lignes utilise directement la
-/// mémoire de l'hôte ; les entrées lues à toutes les lignes sont importées une fois.
+/// Indexed kernel, OpenCL on unified memory: each block of rows uses host memory
+/// directly; inputs read at every row are imported once.
 #[allow(clippy::too_many_arguments)]
 unsafe fn rows_cl_direct(
     d: &ClDevice,
@@ -1631,7 +1631,7 @@ unsafe fn rows_cl_direct(
     for (i, input) in ins.iter().enumerate() {
         let In::Host(p, bytes) = input else {
             return Err(CoreError::Device(
-                "mode Direct : entrée restée sur un périphérique".into(),
+                "Direct mode: input left on a device".into(),
             ));
         };
         whole.push(if rows.chunked[i] {
@@ -1672,7 +1672,7 @@ unsafe fn rows_cl_direct(
         let orefs: Vec<&ClBuffer> = obs.iter().collect();
         pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
-            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cells / cells per thread)
             let e = Gpu::launch(
                 d,
                 ck,
@@ -1690,7 +1690,7 @@ unsafe fn rows_cl_direct(
         for (dst, ob) in out_bufs.iter_mut().zip(obs) {
             dst.push(ob);
         }
-        // Les buffers d'entrée du bloc peuvent être libérés : la file garde ses références.
+        // The block's input buffers can be released: the queue keeps its references.
     }
     let done = last.map(Arc::new);
     let mut storages: Vec<Storage> = out_bufs
@@ -1702,7 +1702,7 @@ unsafe fn rows_cl_direct(
             done: done.clone(),
         })
         .collect();
-    // gs.Out : importés entiers, ils sont eux-mêmes les résultats.
+    // gs.Out: imported whole, they are themselves the results.
     for i in (0..ins.len()).filter(|i| rows.writable[*i]) {
         storages.push(Storage::ClDirect {
             bufs: whole[i].take().into_iter().collect(),
@@ -1710,15 +1710,15 @@ unsafe fn rows_cl_direct(
             done: done.clone(),
         });
     }
-    // Les autres imports entiers doivent survivre aux calculs : rattachés au premier résultat.
+    // The other whole imports must outlive the computations: attached to the first result.
     if let Some(Storage::ClDirect { bufs, .. }) = storages.first_mut() {
         bufs.extend(whole.into_iter().flatten());
     }
     Ok((storages, Mode::Direct, true))
 }
 
-/// Kernel avec index, OpenCL sur GPU dédié : Résident (tout tient) ou par blocs de lignes, avec
-/// deux emplacements pour recouvrir le retour d'un bloc par le calcul du suivant.
+/// Indexed kernel, OpenCL on a discrete GPU: Resident (everything fits) or blocks of rows, with
+/// two slots to overlap the read-back of one block with the computation of the next.
 #[allow(clippy::too_many_arguments)]
 unsafe fn rows_q<G: Gpu>(
     d: &G,
@@ -1733,7 +1733,7 @@ unsafe fn rows_q<G: Gpu>(
     budget: u64,
 ) -> Planned {
     let max_buf = max_buffer(d.info().max_buffer_bytes);
-    // Entrées entières (toutes si l'appel tient, sinon celles lues à n'importe quelle ligne).
+    // Whole inputs (all of them if the call fits, otherwise those read at any row).
     let mut owned: Vec<Option<G::Buf>> = Vec::new();
     let mut waits_owned: Vec<G::Ev> = Vec::new();
     let mut resident_bytes = 0u64;
@@ -1810,7 +1810,7 @@ unsafe fn rows_q<G: Gpu>(
         let mut last: Option<G::Ev> = None;
         pacer.run(0, rows.total, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, 0, s * rows.rest);
-            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cells / cells per thread)
             let w: &[&G::Ev] = if last.is_none() { &waits } else { &[] };
             let e = d
                 .launch(ck, &gargs(k, &refs, &sc, &orefs, cells as u32), cells, w)
@@ -1834,7 +1834,7 @@ unsafe fn rows_q<G: Gpu>(
         return Ok((storages, Mode::Resident, false));
     }
 
-    // Par blocs de lignes : deux emplacements, chacun avec ses buffers d'entrées découpées et de sorties.
+    // By blocks of rows: two slots, each with its buffers of split inputs and outputs.
     let room = budget.saturating_sub(resident_bytes) as usize;
     let per_row: Vec<usize> = rows.in_row.iter().chain(&rows.out_row).copied().collect();
     let by_buf = per_row
@@ -1872,8 +1872,8 @@ unsafe fn rows_q<G: Gpu>(
     let mut last_ev: Option<G::Ev> = None;
     let mut drain = |s: &mut Slot<G>| -> R<()> {
         if let Some((r0, len, done)) = s.pending.take() {
-            // Le calcul du bloc doit être fini avant de réutiliser l'emplacement, même sans
-            // sortie à rapatrier (mode explicite : seuls les gs.Out, entiers, sont écrits).
+            // The block's computation must be finished before reusing the slot, even with
+            // no output to read back (explicit mode: only the whole gs.Out are written).
             G::wait(&done).map_err(dev_err)?;
             for (o, buf) in s.outs.iter().enumerate() {
                 let rb = rows.out_row[o];
@@ -1935,7 +1935,7 @@ unsafe fn rows_q<G: Gpu>(
         let mut last: Option<G::Ev> = None;
         pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
             let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
-            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cells / cells per thread)
             let w: &[&G::Ev] = if last.is_none() { &waits } else { &[] };
             let e = d
                 .launch(ck, &gargs(k, &refs, &sc, &orefs, cells as u32), cells, w)
@@ -1949,7 +1949,7 @@ unsafe fn rows_q<G: Gpu>(
         })?;
         drop(refs);
         drop(orefs);
-        // Pendant ce calcul, le bloc précédent revient dans sa destination.
+        // During this computation, the previous block comes back to its destination.
         let prev = (cur + slots.len() - 1) % slots.len();
         if prev != cur {
             drain(&mut slots[prev])?;
@@ -1959,7 +1959,7 @@ unsafe fn rows_q<G: Gpu>(
     for s in &mut slots {
         drain(s)?;
     }
-    // gs.Out : gardés entiers pendant tous les blocs, rapatriés (si hôte) ou gardés résidents (si GPU).
+    // gs.Out: kept whole across every block, copied back (if host) or kept resident (if GPU).
     d.finish().map_err(dev_err)?;
     let mut storages: Vec<Storage> = outs.iter().map(|p| Storage::Host { ptr: *p }).collect();
     let done_arc = last_ev.map(Arc::new);
@@ -1985,8 +1985,8 @@ fn gcd(a: usize, b: usize) -> usize {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-/// Kernel avec index sur Metal : blocs de lignes en `NoCopy` sur la mémoire de l'hôte (débuts de
-/// blocs alignés sur une page). `None` si impossible (pas Metal, adresses non alignées…).
+/// Indexed kernel on Metal: blocks of rows as `NoCopy` over host memory (block starts
+/// aligned on a page). `None` if impossible (not Metal, unaligned addresses…).
 #[allow(clippy::too_many_arguments)]
 unsafe fn rows_wg_direct(
     d: &gpusync_backend_wgpu::WgDevice,
@@ -2017,7 +2017,7 @@ unsafe fn rows_wg_direct(
         }
     }
     let cap = limits.direct_chunk_bytes.unwrap_or(max_buf).min(max_buf);
-    // Lignes par bloc : multiple de `step` pour que chaque bloc commence sur une page.
+    // Rows per block: a multiple of `step` so that each block starts on a page.
     let step = rows
         .in_row
         .iter()
@@ -2027,7 +2027,7 @@ unsafe fn rows_wg_direct(
         .fold(1, |acc, s| acc / gcd(acc, s) * s);
     let mut br = (cap / rows.max_row()).min(rows.total);
     if br < rows.total {
-        let step = step / gcd(step, rows.granule) * rows.granule; // pages et groupes complets
+        let step = step / gcd(step, rows.granule) * rows.granule; // whole pages and groups
         br = br / step * step;
         if br == 0 {
             return Ok(None);
@@ -2047,7 +2047,7 @@ unsafe fn rows_wg_direct(
             }
         });
     }
-    let refused = || CoreError::Device("Metal a refusé une partie de la mémoire hôte".into());
+    let refused = || CoreError::Device("Metal refused part of the host memory".into());
     let mut pacer = Pacer::for_kernel(k, d, rows.rest);
     let mut out_bufs: Vec<Vec<WgBuffer>> = outs.iter().map(|_| Vec::new()).collect();
     let mut keep: Vec<WgBuffer> = Vec::new();
@@ -2088,7 +2088,7 @@ unsafe fn rows_wg_direct(
             pacer.run(r0, r0 + len, rows.rest, &mut |s, l, sync| {
                 let sc = rows.with(scalars, s, r0, (s - r0) * rows.rest);
                 let (mut w, f) = wg_params(k, &sc)?;
-                let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
+                let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cells / cells per thread)
                 w.push(cells as u32);
                 d.launch(wk, &refs, &orefs, &w, &f, cells)
                     .map_err(dev_err)?;
@@ -2121,8 +2121,8 @@ unsafe fn rows_wg_direct(
     Ok(Some((storages, Mode::Direct, true)))
 }
 
-/// Kernel avec index via wgpu : Résident (tout tient) ou par blocs de lignes (une seule file :
-/// envoi, calcul et retour de chaque bloc se suivent).
+/// Indexed kernel through wgpu: Resident (everything fits) or blocks of rows (a single queue:
+/// upload, computation and read-back of each block follow one another).
 #[allow(clippy::too_many_arguments)]
 unsafe fn rows_wg(
     d: &gpusync_backend_wgpu::WgDevice,
@@ -2201,7 +2201,7 @@ unsafe fn rows_wg(
             };
             let sc = rows.with(scalars, s, r0, obase);
             let (mut w, f) = wg_params(k, &sc)?;
-            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cases / cases par thread)
+            let cells = l * rows.rest / k.cells.max(1) as usize; // threads (cells / cells per thread)
             w.push(cells as u32);
             d.launch(wk, refs, orefs, &w, &f, cells).map_err(dev_err)?;
             if sync {

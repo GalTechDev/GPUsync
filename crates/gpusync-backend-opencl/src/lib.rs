@@ -1,5 +1,5 @@
-//! Backend OpenCL (≥ 1.2). La bibliothèque OpenCL est chargée dynamiquement au premier appel :
-//! si elle est absente, le backend est simplement indisponible (aucune erreur à l'import).
+//! OpenCL backend (≥ 1.2). The OpenCL library is loaded dynamically on first use:
+//! if it is missing, the backend is simply unavailable (no error at import).
 
 mod exec;
 
@@ -25,22 +25,22 @@ impl Backend for OpenClBackend {
     }
 }
 
-/// Périphériques OpenCL, dans un ordre stable (plateformes puis périphériques) : l'index de
-/// `DeviceInfo` sert à rouvrir le même périphérique.
+/// OpenCL devices, in a stable order (platforms then devices): the index of
+/// `DeviceInfo` is used to reopen the same device.
 pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendError> {
     if let Err(e) = cl3::load_library() {
         return Err(BackendError(format!(
-            "bibliothèque OpenCL introuvable ({e})"
+            "OpenCL library not found ({e})"
         )));
     }
     let platforms =
-        get_platforms().map_err(|e| BackendError(format!("aucune plateforme OpenCL ({e})")))?;
+        get_platforms().map_err(|e| BackendError(format!("no OpenCL platform ({e})")))?;
     let mut out = Vec::new();
     for platform in platforms {
         let platform_name = platform.name().unwrap_or_default();
         let ids = match platform.get_devices(CL_DEVICE_TYPE_ALL) {
             Ok(ids) => ids,
-            Err(_) => continue, // plateforme sans périphérique : on l'ignore
+            Err(_) => continue, // platform without a device: skip it
         };
         for id in ids {
             let d = Device::new(id);
@@ -57,9 +57,9 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
                 vendor: d.vendor().unwrap_or_default().trim().to_string(),
                 version: d.version().unwrap_or_default().trim().to_string(),
                 f64: d.double_fp_config().map(|c| c != 0).unwrap_or(false),
-                // OpenCL fournit toute la bibliothèque mathématique en double précision.
+                // OpenCL provides the whole math library in double precision.
                 f64_math: d.double_fp_config().map(|c| c != 0).unwrap_or(false),
-                // `long` / `ulong` font partie d'OpenCL C (profil complet), sauf profil embarqué.
+                // `long` / `ulong` are part of OpenCL C (full profile), except the embedded profile.
                 int64: !d.profile().unwrap_or_default().contains("EMBEDDED"),
                 unified_memory: unified,
                 memory_bytes: d.global_mem_size().ok(),
@@ -73,9 +73,9 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
             out.push((id, info));
         }
     }
-    // L'ordre des plateformes donné par le chargeur OpenCL n'est pas stable d'un environnement à
-    // l'autre (constaté sous Windows : RTX puis UHD 770, puis l'inverse) : on trie, pour que
-    // `opencl:0` désigne toujours le même GPU.
+    // The platform order given by the OpenCL loader is not stable from one environment to
+    // another (seen on Windows: RTX then UHD 770, then the reverse): sort them, so that
+    // `opencl:0` always names the same GPU.
     out.sort_by(|(_, a), (_, b)| {
         (a.kind.rank(), &a.name, &a.vendor).cmp(&(b.kind.rank(), &b.name, &b.vendor))
     });
@@ -85,7 +85,7 @@ pub(crate) fn enumerate() -> Result<Vec<(cl_device_id, DeviceInfo)>, BackendErro
     Ok(out)
 }
 
-/// OpenCL ne distingue pas GPU intégré / dédié : la mémoire unifiée sert d'indice.
+/// OpenCL does not tell integrated from discrete GPUs: unified memory is used as a hint.
 fn kind_of(dev_type: cl_device_type, unified: bool) -> DeviceKind {
     if dev_type & CL_DEVICE_TYPE_GPU != 0 {
         if unified {
@@ -96,7 +96,7 @@ fn kind_of(dev_type: cl_device_type, unified: bool) -> DeviceKind {
     } else if dev_type & CL_DEVICE_TYPE_CPU != 0 {
         DeviceKind::Cpu
     } else {
-        DeviceKind::Other // accélérateurs (FPGA…) et types inconnus
+        DeviceKind::Other // accelerators (FPGA…) and unknown types
     }
 }
 
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn discovery_never_crashes() {
-        // Disponible ou non selon la machine : seul compte l'absence de panique.
+        // Available or not depending on the machine: only the absence of a panic matters.
         let _ = OpenClBackend.devices();
     }
 }

@@ -1,7 +1,8 @@
-"""Atmosphère humide simulée sur GPU : dynamique anélastique, condensation, pluie chaude.
+"""Moist atmosphere simulated on the GPU: anelastic dynamics, condensation, warm rain.
 
-Équations de Lipps & Hemler (anélastiques) sur grille C, advection d'ordre 9, limitée (MP) pour les scalaires, Runge-Kutta 3 de Wicker & Skamarock, pression par solveur direct (Hartley en x et y,
-tridiagonal en z), turbulence sous-maille de Smagorinsky-Lilly, microphysique de Kessler."""
+Lipps & Hemler (anelastic) equations on a C grid, order-9 advection, limited (MP) for scalars, Wicker & Skamarock
+Runge-Kutta 3, pressure by a direct solver (Hartley in x and y, tridiagonal in z), Smagorinsky-Lilly subgrid
+turbulence, Kessler microphysics."""
 
 from __future__ import annotations
 
@@ -54,12 +55,12 @@ Profile = Callable[[np.ndarray], np.ndarray]
 
 
 def saturation_vapor_pressure(t):
-    """Pression de vapeur saturante sur eau liquide (Pa), Bolton (1980)."""
+    """Saturation vapour pressure over liquid water (Pa), Bolton (1980)."""
     return 611.2 * np.exp(17.67 * (t - 273.15) / (t - 29.65))
 
 
 def saturation_mixing(t, p, ice=False):
-    """Teneur en vapeur saturante (kg/kg d'air humide) ; `ice` : saturation mixte eau-glace sous 0 °C."""
+    """Saturation vapour content (kg/kg of moist air); `ice`: mixed water-ice saturation below 0 °C."""
     es = saturation_vapor_pressure(t)
     if ice:
         mix = np.where(t < 273.15, np.clip((t - 250.16) / 23.0, 0.0, 1.0) ** 2, 1.0)
@@ -69,13 +70,13 @@ def saturation_mixing(t, p, ice=False):
 
 
 def saturation_adjust(theta_l, qt, p, ice=False):
-    """`(T, qc)` d'un air de température potentielle d'eau liquide `theta_l` et d'eau totale `qt` à la pression `p`."""
+    """`(T, qc)` of air with liquid water potential temperature `theta_l` and total water `qt` at pressure `p`."""
     exner = (p / P00) ** (RD / CP)
     t = np.array(theta_l * exner, dtype=np.float64)
     tl = t.copy()
     saturated = qt > saturation_mixing(tl, p, ice)
     for _ in range(40):
-        # Newton sans seuil dans l'air saturé : qs est convexe, la suite ne peut pas osciller autour du seuil
+        # Newton without a threshold in saturated air: qs is convex, the sequence cannot oscillate around the threshold
         qs = saturation_mixing(t, p, ice)
         dqs = (saturation_mixing(t + 1e-3, p, ice) - qs) / 1e-3
         t = t - np.where(saturated, (t - tl - LV / CP * (qt - qs)) / (1.0 + LV / CP * dqs), 0.0)
@@ -83,7 +84,7 @@ def saturation_adjust(theta_l, qt, p, ice=False):
 
 
 def _adjust_point(theta_l: float, qt: float, p: float, ice: bool) -> tuple[float, float]:
-    """`saturation_adjust` d'un seul point, en flottants Python (l'état de référence en demande des milliers)."""
+    """`saturation_adjust` of a single point, in Python floats (the reference state needs thousands of them)."""
 
     def qsat(t):
         es = 611.2 * math.exp(17.67 * (t - 273.15) / (t - 29.65))
@@ -106,8 +107,8 @@ def _adjust_point(theta_l: float, qt: float, p: float, ice: bool) -> tuple[float
 
 
 def lifting_condensation_pressure(t, qt, p):
-    """Pression (Pa) du niveau de condensation par soulèvement d'une particule non saturée (`s` et `qt` conservés,
-    dans un environnement hydrostatique de même température potentielle)."""
+    """Pressure (Pa) of the lifting condensation level of an unsaturated parcel (`s` and `qt` conserved,
+    in a hydrostatic environment of the same potential temperature)."""
     theta = t * (P00 / p) ** (RD / CP)
     lo, hi = 1.0e4, float(p)
     for _ in range(80):
@@ -120,8 +121,8 @@ def lifting_condensation_pressure(t, qt, p):
 
 
 def thermals(nx: int, ny: int, z, dx: float, *, depth: float = 800.0, amplitude: float = 0.4, seed: int = 1) -> np.ndarray:
-    """Perturbation de départ (nz, ny, nx) : des bulles de la taille des thermiques (1 à 2 fois `depth`), écart type
-    `amplitude`, au lieu d'un bruit d'une maille que la turbulence met une demi-heure à organiser."""
+    """Initial perturbation (nz, ny, nx): bubbles of the size of thermals (1 to 2 times `depth`), standard deviation
+    `amplitude`, instead of a one-cell noise that turbulence takes half an hour to organize."""
     rng = np.random.default_rng(seed)
     kx, ky = np.fft.fftfreq(nx, dx)[None, :], np.fft.fftfreq(ny, dx)[:, None]
     k = np.sqrt(kx**2 + ky**2)
@@ -134,14 +135,14 @@ def thermals(nx: int, ny: int, z, dx: float, *, depth: float = 800.0, amplitude:
 
 
 def _split(n: int) -> tuple[int, int]:
-    """Facteurs `n1 · n2 = n` les plus proches de la racine (transformée en deux passes ; `(1, n)` si n est premier)."""
+    """Factors `n1 · n2 = n` closest to the square root (two-pass transform; `(1, n)` if n is prime)."""
     n1 = max(d for d in range(1, math.isqrt(n) + 1) if n % d == 0)
     return n1, n // n1
 
 
 @dataclass
 class AtmosphereConfig:
-    """Domaine, sondage et forçages d'une `Atmosphere`. Les profils sont des fonctions de l'altitude (m)."""
+    """Domain, sounding and forcings of an `Atmosphere`. Profiles are functions of altitude (m)."""
 
     nx: int = 64
     ny: int = 64
@@ -157,29 +158,29 @@ class AtmosphereConfig:
     geostrophic_u: Profile | None = None
     geostrophic_v: Profile | None = None
     coriolis: float = 0.0
-    subsidence: Profile | None = None  # vitesse verticale de grande échelle (m/s)
+    subsidence: Profile | None = None  # large-scale vertical velocity (m/s)
     theta_tendency: Profile | None = None  # K/s (rayonnement…)
     qt_tendency: Profile | None = None  # 1/s
     surface_theta_flux: float = 0.0  # <w'θ'> en K m/s
     surface_qt_flux: float = 0.0  # <w'qt'> en m/s
     friction_velocity: float = 0.0
-    frame_u: float = 0.0  # vitesse de translation du repère (moins de diffusion numérique)
+    frame_u: float = 0.0  # translation velocity of the frame (less numerical diffusion)
     frame_v: float = 0.0
-    smagorinsky: float = 0.18  # 0 : pas de diffusion sous-maille
+    smagorinsky: float = 0.18  # 0: no subgrid diffusion
     prandtl: float = 0.3333
     rain: bool = True
-    ice: bool = False  # saturation mixte eau-glace et chute des cristaux (sans neige ni grêle)
-    sponge_depth: float = 0.0  # couche amortie sous le sommet (m)
+    ice: bool = False  # mixed water-ice saturation and falling crystals (no snow or hail)
+    sponge_depth: float = 0.0  # damping layer below the top (m)
     sponge_time: float = 100.0
-    cfl: float = 1.0  # somme des nombres de Courant des trois directions
+    cfl: float = 1.0  # sum of the Courant numbers of the three directions
     max_dt: float = 10.0
     initial: dict = field(default_factory=dict)
 
     @classmethod
     def trade_cumulus(cls, *, size: float = 6400.0, dx: float = 100.0, dz: float = 40.0, seed: int = 1) -> AtmosphereConfig:
-        """Cumulus d'alizé de type BOMEX (Siebesma et al. 2003) : couche mélangée de 520 m, inversion vers 1 500 m.
+        """BOMEX-type trade cumulus (Siebesma et al. 2003): 520 m mixed layer, inversion around 1,500 m.
 
-        Paramètres saisis de mémoire, à contrôler sur l'article ; seuls les flux de surface ont été recoupés."""
+        Parameters entered from memory, to be checked against the paper; only the surface fluxes were cross-checked."""
 
         def piecewise(x, y):
             return lambda z: np.interp(z, x, y)
@@ -211,7 +212,7 @@ class AtmosphereConfig:
 
 
 class Atmosphere:
-    """Simulation d'une atmosphère humide ; l'état reste sur GPU (`u, v, w, s, qt, qr`, plus `t, qc, b` diagnostiqués)."""
+    """Simulation of a moist atmosphere; the state stays on the GPU (`u, v, w, s, qt, qr`, plus diagnosed `t, qc, b`)."""
 
     def __init__(self, config: AtmosphereConfig | None = None, *, device: str | None = None) -> None:
         self.config = cfg = config or AtmosphereConfig()
@@ -219,7 +220,7 @@ class Atmosphere:
         self.time = 0.0
         self.steps = 0
         if not 4 <= cfg.nz <= 256:
-            raise ValueError(f"Atmosphere : nz entre 4 et 256, reçu {cfg.nz}")
+            raise ValueError(f"Atmosphere: nz between 4 and 256, got {cfg.nz}")
         self.z = (np.arange(cfg.nz) + 0.5) * cfg.dz
         self._base_state()
         n = (cfg.nz, cfg.ny, cfg.nx)
@@ -235,13 +236,13 @@ class Atmosphere:
         if init:
             theta_l = theta_l * ones + init.get("theta_l", 0.0)
             qt = qt * ones + init.get("qt", 0.0)
-        # Sans perturbation, l'air ne dépend que de l'altitude : un seul ajustement par niveau
+        # Without perturbation, the air only depends on altitude: a single adjustment per level
         t, qc = saturation_adjust(theta_l, qt, p, cfg.ice)
         self.s = self._up((t + GRAVITY / CP * z3 - LV / CP * qc - S_REF) * ones)
         self.qt = self._up(qt * ones)
         self.qr = self._up(np.zeros(n))
         self._zero = self._up(np.zeros(n))
-        self.surface_rain = self._up(np.zeros(n[1:]))  # pluie tombée au sol (mm) par colonne
+        self.surface_rain = self._up(np.zeros(n[1:]))  # rain fallen on the ground (mm) per column
         self.diagnose()
 
     # ── Mise en place ──
@@ -250,7 +251,7 @@ class Atmosphere:
         return upload_f32(np.ascontiguousarray(a, dtype=np.float32), device=self.device)
 
     def _base_state(self) -> None:
-        """État de référence hydrostatique du sondage, intégré finement puis lu aux niveaux du modèle."""
+        """Hydrostatic reference state of the sounding, integrated finely then read at the model levels."""
         cfg = self.config
         sub = 40
         zf = np.linspace(0.0, cfg.nz * cfg.dz, cfg.nz * sub + 1)
@@ -286,7 +287,7 @@ class Atmosphere:
         for col, prof in ((0, cfg.subsidence), (1, cfg.theta_tendency), (2, cfg.qt_tendency)):
             if prof is not None:
                 forcing[:, col] = prof(self.z)
-        forcing[:, 1] *= self.exner0  # K/s de température potentielle → de température
+        forcing[:, 1] *= self.exner0  # K/s of potential temperature → of temperature
         forcing[:, 3] = (cfg.geostrophic_u or cfg.u)(self.z)
         forcing[:, 4] = (cfg.geostrophic_v or cfg.v)(self.z)
         if cfg.sponge_depth > 0.0:
@@ -300,7 +301,7 @@ class Atmosphere:
         self._grid_tables()
 
     def _grid_tables(self) -> None:
-        """Tables du solveur de pression."""
+        """Tables of the pressure solver."""
         cfg = self.config
 
         def trig(n):
@@ -309,17 +310,17 @@ class Atmosphere:
 
         self._trig_x, self._trig_y = trig(cfg.nx), trig(cfg.ny)
         self._split_x, self._split_y = _split(cfg.nx), _split(cfg.ny)
-        # Colonnes : groupes de `g` threads (g divise nx), un thread par colonne
+        # Columns: groups of `g` threads (g divides nx), one thread per column
         g = max(d for d in range(1, min(cfg.nx, 128) + 1) if cfg.nx % d == 0)
         self._columns = pressure_columns(g, cfg.nz)
         self._col_tpl = self._up(np.zeros((cfg.ny, cfg.nx // g, cfg.nz, g)))
         self._eig_x = self._up((2.0 - 2.0 * np.cos(2.0 * np.pi * np.arange(cfg.nx) / cfg.nx)) / cfg.dx**2)
         self._eig_y = self._up((2.0 - 2.0 * np.cos(2.0 * np.pi * np.arange(cfg.ny) / cfg.ny)) / cfg.dy**2)
 
-    # ── Raccord avec une météo de grande échelle ──
+    # ── Coupling with a large-scale weather model ──
 
     def level_means(self) -> dict:
-        """Moyennes horizontales : `s`, `qt`, `u`, `v` (vent réel), `qc`, `qr` (attend le GPU)."""
+        """Horizontal means: `s`, `qt`, `u`, `v` (true wind), `qc`, `qr` (waits for the GPU)."""
         if getattr(self, "_tpl_means", None) is None:
             self._tpl_means = self._up(np.zeros((self.config.nz, 6)))
         m = atm_level_means(self.s, self.qt, self.u, self.v, self.qc, self.qr, self._tpl_means, device=self.device).numpy().astype(np.float64)
@@ -330,7 +331,7 @@ class Atmosphere:
         return out
 
     def offset(self, *, s=None, qt=None, u=None, v=None) -> None:
-        """Décale chaque niveau : `s`, `u`, `v` par ajout, `qt` par facteur (jamais négatif)."""
+        """Shifts each level: `s`, `u`, `v` by addition, `qt` by a factor (never negative)."""
         nz = self.config.nz
         for name, value in (("s", s), ("qt", qt), ("u", u), ("v", v)):
             if value is not None:
@@ -341,9 +342,9 @@ class Atmosphere:
         self.diagnose()
 
     def refined(self, factor: int = 2, *, noise: float = 0.05, seed: int = 1) -> Atmosphere:
-        """La même atmosphère sur une grille horizontale `factor` fois plus fine, au même instant (champs interpolés).
+        """The same atmosphere on a horizontal grid `factor` times finer, at the same instant (interpolated fields).
 
-        Un bruit de `noise` K dans le premier kilomètre aide les petits tourbillons à naître."""
+        A `noise` K noise in the first kilometre helps small eddies form."""
         from dataclasses import replace
 
         from .kernels.knest import nest_fill
@@ -375,13 +376,13 @@ class Atmosphere:
         return a
 
     def set_frame(self, frame_u: float, frame_v: float) -> None:
-        """Change la vitesse de translation du repère sans changer le vent réel."""
+        """Changes the translation velocity of the frame without changing the true wind."""
         cfg = self.config
         self.offset(u=cfg.frame_u - frame_u, v=cfg.frame_v - frame_v)
         cfg.frame_u, cfg.frame_v = float(frame_u), float(frame_v)
 
     def set_forcing(self, *, w=None, t_tendency=None, qt_tendency=None, u_tendency=None, v_tendency=None) -> None:
-        """Forçages de grande échelle par niveau : vitesse verticale (m/s), tendances de T, d'eau totale et de vent."""
+        """Large-scale forcings per level: vertical velocity (m/s), tendencies of T, total water and wind."""
         for col, value in ((0, w), (1, t_tendency), (2, qt_tendency), (5, u_tendency), (6, v_tendency)):
             if value is not None:
                 self._forcing_np[:, col] = value
@@ -389,8 +390,8 @@ class Atmosphere:
         self._forced = True
 
     def rebase(self, t, qv, qc, surface_pressure: float) -> None:
-        """Nouvel état de référence hydrostatique (profils aux niveaux du modèle). `s` et `qt` ne dépendent pas de la
-        pression : l'air garde sa température ; seules changent la pression et la densité."""
+        """New hydrostatic reference state (profiles at the model levels). `s` and `qt` do not depend on
+        pressure: the air keeps its temperature; only the pressure and density change."""
         cfg = self.config
         t, qv, qc = (np.asarray(a, dtype=np.float64) for a in (t, qv, qc))
         tv = t * (1.0 + (RV / RD - 1.0) * qv - qc)
@@ -406,13 +407,13 @@ class Atmosphere:
         self._qt_ref = self._up(qv + qc)
         self.diagnose()
 
-    # ── Un pas ──
+    # ── One step ──
 
     def diagnose(self) -> None:
-        """Température, eau nuageuse et flottabilité de l'état courant."""
+        """Temperature, cloud water and buoyancy of the current state."""
         self.t, self.qc, self.b = atm_thermo(self.s, self.qt, self.qr, self.ref, S_REF, float(self.config.ice), device=self.device)
 
-    # Points d'accroche d'une grille emboîtée (voir `NestedAtmosphere`)
+    # Hooks for a nested grid (see `NestedAtmosphere`)
     def _extra_tendencies(self, slow_v, slow_s):
         return slow_v, slow_s
 
@@ -435,30 +436,30 @@ class Atmosphere:
         return tuple(atm_project(f, a, c, inv, device=dev) for c, (f, inv) in enumerate(((u, ix), (v, iy), (w, iz))))
 
     def divergence(self) -> np.ndarray:
-        """Divergence du flux de masse (diagnostic, kg/m³/s)."""
+        """Divergence of the mass flux (diagnostic, kg/m³/s)."""
         cfg = self.config
         return atm_divergence(self.u, self.v, self.w, self.ref, 1 / cfg.dx, 1 / cfg.dy, 1 / cfg.dz, device=self.device).numpy()
 
     def stable_dt(self) -> float:
-        """Pas de temps d'après la vitesse maximale (attend le GPU)."""
+        """Time step from the maximum velocity (waits for the GPU)."""
         cfg = self.config
         if getattr(self, "_tpl_max", None) is None:
             self._tpl_max = self._up(np.zeros((cfg.nz, 3)))
         top = atm_level_max(self.u, self.v, self.w, self._tpl_max, device=self.device).numpy().max(axis=0)
         if not np.isfinite(top).all():
-            raise FloatingPointError("Atmosphere : la simulation a divergé (vent infini)")
+            raise FloatingPointError("Atmosphere: the simulation diverged (infinite wind)")
         rate = sum(float(m) / d for m, d in zip(top, (cfg.dx, cfg.dy, cfg.dz)))
         return min(cfg.max_dt, cfg.cfl / max(rate, 1e-6))
 
     def step(self, dt: float) -> None:
-        """Avance l'état de `dt` secondes."""
+        """Advances the state by `dt` seconds."""
         with gs.batch(self.device):
             for _ in self._parts(dt):
                 pass
 
     def step_parts(self, dt: float):
-        """Le même pas en morceaux (générateur) : un jeu en soumet un par image pour éviter les saccades. L'état visible
-        ne change qu'au dernier morceau."""
+        """The same step in pieces (a generator): a game submits one per frame to avoid stutter. The visible state
+        only changes at the last piece."""
         parts = self._parts(dt)
         while True:
             with gs.batch(self.device):
@@ -472,7 +473,7 @@ class Atmosphere:
         inv = (1.0 / cfg.dx, 1.0 / cfg.dy, 1.0 / cfg.dz)
         dt = float(dt)
         vel0, sca0 = (self.u, self.v, self.w), (self.s, self.qt, self.qr)
-        # Tendances lentes, évaluées une fois par pas
+        # Slow tendencies, evaluated once per step
         slow_v = [self._zero] * 3
         slow_s = [self._zero] * 3
         if cfg.smagorinsky > 0.0 or cfg.surface_theta_flux or cfg.surface_qt_flux or cfg.friction_velocity:
@@ -528,13 +529,13 @@ class Atmosphere:
             self.qt, rain, _ = atm_kessler(self.qt, self.qr, qc, t, self.ref, dt, float(cfg.ice), device=dev)
             self.surface_rain = atm_surface_rain(self.surface_rain, rain, self.ref, dt, inv[2], device=dev)
             fallen = atm_sediment(rain, self.ref, dt, inv[2], device=dev)
-            # La pluie emporte l'énergie `-L qr / cp` qu'elle porte dans `s`
+            # Rain carries away the energy `-L qr / cp` it holds in `s`
             minus = atm_axpy(self._zero, fallen, atm_axpy(self._zero, rain, self._zero, -1.0, device=dev), 1.0, device=dev)
             self.s = atm_axpy(self.s, minus, self._zero, -LV / CP, device=dev)
             self.qr = fallen
             self.s, self.qt, self.qr = self._bound_scalars([self.s, self.qt, self.qr])
         if cfg.ice:
-            # Les cristaux emportent l'énergie `-L qc / cp` qu'ils portent dans `s`
+            # Crystals carry away the energy `-L qc / cp` they hold in `s`
             change = atm_ice_fall(qc, t, self.ref, dt, inv[2], device=dev)
             self.qt = atm_add(self.qt, change, device=dev)
             self.s = atm_axpy(self.s, change, self._zero, -LV / CP, device=dev)
@@ -544,7 +545,7 @@ class Atmosphere:
         self.steps += 1
 
     def run(self, seconds: float, *, every: int = 10) -> None:
-        """Avance de `seconds` ; le pas est réévalué tous les `every` pas."""
+        """Advances by `seconds`; the step is re-evaluated every `every` steps."""
         end = self.time + seconds
         dt = self.stable_dt()
         k = 0

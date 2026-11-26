@@ -1,4 +1,4 @@
-// GPUsync — menu sur téléphone, copie des blocs de code, thème clair / sombre.
+// GPUsync — phone menu, code block copy, light / dark theme.
 (function () {
   var root = document.documentElement;
 
@@ -31,7 +31,7 @@
     function showTheme() {
       if (!theme) return;
       theme.querySelector(".icon").textContent = dark() ? "light_mode" : "dark_mode";
-      theme.setAttribute("aria-label", dark() ? "Thème clair" : "Thème sombre");
+      theme.setAttribute("aria-label", dark() ? "Light theme" : "Dark theme");
     }
     if (theme) {
       showTheme();
@@ -47,8 +47,8 @@
       btn.addEventListener("click", function () {
         var code = btn.closest(".code").querySelector("pre").innerText;
         var done = function () {
-          btn.textContent = "Copié";
-          setTimeout(function () { btn.textContent = "Copier"; }, 1500);
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = "Copy"; }, 1500);
         };
         if (navigator.clipboard) navigator.clipboard.writeText(code).then(done, function () {});
       });

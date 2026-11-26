@@ -1,12 +1,12 @@
-//! Backend wgpu : Metal (macOS), Vulkan et DX12 (Windows, Linux).
+//! wgpu backend: Metal (macOS), Vulkan and DX12 (Windows, Linux).
 //!
-//! Un même GPU apparaît souvent via plusieurs API (Vulkan et DX12 sous Windows) : on n'en garde
-//! qu'une entrée par GPU physique, dans l'ordre de préférence Metal > Vulkan > DX12.
-//! Les adaptateurs logiciels (CPU) sont ignorés : le CPU passe par OpenCL (POCL) ou l'interpréteur.
+//! The same GPU often shows up through several APIs (Vulkan and DX12 on Windows): only
+//! one entry per physical GPU is kept, in order of preference Metal > Vulkan > DX12.
+//! Software adapters (CPU) are ignored: the CPU goes through OpenCL (POCL) or the interpreter.
 //!
-//! f64 : disponible en Vulkan quand l'adaptateur a `SHADER_F64` (extension de naga), mais **sans les
-//! fonctions transcendantes** (mesuré sur la RTX 4080 SUPER : exp calculé en précision f32, log qui fait
-//! planter le pilote) : `f64_math` vaut toujours `false` ici.
+//! f64: available with Vulkan when the adapter has `SHADER_F64` (a naga extension), but **without
+//! transcendental functions** (measured on the RTX 4080 SUPER: exp computed at f32 precision, log crashing
+//! the driver): `f64_math` is always `false` here.
 
 mod exec;
 mod window;
@@ -20,11 +20,11 @@ use gpusync_runtime::{Backend, BackendError, DeviceInfo, DeviceKind};
 
 pub struct WgpuBackend;
 
-/// Instance et adaptateurs, créés une fois : l'index de `DeviceInfo` désigne un adaptateur stable.
+/// Instance and adapters, created once: the index of `DeviceInfo` names a stable adapter.
 pub(crate) struct State {
     pub instance: wgpu::Instance,
     pub adapters: Vec<wgpu::Adapter>,
-    /// (index dans `adapters`, description), dans l'ordre exposé.
+    /// (index in `adapters`, description), in exposed order.
     pub devices: Vec<(usize, DeviceInfo)>,
 }
 
@@ -40,7 +40,7 @@ pub(crate) fn state() -> Result<&'static State, BackendError> {
             });
             let adapters = pollster::block_on(instance.enumerate_adapters(backends));
             if adapters.is_empty() {
-                return Err("aucun adaptateur Metal, Vulkan ou DX12".into());
+                return Err("no Metal, Vulkan or DX12 adapter".into());
             }
             let candidates = adapters
                 .iter()
@@ -67,7 +67,7 @@ impl Backend for WgpuBackend {
     }
 }
 
-/// Ce que wgpu nous apprend d'un adaptateur (séparé de wgpu pour tester le tri sans GPU).
+/// What wgpu tells us about an adapter (kept apart from wgpu to test the sorting without a GPU).
 #[derive(Debug, Clone)]
 struct Candidate {
     adapter: usize,
@@ -114,7 +114,7 @@ fn candidate(i: usize, a: &wgpu::Adapter) -> Option<Candidate> {
         driver,
         f64: info.backend == wgpu::Backend::Vulkan
             && a.features().contains(wgpu::Features::SHADER_F64),
-        // Entiers 64 bits en WGSL : extension native (Vulkan, DX12, Metal avec MSL 2.3+).
+        // 64-bit integers in WGSL: native extension (Vulkan, DX12, Metal with MSL 2.3+).
         int64: a.features().contains(wgpu::Features::SHADER_INT64),
         max_buffer_bytes: a
             .limits()
@@ -137,10 +137,10 @@ fn api_rank(api: &str) -> u8 {
     }
 }
 
-/// Garde un adaptateur par GPU physique (API préférée), ignore le CPU, numérote par API.
+/// Keeps one adapter per physical GPU (preferred API), ignores the CPU, numbers per API.
 fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
     candidates.retain(|c| c.kind != DeviceKind::Cpu);
-    // Ordre stable : API préférée, puis GPU dédiés avant intégrés, puis nom.
+    // Stable order: preferred API, then discrete GPUs before integrated ones, then name.
     candidates.sort_by(|a, b| {
         (api_rank(a.api), a.kind.rank(), &a.name).cmp(&(api_rank(b.api), b.kind.rank(), &b.name))
     });
@@ -148,7 +148,7 @@ fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
     let mut out: Vec<(usize, DeviceInfo)> = Vec::new();
     for c in candidates {
         let key = (c.vendor_id, c.device_id, c.name.to_lowercase());
-        // Certains drivers rapportent des identifiants nuls : le nom départage alors.
+        // Some drivers report null identifiers: the name then decides.
         let duplicate = seen
             .iter()
             .any(|k| (k.0 == key.0 && k.1 == key.1 && key.1 != 0) || k.2 == key.2);
@@ -157,7 +157,7 @@ fn select(mut candidates: Vec<Candidate>) -> Vec<(usize, DeviceInfo)> {
         }
         seen.push(key);
         let index = out.iter().filter(|(_, d)| d.backend == c.api).count();
-        // Metal ne rapporte ni fabricant ni driver : seul Apple fournit Metal.
+        // Metal reports neither vendor nor driver: only Apple provides Metal.
         let vendor = match (vendor_name(c.vendor_id), c.api) {
             ("", "metal") => "Apple",
             (v, _) => v,
@@ -258,7 +258,7 @@ mod tests {
         assert!(devs[1].1.unified_memory && !devs[0].1.unified_memory);
         assert!(
             devs[0].1.f64 && !devs[0].1.f64_math,
-            "f64 Vulkan sans fonctions transcendantes"
+            "f64 Vulkan without transcendental functions"
         );
     }
 

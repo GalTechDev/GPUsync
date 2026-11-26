@@ -1,5 +1,5 @@
-//! Test différentiel : le kernel `sample` (vrai AST Python, tests/fixtures/sample.json) est exécuté
-//! sur chaque périphérique présent et comparé à l'interpréteur de référence.
+//! Differential test: the `sample` kernel (real Python AST, tests/fixtures/sample.json) runs
+//! on every available device and is compared with the reference interpreter.
 
 use gpusync_core::{Device, Input, compile, launch, parse};
 use gpusync_ir::{Const, Scalar};
@@ -30,16 +30,16 @@ fn all_device_ids() -> Vec<String> {
 fn frontend_local_types() {
     let k = parse(SAMPLE).unwrap();
     let ty = |n: &str| k.locals.iter().find(|l| l.name == n).unwrap().ty;
-    assert_eq!(ty("acc"), Scalar::F32, "acc = 0 puis acc += x*m → f32");
+    assert_eq!(ty("acc"), Scalar::F32, "acc = 0 then acc += x*m → f32");
     assert_eq!(ty("i"), Scalar::I32);
     assert_eq!(ty("y"), Scalar::F32);
-    assert!(!k.requirements().f64, "aucune promotion implicite vers f64");
+    assert!(!k.requirements().f64, "no implicit promotion to f64");
 }
 
 #[test]
 fn same_result_on_all_devices() {
     let k = parse(SAMPLE).unwrap();
-    let n = 10_007; // pas un multiple de la taille de groupe
+    let n = 10_007; // not a multiple of the group size
     let x: Vec<f32> = (0..n).map(|i| -5.0 + 10.0 * i as f32 / n as f32).collect();
     let kk: Vec<i32> = (0..n as i32).map(|i| i - n as i32 / 2).collect();
     let xb: Vec<u8> = x.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -72,7 +72,7 @@ fn same_result_on_all_devices() {
                 assert_eq!(
                     arr.host_ptr(),
                     Some(out.as_mut_ptr()),
-                    "{id} : la sortie devrait être en zéro-copie"
+                    "{id}: the output should be zero-copy"
                 );
             }
             arr.read_into(out.as_mut_ptr()).unwrap();
@@ -89,11 +89,11 @@ fn same_result_on_all_devices() {
             worst = worst.max(d / b.abs().max(1.0));
             assert!(
                 d <= tol,
-                "{id} : élément {i} (x = {}, k = {}) : {a} au lieu de {b}",
+                "{id}: element {i} (x = {}, k = {}): {a} instead of {b}",
                 x[i],
                 kk[i]
             );
         }
-        eprintln!("{id:<10} OK — écart relatif max {worst:.2e}");
+        eprintln!("{id:<10} OK — max relative error {worst:.2e}");
     }
 }

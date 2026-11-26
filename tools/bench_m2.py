@@ -1,9 +1,9 @@
-"""Jalon M2 : temps du DTW (kernel avec index, tableaux locaux) sur chaque périphérique.
+"""Milestone M2: DTW time (indexed kernel, local arrays) on every device.
 
-    python tools/dev.py run tools/bench_m2.py [n_series longueur]
+    python tools/dev.py run tools/bench_m2.py [n_series length]
 
-Mesure à chaud (kernel déjà compilé), résultat lu sur l'hôte ; vérifie l'accord avec cpu:0 sur
-un échantillon de lignes.
+Warm measurement (kernel already compiled), result read on the host; checks agreement with cpu:0 on
+a sample of rows.
 """
 
 import sys
@@ -19,7 +19,7 @@ from test_index import dtw, dtw_ref  # noqa: E402
 
 
 def bench(x, w=5, repeat=3):
-    print(f"DTW {x.shape[0]}×{x.shape[0]} paires, séries de {x.shape[1]}, fenêtre {w}")
+    print(f"DTW {x.shape[0]}×{x.shape[0]} pairs, series of {x.shape[1]}, window {w}")
     ref = dtw_ref(x[:8], w)
     for d in gs.devices():
         if d.id == "cpu:0" and x.shape[0] > 400:
@@ -33,13 +33,13 @@ def bench(x, w=5, repeat=3):
                 best = min(best, time.perf_counter() - t0)
         except gs.GpusyncError as e:
             print(f"  {d.id:10} {type(e).__name__} : {e}")
-            # Le périphérique doit rester utilisable après l'erreur (rouvert si perdu).
+            # The device must stay usable after the error (reopened if lost).
             check = np.asarray(dtw(x[:8], w, device=d.id))
-            print(f"  {d.id:10} après l'erreur : petit appel {'correct' if np.allclose(check, ref, atol=1e-5) else 'FAUX'}")
+            print(f"  {d.id:10} after the error: small call {'correct' if np.allclose(check, ref, atol=1e-5) else 'WRONG'}")
             continue
         err = np.abs(y[:8, :8] - ref).max()
         pairs = x.shape[0] ** 2 / best / 1e6
-        print(f"  {d.id:10} {best * 1000:9.1f} ms  {pairs:8.2f} M paires/s  écart {err:.1e}")
+        print(f"  {d.id:10} {best * 1000:9.1f} ms  {pairs:8.2f} M pairs/s  difference {err:.1e}")
 
 
 if __name__ == "__main__":
