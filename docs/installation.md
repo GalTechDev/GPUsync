@@ -1,9 +1,23 @@
 # Installation
 
-GPUsync is not on PyPI yet: you build it from the repository. The build produces a native module
-(`gpusync._core`, written in Rust) and installs the Python package in editable mode.
+```bash
+pip install gpusync              # the library
+pip install gpusync-gfx          # optional: the graphics and simulation engine
+```
 
-## Requirements
+Precompiled wheels exist for Windows x64, macOS (Apple Silicon and Intel) and Linux x86_64 / aarch64
+(glibc ≥ 2.28), for every Python ≥ 3.10: no Rust or C compiler is needed. The only runtime dependency is NumPy
+≥ 1.22. No GPU SDK is needed either: drivers (CUDA, OpenCL, Metal, Vulkan, DX12) are loaded at startup when
+present, and a missing one only disables the matching backend.
+
+On another platform, pip builds from the source archive, which requires the tools below.
+
+## From source
+
+To work on GPUsync, build it from the repository. The build produces a native module (`gpusync._core`, written in
+Rust) and installs the Python package in editable mode.
+
+### Requirements
 
 | | macOS | Windows | Linux |
 |---|---|---|---|
@@ -14,7 +28,7 @@ GPUsync is not on PyPI yet: you build it from the repository. The build produces
 No GPU library is needed to build: drivers (OpenCL, CUDA) are loaded at startup when present, and a missing one
 only disables the matching backend.
 
-## Build
+### Build
 
 ```bash
 python3 tools/dev.py setup      # creates .venv, installs maturin, pytest, NumPy, then builds

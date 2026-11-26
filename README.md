@@ -3,6 +3,10 @@
 Write GPU kernels in Python and run them on any GPU: CUDA, Metal, Vulkan, DX12 (through wgpu) and OpenCL ≥ 1.2.
 The core is written in Rust; the only runtime dependency is NumPy.
 
+```bash
+pip install gpusync
+```
+
 ```python
 import numpy as np
 import gpusync as gs
@@ -45,7 +49,7 @@ package, [gpusync-gfx](gfx/README.md), installed on top of the library.
 
 ## Status
 
-Version 0.1, not on PyPI yet. Tested on macOS (Apple M5 Pro: Metal, OpenCL) and Windows (RTX 4080 SUPER and Intel
+Version 0.1. Tested on macOS (Apple M5 Pro: Metal, OpenCL) and Windows (RTX 4080 SUPER and Intel
 UHD 770: CUDA, Vulkan, OpenCL); Linux is built by the CI but not tested on a GPU yet.
 
 ## Development

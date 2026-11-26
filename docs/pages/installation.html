@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Installation — GPUsync</title>
-<meta name="description" content="GPUsync is not on PyPI yet: you build it from the repository. The build produces a native module (gpusync._core, written in Rust) and installs the Python package in editable mode.">
+<meta name="description" content="">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap">
@@ -41,10 +41,16 @@
 <a class="btn" href="https://github.com/GalTechDev/GPUsync/tree/new-rust"><span class="label">GitHub</span><span class="icon">terminal</span></a>
 </header>
 <main class="content">
-<article class="doc"><h2 class="lead-title">Installation</h2><p class="lead">GPUsync is not on PyPI yet: you build it from the repository. The build produces a native module (<code>gpusync._core</code>, written in Rust) and installs the Python package in editable mode.</p><hr class="rule"><h2 id="requirements"><a class="anchor" href="#requirements" aria-hidden="true">#</a>Requirements</h2>
+<article class="doc"><h2 class="lead-title">Installation</h2><hr class="rule"><div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>pip install gpusync              <span class="tk-com"># the library</span>
+pip install gpusync-gfx          <span class="tk-com"># optional: the graphics and simulation engine</span></code></pre></div>
+<p>Precompiled wheels exist for Windows x64, macOS (Apple Silicon and Intel) and Linux x86_64 / aarch64 (glibc ≥ 2.28), for every Python ≥ 3.10: no Rust or C compiler is needed. The only runtime dependency is NumPy ≥ 1.22. No GPU SDK is needed either: drivers (CUDA, OpenCL, Metal, Vulkan, DX12) are loaded at startup when present, and a missing one only disables the matching backend.</p>
+<p>On another platform, pip builds from the source archive, which requires the tools below.</p>
+<h2 id="from-source"><a class="anchor" href="#from-source" aria-hidden="true">#</a>From source</h2>
+<p>To work on GPUsync, build it from the repository. The build produces a native module (<code>gpusync._core</code>, written in Rust) and installs the Python package in editable mode.</p>
+<h3 id="requirements"><a class="anchor" href="#requirements" aria-hidden="true">#</a>Requirements</h3>
 <div class="table-wrap"><table><thead><tr><th></th><th>macOS</th><th>Windows</th><th>Linux</th></tr></thead><tbody><tr><td>Rust</td><td><code>rustup</code></td><td><code>rustup</code></td><td><code>rustup</code></td></tr><tr><td>Python</td><td>≥ 3.10</td><td>≥ 3.10</td><td>≥ 3.10</td></tr><tr><td>C compiler</td><td>Xcode Command Line Tools</td><td>Visual Studio Build Tools, "C++" workload</td><td><code>gcc</code> or <code>clang</code></td></tr></tbody></table></div>
 <p>No GPU library is needed to build: drivers (OpenCL, CUDA) are loaded at startup when present, and a missing one only disables the matching backend.</p>
-<h2 id="build"><a class="anchor" href="#build" aria-hidden="true">#</a>Build</h2>
+<h3 id="build"><a class="anchor" href="#build" aria-hidden="true">#</a>Build</h3>
 <div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>python3 tools/dev.py setup      <span class="tk-com"># creates .venv, installs maturin, pytest, NumPy, then builds</span></code></pre></div>
 <p>After changing Rust code:</p>
 <div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>python3 tools/dev.py build      <span class="tk-com"># rebuilds the extension in .venv</span>
@@ -90,7 +96,7 @@ Default device: Device('Apple M5 Pro', backend='metal', f64=False, unified_memor
 <h2 id="tests"><a class="anchor" href="#tests" aria-hidden="true">#</a>Tests</h2>
 <div class="code"><div class="code-head"><span>Terminal</span><span class="spacer"></span><button class="copy" type="button">Copy</button></div><pre><code>python3 tools/dev.py test</code></pre></div>
 <p>Differential tests run each kernel on every device of the machine and compare the results with the interpreter. <code>GS_EXPECT=metal,opencl</code> (or <code>vulkan,opencl</code>…) makes the suite fail if one of these backends has no device, so that nothing is believed tested when it is not. The engine tests (<code>gfx/tests</code>) run with the others when the engine is installed, and are skipped otherwise.</p><nav class="pager"><a class="next" href="kernels.html"><span class="dir">Next →</span><span class="name">Writing a kernel</span></a></nav></article>
-<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#requirements">Requirements</a><a href="#build">Build</a><a href="#check-what-is-detected">Check what is detected</a><a href="#backends">Backends</a><a href="#environment-variables">Environment variables</a><a href="#tests">Tests</a></aside>
+<aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#from-source">From source</a><a href="#check-what-is-detected">Check what is detected</a><a href="#backends">Backends</a><a href="#environment-variables">Environment variables</a><a href="#tests">Tests</a></aside>
 </main>
 <footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
 </div>
