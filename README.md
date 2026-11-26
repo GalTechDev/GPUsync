@@ -4,6 +4,12 @@
 et OpenCL ≥ 1.2. Réécriture en Rust du prototype Python ; la conception est décrite dans
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
+**Documentation** : [docs/](docs/README.md) (installation, écrire un kernel, résultats et gros volumes,
+périphériques, atomiques, groupes de threads, fenêtre, erreurs, référence).
+
+Le moteur graphique et de simulation `gpusync.gfx` (rendu 2D / 3D, fluides, atmosphère, météo) est un paquet à
+part, [gpusync-gfx](gfx/README.md), qui s'installe en plus de la bibliothèque.
+
 **État : jalon M6** — kernels élément par élément, kernels avec index (dimensions nommées, plusieurs
 sorties, tableaux locaux) et mode explicite (opérations atomiques), sans limite de taille, sur le
 périphérique le plus adapté.
@@ -186,7 +192,9 @@ crates/
   gpusync-backend-cuda/     CUDA (driver et NVRTC chargés dynamiquement) : découverte et exécution
   gpusync-core/             compilation + lancement (sans Python) ; test différentiel multi-GPU
   gpusync-py/               liaison PyO3 → module gpusync._core
-python/gpusync/             package Python : @gs.kernel, gs.Array, types, périphériques
+python/gpusync/             package Python : @gs.kernel, gs.Array, types, périphériques, gs.Window
+gfx/                        paquet gpusync-gfx : moteur graphique gpusync.gfx, ses tests (gfx/tests)
+docs/                       documentation de la bibliothèque (exemples vérifiés par tests/test_docs.py)
 tests/                      tests Python (différentiels sur chaque périphérique, erreurs)
 tools/dev.py                tâches de développement multi-plateformes
 tools/bench_m1.py           mesures du jalon M1

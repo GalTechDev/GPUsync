@@ -584,7 +584,7 @@ z = other(normalize(x, 0.0, 1.0))   # chaînage : rien ne repasse par la RAM
 
 Le même code fonctionne à l'identique dans un script, dans Jupyter et dans du code async.
 
-**Règle d'utilisation :** un tableau NumPy passé à un kernel ne doit pas être modifié tant que le résultat n'a pas été lu (ou attendu). Sur mémoire unifiée, le GPU lit directement cette mémoire : la modifier pendant le calcul change le résultat. CUDA impose la même règle. `gs.debug()` la vérifie (somme de contrôle de l'entrée avant et après le kernel).
+**Règle d'utilisation :** un tableau NumPy passé à un kernel ne doit pas être modifié tant que le résultat n'a pas été lu (ou attendu). Sur mémoire unifiée, le GPU lit directement cette mémoire : la modifier pendant le calcul change le résultat. CUDA impose la même règle.
 
 ### 4.7 Out-of-core
 
@@ -628,8 +628,8 @@ exige (§6.2) et ce que le matériel sait faire. L'utilisateur n'a jamais à cho
 | 2 | GPU intégré | Metal (Mac) ; sinon OpenCL → Vulkan | zéro-copie : Metal `NoCopy`, OpenCL `USE_HOST_PTR` |
 | 3 | CPU | OpenCL (POCL) → `cpu:0` | dernier recours |
 
-3. Si seul `cpu:0` convient (ex. f64 avec `exp` sur un Mac), le calcul s'y fait, avec un avertissement
-   `gs.PerformanceWarning` émis une fois par kernel : le résultat est correct, mais lent.
+3. Si seul `cpu:0` convient (ex. f64 avec `exp` sur un Mac), le calcul s'y fait, et le
+   `gs.CompatibilityWarning` (ci-dessous) précise que le résultat est correct, mais lent.
 
 #### Opération indisponible : option `compat`
 
@@ -671,11 +671,13 @@ Le backend « CPU » est l'interpréteur de l'IR (lent, toujours disponible) ; P
 ```python
 pairwise_dist.source("opencl")     # code généré pour une cible
 pairwise_dist.source("wgsl")
-pairwise_dist.ir()                 # IR lisible
+pairwise_dist.source("ir")         # IR lisible
 
-with gs.debug():                   # exécution par l'interpréteur de l'IR
-    pairwise_dist(series[:10])     # exceptions Python, index hors bornes avec la valeur de (i, j)
+pairwise_dist(series[:10], device="cpu")   # exécution par l'interpréteur de l'IR, pour comparer
 ```
+
+(Un mode `gs.debug()` et un `gs.PerformanceWarning` étaient prévus ici ; abandonnés le 26/11/2026 : l'exécution
+sur `cpu:0` et le `gs.CompatibilityWarning` couvrent ces besoins.)
 
 ### 4.10 Erreurs
 
@@ -844,7 +846,7 @@ Comparées aux capacités du périphérique **avant** la génération de code �
 
 `gpusync-ir` contient un interpréteur de l'IR (séquentiel, en Rust). Il sert :
 - d'**oracle de tests** pour tous les backends ;
-- de mode `gs.debug()` (vérification des bornes, valeur de l'index fautif) ;
+- de référence pour déboguer un kernel (`device="cpu"`) ;
 - de backend « CPU » de secours toujours disponible.
 
 ---
