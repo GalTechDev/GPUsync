@@ -1,0 +1,107 @@
+name: Publish to PyPI
+
+# Publishing a GitHub release sends gpusync (one wheel per system + sources) and gpusync-gfx to PyPI.
+# Trusted publishing, one GitHub environment per PyPI project: `pypi` for gpusync, `pypi-gfx` for gpusync-gfx.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # re-run by hand on a release tag (files already on PyPI are skipped)
+
+jobs:
+  wheels:
+    name: Wheel ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          - { os: macos-latest, target: aarch64 }
+          - { os: macos-15-intel, target: x86_64 }
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist
+      - name: The wheel installs and finds its devices
+        shell: bash
+        run: |
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP" && python -m gpusync
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpusync-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
+
+  sources:
+    name: Sources (gpusync) and gpusync-gfx
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build gpusync sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Build gpusync-gfx wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --outdir dist-gfx gfx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpusync-sdist
+          path: dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpusync-gfx
+          path: dist-gfx/*
+
+  publish:
+    name: Publish gpusync
+    needs: [wheels, sources]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gpusync-*
+          path: dist/
+          merge-multiple: true
+      - name: Keep only gpusync files
+        run: rm -f dist/gpusync_gfx-*
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  publish-gfx:
+    name: Publish gpusync-gfx
+    needs: [publish]
+    runs-on: ubuntu-latest
+    environment: pypi-gfx
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gpusync-gfx
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

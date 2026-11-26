@@ -3,15 +3,13 @@
 # interpreter (and through Metal on macOS when it is exposed); the full GPU tests stay on the test machines
 # (tools/remote).
 #
-# Publishing to PyPI: only when pushing a `v*` tag, and only after declaring this repository as a
-# "trusted publisher" of the gpusync and gpusync-gfx projects on pypi.org (GitHub environment `pypi`).
+# Publishing to PyPI is done by publish.yml, when a GitHub release is published.
 
 name: CI
 
 on:
   push:
     branches: [main, new-rust]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -117,18 +115,3 @@ jobs:
         with:
           name: sdist-and-gfx
           path: dist/*
-
-  publish:
-    name: Publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, gfx, wheels, sdist]
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # trusted publishing: no PyPI token stored in the repository
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1
