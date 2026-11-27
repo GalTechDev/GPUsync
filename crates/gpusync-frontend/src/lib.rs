@@ -1853,11 +1853,11 @@ impl Lowerer<'_> {
                     {
                         Scalar::Bool
                     } else {
-                        self.unify(&left, &right, "comparaison")?
+                        self.unify(&left, &right, "comparison")?
                     };
                     let (a, b) = (
-                        self.to_ty(left, ty, "comparaison")?,
-                        self.to_ty(right.clone(), ty, "comparaison")?,
+                        self.to_ty(left, ty, "comparison")?,
+                        self.to_ty(right.clone(), ty, "comparison")?,
                     );
                     let c = ex(
                         Scalar::Bool,
@@ -1873,7 +1873,7 @@ impl Lowerer<'_> {
                     left = right;
                 }
                 Ok(Val::E(acc.ok_or_else(|| {
-                    self.e(ErrorKind::Syntax, "comparaison vide")
+                    self.e(ErrorKind::Syntax, "empty comparison")
                 })?))
             }
             "IfExp" => {
@@ -1886,8 +1886,8 @@ impl Lowerer<'_> {
                     self.unify(&a, &b, "a if c else b")?
                 };
                 let (a, b) = (
-                    self.to_ty(a, ty, "ternaire")?,
-                    self.to_ty(b, ty, "ternaire")?,
+                    self.to_ty(a, ty, "conditional expression")?,
+                    self.to_ty(b, ty, "conditional expression")?,
                 );
                 Ok(Val::E(ex(
                     ty,

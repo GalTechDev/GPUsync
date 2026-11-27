@@ -91,7 +91,7 @@ def test_more_than_2_31_elements(dev):
         y = np.asarray(last(x, device=dev))
     except gs.UnsupportedFeature as e:  # does not fit whole on this device: clear refusal
         assert "so it must" in str(e) or "fit whole" in str(e), e
-        pytest.skip(f"{dev} : {str(e)[:80]}")
+        pytest.skip(f"{dev}: {str(e)[:80]}")
     finally:
         gs.set_memory_budget(None)
     np.testing.assert_array_equal(y[:4], np.arange(n - 1, n - 5, -1, dtype=np.float32))

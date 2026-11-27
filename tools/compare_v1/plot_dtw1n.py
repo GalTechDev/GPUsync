@@ -97,7 +97,7 @@ for ax, (title, v1_key, v2s, ref_key, names) in zip(axes, panels):
     ax.tick_params(colors=INK2)
     ax.legend(loc="upper left", frameon=False, fontsize=10, labelcolor=INK)
 
-fig.suptitle("DTW 1 contre N : prototype Python contre GPUsync Rust", x=0.01, ha="left", fontsize=15,
+fig.suptitle("DTW 1 vs N: Python prototype vs GPUsync Rust", x=0.01, ha="left", fontsize=15,
              color=INK, fontweight="bold")
 fig.text(0.01, 0.005,
          "Series of 30 points padded to 32, no window (the prototype's DTW benchmark). Prototype: its best "

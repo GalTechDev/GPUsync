@@ -66,7 +66,7 @@ def test_compile_errors(src, exc, fragments, tmp_path):
     msg = compile_error(src, tmp_path, exc)
     assert "kernel 'k'" in msg
     for f in fragments:
-        assert f in msg, f"« {f} » absent de : {msg}"
+        assert f in msg, f"{f!r} missing from: {msg}"
 
 
 @gs.kernel

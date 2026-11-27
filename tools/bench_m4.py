@@ -34,7 +34,7 @@ def main():
             continue
         runs = [subprocess.run([sys.executable, "-c", CHILD, d.id], capture_output=True, text=True) for _ in range(2)]
         if any(r.returncode for r in runs):
-            print(f"  {d.id:10} erreur : {runs[0].stderr.strip()[-300:]}")
+            print(f"  {d.id:10} error: {runs[0].stderr.strip()[-300:]}")
             continue
         (imp, cold, warm), (_, cold2, _) = (r.stdout.split() for r in runs)
         print(f"  {d.id:10} {imp:>10} ms {cold:>14} ms {warm:>14} ms {cold2:>14} ms")

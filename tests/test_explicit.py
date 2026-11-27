@@ -193,7 +193,7 @@ ERRORS = [
 def test_errors(src, fragments, tmp_path):
     msg = compile_error(src, tmp_path)
     for f in fragments:
-        assert f in msg, f"« {f} » absent de : {msg}"
+        assert f in msg, f"{f!r} missing from: {msg}"
 
 
 def test_unknown_output_dimension():

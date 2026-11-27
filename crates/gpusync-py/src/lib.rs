@@ -146,7 +146,7 @@ impl PyBackendStatus {
                 self.name,
                 self.devices.len()
             ),
-            Some(e) => format!("BackendStatus('{}', indisponible : {e})", self.name),
+            Some(e) => format!("BackendStatus('{}', unavailable: {e})", self.name),
         }
     }
 }

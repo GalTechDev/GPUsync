@@ -102,7 +102,7 @@ class LocalClouds:
         """Fine grid (`NestedAtmosphere`) around the player, inside the tile; it follows the player in jumps. Over the
         whole height of the tile: `dz` must divide `top`. Only after `refine`."""
         if self.refinable:
-            raise RuntimeError("LocalClouds.add_nest : affiner d'abord (refine)")
+            raise RuntimeError("LocalClouds.add_nest: call refine() first")
         self._nest_args = dict(size=size, dx=dx, dz=dz)
         x, y, _ = self.camera_position()
         self.nest = NestedAtmosphere(self.atmosphere, size=size, dx=dx, dz=dz, center=(x, y))

@@ -684,7 +684,7 @@ impl CuDevice {
     pub fn finish(&self) -> Result<(), BackendError> {
         self.bind()?;
         self.d
-            .check(unsafe { (self.d.cuCtxSynchronize)() }, "synchronisation")
+            .check(unsafe { (self.d.cuCtxSynchronize)() }, "synchronization")
     }
 }
 

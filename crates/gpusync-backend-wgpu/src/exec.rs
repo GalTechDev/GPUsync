@@ -185,7 +185,7 @@ impl BufPool {
 static OPEN: OnceLock<Mutex<HashMap<String, Arc<WgDevice>>>> = OnceLock::new();
 
 fn err(what: &str, e: impl std::fmt::Display) -> BackendError {
-    BackendError(format!("wgpu : {what} ({e})"))
+    BackendError(format!("wgpu: {what} ({e})"))
 }
 
 /// Size aligned to 4 bytes (a wgpu copy constraint), never zero.
@@ -382,7 +382,7 @@ impl WgDevice {
         let lost: Arc<Mutex<Option<String>>> = Arc::default();
         let flag = lost.clone();
         device.set_device_lost_callback(move |reason, msg| {
-            *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{reason:?} : {msg}"));
+            *flag.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("{reason:?}: {msg}"));
         });
         let d = Arc::new(WgDevice {
             info: info.clone(),

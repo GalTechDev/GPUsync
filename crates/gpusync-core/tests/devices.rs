@@ -46,7 +46,7 @@ fn same_result_on_all_devices() {
     let kb: Vec<u8> = kk.iter().flat_map(|v| v.to_ne_bytes()).collect();
     let run = |id: &str| -> Vec<f32> {
         let dev = Device::open(id).unwrap();
-        let c = compile(&dev, &k).unwrap_or_else(|e| panic!("{id} : {e}"));
+        let c = compile(&dev, &k).unwrap_or_else(|e| panic!("{id}: {e}"));
         let mut out = vec![0u8; n * 4];
         unsafe {
             let mut arrs = launch(
@@ -66,7 +66,7 @@ fn same_result_on_all_devices() {
                 n,
                 &[out.as_mut_ptr()],
             )
-            .unwrap_or_else(|e| panic!("{id} : {e}"));
+            .unwrap_or_else(|e| panic!("{id}: {e}"));
             let arr = arrs.pop().unwrap();
             if dev.zero_copy() {
                 assert_eq!(

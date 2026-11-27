@@ -80,11 +80,11 @@ def main():
 
 def report(v1, v2, b1, b2):
     if True:
-        print(f"\n## {v2.get('device', b2)} — prototype ({b1}) contre Rust ({b2})\n")
+        print(f"\n## {v2.get('device', b2)} — prototype ({b1}) vs Rust ({b2})\n")
         for r in (v1, v2):
             errs = {k: v for k, v in r.items() if "error" in k}
             if errs:
-                print(f"  erreurs {r.get('impl', '?')} : {errs}")
+                print(f"  errors {r.get('impl', '?')}: {errs}")
         print(f"| mesure | prototype v1 | Rust v2 | gain |\n|---|---|---|---|")
         for label, key, unit in ROWS:
             a, b = v1.get(key), v2.get(key)
@@ -142,7 +142,7 @@ def report_1n(v1, v2):
             print(f"agreement v1 {k} / v2: relative difference of the sums ≤ {max(diffs):.1e}")
     errs = {k: v for k, v in {**v1, **v2}.items() if k == "dtw1n_error"}
     if errs:
-        print(f"erreur : {errs['dtw1n_error'][:160]}")
+        print(f"error: {errs['dtw1n_error'][:160]}")
 
 
 if __name__ == "__main__":

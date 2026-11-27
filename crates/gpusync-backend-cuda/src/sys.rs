@@ -41,7 +41,7 @@ macro_rules! api {
                 $(
                     let $f = unsafe {
                         *lib.get::<unsafe extern "C" fn($($a),*) -> $r>(concat!(stringify!($f), "\0").as_bytes())
-                            .map_err(|e| format!("{} : {e}", stringify!($f)))?
+                            .map_err(|e| format!("{}: {e}", stringify!($f)))?
                     };
                 )*
                 Ok(Self { _lib: lib, $($f,)* })
@@ -115,7 +115,7 @@ impl Driver {
                 format!("code {r}")
             }
         };
-        Err(BackendError(format!("CUDA : {what} ({msg})")))
+        Err(BackendError(format!("CUDA: {what} ({msg})")))
     }
 }
 
@@ -133,12 +133,12 @@ pub fn driver() -> Result<&'static Driver, BackendError> {
         let lib = names
             .iter()
             .find_map(|n| unsafe { Library::new(n) }.ok())
-            .ok_or_else(|| "driver NVIDIA introuvable (nvcuda / libcuda)".to_string())?;
+            .ok_or_else(|| "NVIDIA driver not found (nvcuda / libcuda)".to_string())?;
         let d =
-            unsafe { Driver::load(lib) }.map_err(|e| format!("driver CUDA trop ancien : {e}"))?;
+            unsafe { Driver::load(lib) }.map_err(|e| format!("CUDA driver too old: {e}"))?;
         let r = unsafe { (d.cuInit)(0) };
         if r != 0 {
-            return Err(d.check(r, "initialisation").unwrap_err().0);
+            return Err(d.check(r, "initialization").unwrap_err().0);
         }
         Ok(d)
     })

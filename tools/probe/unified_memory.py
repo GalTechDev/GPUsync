@@ -26,4 +26,4 @@ for dev in sys.argv[1].split(","):
             ts = []
             for _ in range(5):
                 t = time.perf_counter(); y = f(x, device=dev); y.numpy(); ts.append(time.perf_counter() - t)
-            print(f"{dev:9} {mb:5} Mo {name:7} : {min(ts)*1e3:8.2f} ms (mode {y.mode})", flush=True)
+            print(f"{dev:9} {mb:5} MB {name:7}: {min(ts)*1e3:8.2f} ms (mode {y.mode})", flush=True)

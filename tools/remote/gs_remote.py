@@ -137,7 +137,7 @@ def check_name(name: str, what: str = "name") -> str:
 def safe_rel_path(p: str) -> str:
     """Normalized relative path; rejects absolute paths, `..`, drive letters."""
     if not isinstance(p, str) or not p:
-        raise HttpError(400, "chemin vide")
+        raise HttpError(400, "empty path")
     p = p.replace("\\", "/")
     if p.startswith("/") or ":" in p or "\x00" in p:
         raise HttpError(400, f"path rejected: {p!r}")
@@ -352,7 +352,7 @@ class Hub:
                     job.status, job.ended = "lost", time.time()
             st.current = None
         version = st.info.get("tool_version")
-        warn = "" if version == TOOL_VERSION else f" — version {version} ≠ hub {TOOL_VERSION} : gs_remote.py update {agent}"
+        warn = "" if version == TOOL_VERSION else f" — version {version} ≠ hub {TOOL_VERSION}: gs_remote.py update {agent}"
         log(f"agent {agent} connected from {address}{warn}")
         return {"ok": True}
 
@@ -639,7 +639,7 @@ def cmd_agents(args) -> int:
         write_private_json(HUB_CONFIG, cfg)
         ip = (local_ips() or ["<Mac-IP>"])[0]
         print(f"Agent {name} registered. On the test machine, run (once with these options):\n")
-        print(f"  Windows : py gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
+        print(f"  Windows: py gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
         print(f"  macOS   : python3 gs_remote.py agent --hub http://{ip}:{port} --name {name} --token {token}")
         print(f"  (agent on the hub's machine: --hub http://127.0.0.1:{port})\n")
         print("Afterwards, `gs_remote.py agent` is enough: the configuration is remembered on the test machine.")
@@ -779,12 +779,12 @@ class AgentJob:
                 self.say(f"workspace {self.ws.name} removed\n")
             self.done("done", 0)
         except HttpError as e:
-            self.say(f"[gs-remote] erreur : {e.message}\n")
+            self.say(f"[gs-remote] error: {e.message}\n")
             self.done("error", -1)
         except RemoteError:
             raise
         except Exception as e:
-            self.say(f"[gs-remote] erreur : {type(e).__name__}: {e}\n")
+            self.say(f"[gs-remote] error: {type(e).__name__}: {e}\n")
             self.done("error", -1)
         return False
 
@@ -858,7 +858,7 @@ class AgentJob:
             cmd = cmd.replace(PY_PLACEHOLDER, f'"{sys.executable}"')
         else:
             if not (isinstance(cmd, list) and cmd and all(isinstance(c, str) for c in cmd)):
-                raise HttpError(400, "commande vide")
+                raise HttpError(400, "empty command")
             cmd = [sys.executable if c == PY_PLACEHOLDER else c for c in cmd]
         cwd = resolve_inside(self.ws, self.spec["cwd"]) if self.spec.get("cwd") else self.ws
         if not cwd.is_dir():
@@ -1203,7 +1203,7 @@ class Follow:
                     delay = min(delay * 1.5, 1.0)
         except RemoteError as e:
             self.error = str(e)
-            out(f"[{self.agent}] ERREUR : {e}\n", sys.stderr)
+            out(f"[{self.agent}] ERROR: {e}\n", sys.stderr)
 
     def kill(self) -> None:
         if self.job_id and self.result is None:
@@ -1253,7 +1253,7 @@ def run_on_targets(api: SignedClient, target: str, spec: dict, src: Path | None,
             worst = worst or (code if isinstance(code, int) and code > 0 else 1)
         timing = fmt_timing(st)
         if multi or offline or summary_always:
-            label = "OK" if ok else ("ERREUR" if f.error else str(st.get("status", "?")).upper())
+            label = "OK" if ok else ("ERROR" if f.error else str(st.get("status", "?")).upper())
             out(f"  {f.agent:<12} {label:<9} code {str(code):<5} {timing}\n", sys.stderr)
         elif not f.error:
             state = "" if ok else f"task finished: {st.get('status')} (code {code}) · "
@@ -1374,13 +1374,13 @@ def cmd_info(args) -> int:
             print(f"    outil   : v{v or '1-2'} ≠ v{TOOL_VERSION} → gs_remote.py update {a['name']}")
         print(f"    machine: {i.get('hostname')} — {i.get('os')} ({i.get('machine')}), {i.get('cpu_count')} CPU cores")
         print(f"    python  : {i.get('python')}  ({i.get('python_executable')})")
-        print(f"    rust    : {i.get('rustc') or 'absent'}")
+        print(f"    rust    : {i.get('rustc') or 'missing'}")
         for g in i.get("gpus") or ["(no GPU detected)"]:
             print(f"    gpu     : {g}")
         for g in i.get("nvidia_smi") or []:
             print(f"    nvidia  : {g}")
         if i.get("workspaces"):
-            print(f"    workspaces : {', '.join(i['workspaces'])}")
+            print(f"    workspaces: {', '.join(i['workspaces'])}")
     return 0
 
 
@@ -1479,7 +1479,7 @@ def main() -> None:
     try:
         sys.exit(args.func(args))
     except RemoteError as e:
-        sys.exit(f"Erreur : {e}")
+        sys.exit(f"Error: {e}")
     except KeyboardInterrupt:
         sys.exit(130)
 

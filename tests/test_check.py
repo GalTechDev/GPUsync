@@ -43,3 +43,16 @@ def test_unknown_device(capsys):
 def test_device_needs_check():
     with pytest.raises(SystemExit):
         cli.main(["-d", "cpu:0"])
+
+
+def test_console_without_unicode(monkeypatch):
+    """Windows code page 1252 cannot encode ✓: the marks become ASCII instead of raising UnicodeEncodeError."""
+    import io
+    import sys
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", out)
+    assert cli.main(["--check", "-d", "cpu:0"]) == 0
+    out.flush()
+    text = out.buffer.getvalue().decode("cp1252")
+    assert "+ elementwise" in text and "+ f64" in text and "All 1 device(s) passed." in text

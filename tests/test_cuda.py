@@ -23,7 +23,7 @@ needs_cuda = pytest.mark.skipif(not HAS_CUDA, reason="no NVIDIA GPU with NVRTC")
 SCRIPT = textwrap.dedent('''
     import numpy as np, gpusync as gs
     st = {s.name: s for s in gs.backends()}["cuda"]
-    print("CUDA", "ok" if st.available else "indisponible", st.error or "")
+    print("CUDA", "ok" if st.available else "unavailable", st.error or "")
     if st.available:
         @gs.kernel
         def axpy(x: gs.f32[:], a: gs.f32) -> gs.f32[:]:
@@ -66,14 +66,14 @@ def test_cache_ptx(tmp_path):
     files = list((cache / "cuda").glob("*.ptx"))
     assert len(files) == 1 and files[0].read_bytes().startswith(b"//")
     assert "RESULT True" in run(tmp_path, env)  # 2nd process: PTX read back from the cache
-    files[0].write_bytes(b"illisible")  # damaged file: recompiled, no error
+    files[0].write_bytes(b"unreadable")  # damaged file: recompiled, no error
     assert "RESULT True" in run(tmp_path, env)
 
 
 @needs_cuda
 def test_without_nvrtc(tmp_path):
     out = run(tmp_path, without_toolkit(GPUSYNC_NVRTC_DIRS="", GPUSYNC_CACHE="0"))
-    assert "CUDA indisponible" in out and "pip install nvidia-cuda-nvrtc-cu12" in out
+    assert "CUDA unavailable" in out and "pip install nvidia-cuda-nvrtc-cu12" in out
 
 
 @needs_cuda

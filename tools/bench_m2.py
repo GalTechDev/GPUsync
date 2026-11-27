@@ -32,7 +32,7 @@ def bench(x, w=5, repeat=3):
                 y = np.asarray(dtw(x, w, device=d.id))
                 best = min(best, time.perf_counter() - t0)
         except gs.GpusyncError as e:
-            print(f"  {d.id:10} {type(e).__name__} : {e}")
+            print(f"  {d.id:10} {type(e).__name__}: {e}")
             # The device must stay usable after the error (reopened if lost).
             check = np.asarray(dtw(x[:8], w, device=d.id))
             print(f"  {d.id:10} after the error: small call {'correct' if np.allclose(check, ref, atol=1e-5) else 'WRONG'}")

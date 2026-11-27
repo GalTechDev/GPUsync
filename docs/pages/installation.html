@@ -98,7 +98,7 @@ python -m gpusync --check -d opencl:0      <span class="tk-com"># only this devi
   cpu:0      GPUsync interpreter (CPU, slow)  ✓ elementwise  ✓ indexed  ✓ atomics  ✓ groups  ✓ f64  ✓ chained  (0.0 s)
 
 All 3 device(s) passed.</code></pre></div>
-<p><code>✓</code> passed, <code>–</code> skipped (the device does not support it), <code>✗</code> failed, with the error below the line. The exit code is 1 when a test fails, so it can be used in a script or a CI job.</p>
+<p><code>✓</code> passed, <code>–</code> skipped (the device does not support it), <code>✗</code> failed, with the error below the line. The exit code is 1 when a test fails, so it can be used in a script or a CI job. On a console that cannot show these marks (Windows code page 1252, output redirected to a file), they become <code>+</code>, <code>-</code> and <code>X</code>.</p>
 <h2 id="backends"><a class="anchor" href="#backends" aria-hidden="true">#</a>Backends</h2>
 <div class="table-wrap"><table><thead><tr><th>Backend</th><th>Devices</th><th>Notes</th></tr></thead><tbody><tr><td>CUDA</td><td>NVIDIA GPUs</td><td>preferred on an NVIDIA GPU; needs the driver and NVRTC (see below)</td></tr><tr><td>wgpu</td><td>Metal (macOS), Vulkan, DX12</td><td>Metal on a Mac; Vulkan on discrete GPUs without CUDA</td></tr><tr><td>OpenCL ≥ 1.2</td><td>any installed OpenCL driver</td><td>zero-copy on unified-memory GPUs; fallback when an operation is missing elsewhere</td></tr><tr><td>cpu</td><td>interpreter</td><td>always available</td></tr></tbody></table></div>
 <h3 id="cuda-and-nvrtc"><a class="anchor" href="#cuda-and-nvrtc" aria-hidden="true">#</a>CUDA and NVRTC</h3>

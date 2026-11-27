@@ -91,7 +91,7 @@ def memory(dev: str) -> None:
         try:
             normalize(np.zeros(size // 4, np.float32), 0.0, 1.0, device=dev)
         except gs.UnsupportedFeature as e:
-            print(f"             → gs.UnsupportedFeature : {str(e)[:90]}…", flush=True)
+            print(f"             → gs.UnsupportedFeature: {str(e)[:90]}…", flush=True)
         return
     x = np.empty(size // 4, dtype=np.float32)
     x[:] = 1.0  # pages actually allocated

@@ -89,7 +89,7 @@ class Kernel:
         try:
             spec, self._params, self._outs, self._tuple, self._fills = kernel_json(func, grid, group, cells)
         except KernelDeclarationError as e:
-            raise _core.KernelSyntaxError(f"kernel '{func.__name__}' : {e}") from None
+            raise _core.KernelSyntaxError(f"kernel '{func.__name__}': {e}") from None
         try:
             self._ir = _core.compile_kernel(spec)
         except _core.GpusyncError as e:

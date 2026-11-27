@@ -119,7 +119,8 @@ All 3 device(s) passed.
 ```
 
 `✓` passed, `–` skipped (the device does not support it), `✗` failed, with the error below the line. The exit code
-is 1 when a test fails, so it can be used in a script or a CI job.
+is 1 when a test fails, so it can be used in a script or a CI job. On a console that cannot show these marks (Windows code page
+1252, output redirected to a file), they become `+`, `-` and `X`.
 
 ## Backends
 

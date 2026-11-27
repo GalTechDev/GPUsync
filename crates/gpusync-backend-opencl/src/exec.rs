@@ -26,7 +26,7 @@ use opencl3::program::Program;
 use opencl3::types::{CL_BLOCKING, CL_NON_BLOCKING, cl_event, cl_mem};
 
 fn err(what: &str, e: impl std::fmt::Display) -> BackendError {
-    BackendError(format!("OpenCL : {what} ({e})"))
+    BackendError(format!("OpenCL: {what} ({e})"))
 }
 
 /// An open OpenCL device.
