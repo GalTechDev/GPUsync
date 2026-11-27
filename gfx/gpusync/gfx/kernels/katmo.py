@@ -27,58 +27,65 @@ def atm_thermo(
     s: gs.f32["nz", "ny", "nx"],
     qt: gs.f32["nz", "ny", "nx"],
     qr: gs.f32["nz", "ny", "nx"],
+    qs: gs.f32["nz", "ny", "nx"],
     ref: gs.f32["nz", "c8"],
     s_ref: gs.f32,
     ice: gs.f32,
+    fusion: gs.f32,
 ) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
     """Saturation adjustment: `(temperature, cloud water, buoyancy)`.
 
-    `s = T + g z / cp - L (qc + qr) / cp`: find T such that `qc = max(qt - qs(T), 0)` (Newton).
-    Bolton (1980) saturation vapour pressure; pressure of the reference state. `ice` = 1: mixed
-    water-ice saturation between 0 and -23 °C, pure ice below."""
+    `s = T + g z / cp - Lv (qc_liquid + qr) / cp - Ls (qc_ice + qs) / cp`: find T such that `qc = max(qt - qs(T), 0)`
+    (Newton). Bolton (1980) saturation vapour pressure; pressure of the reference state. `ice` = 1: mixed water-ice
+    saturation between 0 and -23 °C, pure ice below; the liquid part of the cloud is the weight `f` of the liquid in that
+    saturation. `fusion` = 1: the ice (cloud and snow) holds the latent heat of fusion; 0: everything counted as liquid."""
     k, j, i = gs.index()
     qr_c = gs.max(qr[k, j, i], 0.0)
+    qs_c = gs.max(qs[k, j, i], 0.0)
     q_tot = gs.max(qt[k, j, i], 0.0)
     p = ref[k, 1]
-    t_dry = s[k, j, i] + s_ref - 9.81 / 1004.64 * ref[k, 0] + 2489.4489 * qr_c
+    t_dry = s[k, j, i] + s_ref - 9.81 / 1004.64 * ref[k, 0] + 2489.4489 * qr_c + (2489.4489 + 332.1588 * fusion) * qs_c
     t = t_dry
     qc = 0.0
     es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
-    des = es * 4302.645 / ((t - 29.65) * (t - 29.65))
     if ice > 0.0 and t < 273.15:
         mix = gs.max((t - 250.16) / 23.0, 0.0)
         mix = gs.min(mix * mix, 1.0)
-        ei = 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
-        des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55))
-        es = es * mix + (1.0 - mix) * ei
-    qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
-    if q_tot > qs:
-        for _ in range(5):
+        es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
+    qsat = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+    if q_tot > qsat:
+        for _ in range(6):
             es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
             des = es * 4302.645 / ((t - 29.65) * (t - 29.65))
+            liq = 1.0
+            dliq = 0.0
             if ice > 0.0 and t < 273.15:
                 mix = gs.max((t - 250.16) / 23.0, 0.0)
+                if mix < 1.0:
+                    dliq = 2.0 * mix / 23.0
                 mix = gs.min(mix * mix, 1.0)
+                liq = mix
                 ei = 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
-                des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55))
+                des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55)) + dliq * (es - ei)
                 es = es * mix + (1.0 - mix) * ei
-            qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
-            dqs = qs / es * des * p / gs.max(p - 0.37803 * es, 1.0)
-            f = t - t_dry - 2489.4489 * (q_tot - qs)
-            t = t - f / (1.0 + 2489.4489 * dqs)
+            qsat = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+            dqs = qsat / es * des * p / gs.max(p - 0.37803 * es, 1.0)
+            cond = q_tot - qsat
+            f = t - t_dry - 2489.4489 * cond - 332.1588 * fusion * (1.0 - liq) * cond
+            slope = 1.0 + 2489.4489 * dqs + 332.1588 * fusion * ((1.0 - liq) * dqs + dliq * cond)
+            t = t - f / slope
         es = 611.2 * gs.exp(17.67 * (t - 273.15) / (t - 29.65))
-        des = es * 4302.645 / ((t - 29.65) * (t - 29.65))
+        liq = 1.0
         if ice > 0.0 and t < 273.15:
             mix = gs.max((t - 250.16) / 23.0, 0.0)
             mix = gs.min(mix * mix, 1.0)
-            ei = 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
-            des = des * mix + (1.0 - mix) * ei * 6122.6 / ((t - 0.55) * (t - 0.55))
-            es = es * mix + (1.0 - mix) * ei
-        qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
-        qc = gs.max(q_tot - qs, 0.0)
-        t = t_dry + 2489.4489 * qc
+            liq = mix
+            es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t - 273.15) / (t - 0.55))
+        qsat = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+        qc = gs.max(q_tot - qsat, 0.0)
+        t = t_dry + 2489.4489 * qc + 332.1588 * fusion * (1.0 - liq) * qc
     qv = q_tot - qc
-    b = 9.81 * ((t - ref[k, 2]) / ref[k, 2] + 0.60778 * (qv - ref[k, 3]) - (qc - ref[k, 4]) - qr_c)
+    b = 9.81 * ((t - ref[k, 2]) / ref[k, 2] + 0.60778 * (qv - ref[k, 3]) - (qc - ref[k, 4]) - qr_c - qs_c)
     return t, qc, b
 
 
@@ -804,20 +811,25 @@ def atm_kessler(
     ref: gs.f32["nz", "c8"],
     dt: gs.f32,
     ice: gs.f32,
+    fusion: gs.f32,
 ) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
     """Conversion, accretion and evaporation of rain: `(qt, qr, transfer)`.
 
-    `transfer` > 0: water moved from cloud to rain. `s` does not change: it already counts all the liquid water."""
+    `transfer` > 0: water moved from cloud to rain. `s` does not change: it already counts all the liquid water.
+    `fusion` = 1 (with snow): only the liquid part of the cloud turns into rain, the ice goes to the snow."""
     k, j, i = gs.index()
     rho = ref[k, 5]
     rain = gs.max(qr[k, j, i], 0.0)
     cloud = qc[k, j, i]
     vap = qt[k, j, i] - cloud
+    t_c = t[k, j, i]
+    if fusion > 0.0 and t_c < 273.15:
+        part = gs.max((t_c - 250.16) / 23.0, 0.0)
+        cloud = cloud * gs.min(part * part, 1.0)
     auto = 1e-3 * gs.max(cloud - 1e-3, 0.0)
     accr = 2.2 * cloud * gs.pow(rain, 0.875)
     gain = gs.min((auto + accr) * dt, cloud)
     loss = 0.0
-    t_c = t[k, j, i]
     p = ref[k, 1]
     es = 611.2 * gs.exp(17.67 * (t_c - 273.15) / (t_c - 29.65))
     if ice > 0.0 and t_c < 273.15:
@@ -825,7 +837,7 @@ def atm_kessler(
         mix = gs.min(mix * mix, 1.0)
         es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t_c - 273.15) / (t_c - 0.55))
     qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
-    if cloud <= 0.0 and rain > 0.0 and vap < qs:
+    if qc[k, j, i] <= 0.0 and rain > 0.0 and vap < qs:
         # Evaporation with ventilation (Kessler, coefficients of Klemp & Wilhelmson 1978)
         rr = rho * 1e-3 * rain
         vent = 1.6 + 124.9 * gs.pow(rr, 0.2046)
@@ -841,8 +853,13 @@ def atm_sediment(
     ref: gs.f32["nz", "c8"],
     dt: gs.f32,
     inv_dz: gs.f32,
+    coef: gs.f32,
+    expo: gs.f32,
+    scale: gs.f32,
 ) -> gs.f32["nz", "ny", "nx"]:
-    """Rain fall (upwind flux); what leaves through the bottom reaches the ground."""
+    """Fall of rain or snow (upwind flux); what leaves through the bottom reaches the ground. Mass-weighted speed
+    `coef (scale rho q)^expo (rho_0 / rho)^0.5`: rain 36.34, 0.1346, 1e-3 (Kessler, as in Klemp & Wilhelmson 1978),
+    snow 2.414, 0.1025, 1 (Lin et al. 1983, exponential distribution)."""
     k, j, i = gs.index()
     nz = qr.shape[0]
     out = 0.0
@@ -851,7 +868,7 @@ def atm_sediment(
         m = k + h
         if m < nz:
             q = gs.max(qr[m, j, i], 0.0)
-            speed = 36.34 * gs.pow(ref[m, 5] * 1e-3 * q, 0.1346) * gs.sqrt(ref[0, 5] / ref[m, 5])
+            speed = coef * gs.pow(ref[m, 5] * scale * q, expo) * gs.sqrt(ref[0, 5] / ref[m, 5])
             flux = ref[m, 5] * q * gs.min(speed, 0.9 / (dt * inv_dz))
             if h == 0:
                 out = flux
@@ -888,17 +905,114 @@ def atm_ice_fall(
 
 
 @gs.kernel
+def atm_snow(
+    qt: gs.f32["nz", "ny", "nx"],
+    qr: gs.f32["nz", "ny", "nx"],
+    qs: gs.f32["nz", "ny", "nx"],
+    qc: gs.f32["nz", "ny", "nx"],
+    t: gs.f32["nz", "ny", "nx"],
+    ref: gs.f32["nz", "c8"],
+    dt: gs.f32,
+) -> (gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"], gs.f32["nz", "ny", "nx"]):
+    """Snow processes of Lin, Farley & Orville (1983): `(qt, qr, qs)`.
+
+    Exponential snow distribution (N0 = 3e6 m^-4, density 100 kg/m³), fall speed 11.72 D^0.41 (Locatelli & Hobbs 1974),
+    rain N0 = 8e6 m^-4. Below 0 °C: autoconversion of cloud ice (threshold 0.1 g/kg), collection of cloud ice and
+    riming of cloud water, deposition or sublimation, freezing of rain by contact with snow and by immersion (Bigg).
+    Above: melting from the heat and vapour budget (so it follows the wet-bulb temperature), cloud water collected
+    goes to the rain, sublimation in unsaturated air. Every phase change stays inside `s` (liquid-ice static energy)."""
+    k, j, i = gs.index()
+    rho = ref[k, 5]
+    p = ref[k, 1]
+    dens = gs.sqrt(ref[0, 5] / rho)
+    temp = t[k, j, i]
+    tc = temp - 273.15
+    cloud = qc[k, j, i]
+    vap = qt[k, j, i] - cloud
+    snow = gs.max(qs[k, j, i], 0.0)
+    rain = gs.max(qr[k, j, i], 0.0)
+    liq = 1.0
+    if tc < 0.0:
+        part = gs.max((temp - 250.16) / 23.0, 0.0)
+        liq = gs.min(part * part, 1.0)
+    water = cloud * liq
+    cice = cloud - water
+    es = 611.2 * gs.exp(17.67 * tc / (temp - 29.65))
+    esi = 611.2 * gs.exp(22.46 * tc / (temp - 0.55))
+    qsw = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+    qsi = 0.62197 * esi / gs.max(p - 0.37803 * esi, 1.0)
+    e0 = 611.2
+    qs0 = 0.62197 * e0 / gs.max(p - 0.37803 * e0, 1.0)
+    to_snow = 0.0  # from vapour and cloud (taken from qt)
+    rain_to_snow = 0.0
+    snow_to_rain = 0.0
+    cloud_to_rain = 0.0
+    if tc < 0.0 and cice > 1e-4:
+        to_snow += 1e-3 * gs.exp(0.025 * tc) * (cice - 1e-4)
+    lam_r = 0.0
+    if rain > 1e-9:
+        lam_r = gs.pow(2.5132741e10 / (rho * rain), 0.25)
+    if snow > 1e-9:
+        lam = gs.pow(9.424778e8 / (rho * snow), 0.25)
+        coll = 8.3211486e7 * gs.pow(lam, -3.41) * dens
+        vent = 0.78 / (lam * lam) + 334.91695 * gs.sqrt(rho) * gs.sqrt(dens) * gs.pow(lam, -2.705)
+        if tc < 0.0:
+            to_snow += coll * (water + gs.exp(0.025 * tc) * cice)
+            a2 = 8.0317e12 / (0.0243 * 461.5 * temp * temp)
+            b2 = 1.0 / (rho * qsi * 2.26e-5)
+            to_snow += 6.2831853 * (vap / qsi - 1.0) * 3e6 * vent / (rho * (a2 + b2))
+            if rain > 1e-9:
+                v_r = 36.34 * gs.pow(rho * 1e-3 * rain, 0.1346) * dens
+                v_s = 2.4138622 * gs.pow(rho * snow, 0.1025) * dens
+                inv_r = 1.0 / lam_r
+                inv_s = 1.0 / lam
+                shape = 5.0 * gs.pow(inv_r, 6.0) * inv_s + 2.0 * gs.pow(inv_r, 5.0) * inv_s * inv_s + 0.5 * gs.pow(inv_r, 4.0) * inv_s * inv_s * inv_s
+                rain_to_snow += 9.8696044 * 8e6 * 3e6 * gs.abs(v_r - v_s) * 1000.0 / rho * shape
+        else:
+            cloud_to_rain = coll * water
+            melt = 6.2831853 / (rho * 3.337e5) * (0.0243 * tc - 2.501e6 * 2.26e-5 * rho * (qs0 - vap)) * 3e6 * vent
+            snow_to_rain = gs.max(melt, 0.0) + 4187.0 * tc / 3.337e5 * cloud_to_rain
+            if vap < qsw:
+                a3 = 6.2550e12 / (0.0243 * 461.5 * temp * temp)
+                b3 = 1.0 / (rho * qsw * 2.26e-5)
+                to_snow += 6.2831853 * (vap / qsw - 1.0) * 3e6 * vent / (rho * (a3 + b3))
+    if tc < 0.0 and rain > 1e-9:
+        rain_to_snow += 1.9739209e4 * 8e6 * 1000.0 / rho * (gs.exp(0.66 * (-tc)) - 1.0) * gs.pow(1.0 / lam_r, 7.0)
+    # Limits over the step
+    gain = to_snow * dt
+    if gain > 0.0:
+        room = cloud
+        if tc < 0.0:
+            room = cloud + gs.max(vap - qsi, 0.0)
+        gain = gs.min(gain, room)
+    else:
+        gain = gs.max(gain, -snow)
+        if tc < 0.0:
+            gain = gs.max(gain, gs.min(vap - qsi, 0.0))
+        else:
+            gain = gs.max(gain, gs.min(vap - qsw, 0.0))
+    left = snow + gain
+    melted = gs.min(snow_to_rain * dt, left)
+    frozen = gs.min(rain_to_snow * dt, rain)
+    collected = gs.min(cloud_to_rain * dt, gs.max(cloud - gs.max(gain, 0.0), 0.0))
+    return qt[k, j, i] - gain - collected, rain - frozen + melted + collected, left - melted + frozen
+
+
+@gs.kernel
 def atm_surface_rain(
     acc: gs.f32["ny", "nx"],
     qr: gs.f32["nz", "ny", "nx"],
     ref: gs.f32["nz", "c8"],
     dt: gs.f32,
     inv_dz: gs.f32,
+    coef: gs.f32,
+    expo: gs.f32,
+    scale: gs.f32,
 ) -> gs.f32["ny", "nx"]:
-    """Accumulated rain at the ground (kg/m², i.e. mm): flux leaving the first layer, as in `atm_sediment`."""
+    """Accumulated rain or snow at the ground (kg/m², i.e. mm of water): flux leaving the first layer, as in `atm_sediment`."""
     j, i = gs.index()
     q = gs.max(qr[0, j, i], 0.0)
-    speed = 36.34 * gs.pow(ref[0, 5] * 1e-3 * q, 0.1346)
+    speed = coef * gs.pow(ref[0, 5] * scale * q, expo)
     return acc[j, i] + ref[0, 5] * q * gs.min(speed, 0.9 / (dt * inv_dz)) * dt
 
 
@@ -913,8 +1027,10 @@ def atm_level_means(
     v: gs.f32["nz", "ny", "nx"],
     qc: gs.f32["nz", "ny", "nx"],
     qr: gs.f32["nz", "ny", "nx"],
-    tpl: gs.f32["nz", "c6"],
-) -> gs.f32["nz", "c6"]:
+    qs: gs.f32["nz", "ny", "nx"],
+    t: gs.f32["nz", "ny", "nx"],
+    tpl: gs.f32["nz", "c8"],
+) -> gs.f32["nz", "c8"]:
     """Horizontal mean of each level (summed by rows, for precision)."""
     k, c = gs.index()
     total = 0.0
@@ -931,8 +1047,12 @@ def atm_level_means(
                 row += v[k, j, i]
             elif c == 4:
                 row += qc[k, j, i]
-            else:
+            elif c == 5:
                 row += qr[k, j, i]
+            elif c == 6:
+                row += qs[k, j, i]
+            else:
+                row += t[k, j, i]
         total += row / float(s.shape[2])
     return total / float(s.shape[1])
 

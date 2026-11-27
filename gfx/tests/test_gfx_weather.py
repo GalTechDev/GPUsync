@@ -332,3 +332,19 @@ def test_parcel_ascent_limits():
     assert hot["cape"] > base["cape"] + 200.0 and hot["cin"] > base["cin"]
     with pytest.raises(ValueError, match="unknown"):
         wx.parcel_ascent(p[:900], t[:900], q[:900], source="bogus")
+
+
+def test_precipitation_phase_follows_the_ground_temperature():
+    """Snow where the air is cold to the ground, rain where it is mild; the snow is part of the precipitation."""
+    terrain, land, wet = gfx.fictional_geography(64, 48, 40e3, seed=2)
+    rh = lambda y, p: np.where(p > 2e4, 0.85, 0.02)
+    w = gfx.Weather(gfx.WeatherConfig(nx=64, ny=48, nz=30, dx=40e3, terrain=terrain, land=land, wetness=wet, physics=True, perturbation=1.0, relative_humidity=rh))
+    w.run(18 * 3600.0)
+    p = w.precipitation()
+    t2 = w.surface_field(wx.SFC_T2) - 273.15
+    wet_cells = p["total"] > 0.2
+    assert (p["frozen"] <= p["total"] + 1e-9).all() and (w.snow.numpy() <= w.rain.numpy() + 1e-3).all()
+    cold, mild = wet_cells & (t2 < -3.0), wet_cells & (t2 > 6.0)
+    assert cold.sum() >= 5 and mild.sum() >= 5, (cold.sum(), mild.sum())
+    assert (p["frozen"][cold] / p["total"][cold]).mean() > 0.9
+    assert (p["frozen"][mild] / p["total"][mild]).mean() < 0.1

@@ -1,7 +1,7 @@
 # gpusync-gfx
 
 Real-time graphics and simulation engine written with [GPUsync](../README.md): 2D and 3D rendering, user interface,
-fluids (2D, 3D, SPH, water surface), 3D atmosphere and clouds, large-scale weather coupled to local clouds. All the
+fluids (2D, 3D, SPH, water surface), 3D atmosphere and clouds with rain and snow, large-scale weather coupled to local clouds. All the
 computation is done by GPUsync kernels; the only dependency besides GPUsync is NumPy.
 
 It is a separate package from the library: `pip install gpusync` gives the kernels, `pip install gpusync-gfx` adds

@@ -71,7 +71,9 @@ class NestedAtmosphere(Atmosphere):
         super().__init__(cfg, device=parent.device)
         self.time = parent.time
         fields = self._fill(parent_state(parent), parent_state(parent), 1.0)
-        self.u, self.v, self.w, self.s, self.qt, self.qr = fields
+        self.u, self.v, self.w = fields[:3]
+        self.qs = self._zero
+        self._set_scalars(fields[3:])
         self._targets = fields
         with gs.batch(self.device):
             self.u, self.v, self.w = self._project(self.u, self.v, self.w)
@@ -113,7 +115,7 @@ class NestedAtmosphere(Atmosphere):
 
     def _extra_tendencies(self, slow_v, slow_s):
         width, rate = self._relax
-        fields = (self.u, self.v, self.w, self.s, self.qt, self.qr)
+        fields = self.state()
         out = [
             nest_relax(slow, f, t, HALO, width, rate, device=self.device)
             for slow, f, t in zip((*slow_v, *slow_s), fields, self._targets)
@@ -206,7 +208,7 @@ class NestedAtmosphere(Atmosphere):
         if not changed:
             return
         dev, p = self.device, self.parent
-        fields = [self.u, self.v, self.w, self.s, self.qt, self.qr]
+        fields = list(self.state())
         old = list(old)
         with gs.batch(dev):
             for c in changed:
@@ -216,7 +218,7 @@ class NestedAtmosphere(Atmosphere):
             self._window = (tuple(old), now, start, end)
             self._targets = self._fill(*self._blend())
             self.u, self.v, self.w = self._project(*self._bound_velocity(fields[:3]))
-            self.s, self.qt, self.qr = self._bound_scalars(fields[3:])
+            self._set_scalars(self._bound_scalars(fields[3:]))
             self.diagnose()
 
     def follow(self) -> None:
@@ -254,13 +256,13 @@ class NestedAtmosphere(Atmosphere):
         dev = self.device
         with gs.batch(dev):
             self._targets = self._fill(*self._blend())
-            fields = (self.u, self.v, self.w, self.s, self.qt, self.qr)
+            fields = self.state()
             moved = [
                 nest_shift(f, t, min(c, 3), HALO, int(sx), int(sy), device=dev)
                 for c, (f, t) in enumerate(zip(fields, self._targets))
             ]
             self.u, self.v, self.w = self._project(*self._bound_velocity(moved[:3]))
-            self.s, self.qt, self.qr = self._bound_scalars(moved[3:])
+            self._set_scalars(self._bound_scalars(moved[3:]))
             self.diagnose()
         return True
 
@@ -276,4 +278,4 @@ def nearest(nest: NestedAtmosphere, x: float, y: float) -> tuple[float, float]:
 
 def parent_state(a: Atmosphere) -> tuple[gs.Array, ...]:
     """Fields passed to a nested grid."""
-    return a.u, a.v, a.w, a.s, a.qt, a.qr
+    return a.state()

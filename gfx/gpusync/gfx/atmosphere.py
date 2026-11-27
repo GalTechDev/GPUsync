@@ -1,8 +1,8 @@
-"""Moist atmosphere simulated on the GPU: anelastic dynamics, condensation, warm rain.
+"""Moist atmosphere simulated on the GPU: anelastic dynamics, condensation, rain and snow.
 
 Lipps & Hemler (anelastic) equations on a C grid, order-9 advection, limited (MP) for scalars, Wicker & Skamarock
 Runge-Kutta 3, pressure by a direct solver (Hartley in x and y, tridiagonal in z), Smagorinsky-Lilly subgrid
-turbulence, Kessler microphysics."""
+turbulence, Kessler warm rain, snow of Lin, Farley & Orville (1983)."""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ from .kernels.katmo import (
     atm_project,
     atm_scalar_stage,
     atm_sediment,
+    atm_snow,
     atm_surface_rain,
     atm_thermo,
     pressure_columns,
@@ -50,6 +51,9 @@ from .kernels.katmo import (
 
 P00 = 1.0e5
 S_REF = 300.0
+LF = 3.337e5  # latent heat of fusion (J/kg), with LV = 2.501e6 as in the kernels
+RAIN_FALL = (36.34, 0.1346, 1e-3)  # fall speed parameters of `atm_sediment`
+SNOW_FALL = (2.4138622, 0.1025, 1.0)
 
 Profile = Callable[[np.ndarray], np.ndarray]
 
@@ -67,6 +71,22 @@ def saturation_mixing(t, p, ice=False):
         es = es * mix + (1.0 - mix) * 611.2 * np.exp(22.46 * (t - 273.15) / (t - 0.55))
     eps = RD / RV
     return eps * es / np.maximum(p - (1.0 - eps) * es, 1.0)
+
+
+def liquid_fraction(t, ice=True):
+    """Liquid part of the cloud condensate: the weight of the liquid in the mixed saturation of `saturation_mixing`."""
+    if not ice:
+        return np.ones_like(np.asarray(t, dtype=np.float64))
+    return np.where(t < 273.15, np.clip((t - 250.16) / 23.0, 0.0, 1.0) ** 2, 1.0)
+
+
+def static_energy(t, qc, z, *, fusion=False, ice=True):
+    """`s + S_REF` of air at temperature `t` holding cloud condensate `qc` (no precipitation): `T + g z / cp - Lv qc / cp`,
+    minus the heat of fusion of the cloud ice when `fusion`."""
+    s = t + GRAVITY / CP * z - LV / CP * qc
+    if fusion:
+        s = s - LF / CP * (1.0 - liquid_fraction(t, ice)) * qc
+    return s
 
 
 def saturation_adjust(theta_l, qt, p, ice=False):
@@ -169,7 +189,8 @@ class AtmosphereConfig:
     smagorinsky: float = 0.18  # 0: no subgrid diffusion
     prandtl: float = 0.3333
     rain: bool = True
-    ice: bool = False  # mixed water-ice saturation and falling crystals (no snow or hail)
+    ice: bool = False  # mixed water-ice saturation and falling crystals
+    snow: bool = False  # prognostic snow (Lin et al. 1983) and the heat of fusion; needs `ice` and `rain` (no graupel or hail)
     sponge_depth: float = 0.0  # damping layer below the top (m)
     sponge_time: float = 100.0
     cfl: float = 1.0  # sum of the Courant numbers of the three directions
@@ -212,7 +233,8 @@ class AtmosphereConfig:
 
 
 class Atmosphere:
-    """Simulation of a moist atmosphere; the state stays on the GPU (`u, v, w, s, qt, qr`, plus diagnosed `t, qc, b`)."""
+    """Simulation of a moist atmosphere; the state stays on the GPU (`u, v, w, s, qt, qr`, `qs` with snow, plus diagnosed
+    `t, qc, b`)."""
 
     def __init__(self, config: AtmosphereConfig | None = None, *, device: str | None = None) -> None:
         self.config = cfg = config or AtmosphereConfig()
@@ -221,6 +243,8 @@ class Atmosphere:
         self.steps = 0
         if not 4 <= cfg.nz <= 256:
             raise ValueError(f"Atmosphere: nz between 4 and 256, got {cfg.nz}")
+        if cfg.snow and not (cfg.ice and cfg.rain):
+            raise ValueError("Atmosphere: snow needs ice=True and rain=True")
         self.z = (np.arange(cfg.nz) + 0.5) * cfg.dz
         self._base_state()
         n = (cfg.nz, cfg.ny, cfg.nx)
@@ -238,11 +262,13 @@ class Atmosphere:
             qt = qt * ones + init.get("qt", 0.0)
         # Without perturbation, the air only depends on altitude: a single adjustment per level
         t, qc = saturation_adjust(theta_l, qt, p, cfg.ice)
-        self.s = self._up((t + GRAVITY / CP * z3 - LV / CP * qc - S_REF) * ones)
+        self.s = self._up((static_energy(t, qc, z3, fusion=cfg.snow) - S_REF) * ones)
         self.qt = self._up(qt * ones)
         self.qr = self._up(np.zeros(n))
         self._zero = self._up(np.zeros(n))
+        self.qs = self._up(np.zeros(n)) if cfg.snow else self._zero
         self.surface_rain = self._up(np.zeros(n[1:]))  # rain fallen on the ground (mm) per column
+        self.surface_snow = self._up(np.zeros(n[1:]))  # snow fallen on the ground (mm of water) per column
         self.diagnose()
 
     # ── Mise en place ──
@@ -295,7 +321,7 @@ class Atmosphere:
             forcing[:, 7] = np.sin(0.5 * np.pi * x) ** 2 / cfg.sponge_time
         self._forcing_np, self._forced = forcing, False
         self._forcing = self._up(forcing)
-        self._s_ref = self._up(self.t0 + GRAVITY / CP * self.z - LV / CP * self.qc0 - S_REF)
+        self._s_ref = self._up(static_energy(self.t0, self.qc0, self.z, fusion=cfg.snow) - S_REF)
         self._qt_ref = self._up(self.qv0 + self.qc0)
 
         self._grid_tables()
@@ -319,15 +345,29 @@ class Atmosphere:
 
     # ── Coupling with a large-scale weather model ──
 
+    @property
+    def scalar_names(self) -> tuple[str, ...]:
+        """The transported scalars: `s`, `qt`, `qr`, and `qs` with snow."""
+        return ("s", "qt", "qr", "qs") if self.config.snow else ("s", "qt", "qr")
+
+    def state(self) -> tuple[gs.Array, ...]:
+        """Prognostic fields: the three wind components, then the scalars of `scalar_names`."""
+        return (self.u, self.v, self.w, *(getattr(self, n) for n in self.scalar_names))
+
+    def _set_scalars(self, scalars) -> None:
+        for n, f in zip(self.scalar_names, scalars):
+            setattr(self, n, f)
+
     def level_means(self) -> dict:
-        """Horizontal means: `s`, `qt`, `u`, `v` (true wind), `qc`, `qr` (waits for the GPU)."""
-        if getattr(self, "_tpl_means", None) is None:
-            self._tpl_means = self._up(np.zeros((self.config.nz, 6)))
-        m = atm_level_means(self.s, self.qt, self.u, self.v, self.qc, self.qr, self._tpl_means, device=self.device).numpy().astype(np.float64)
-        out = dict(zip(("s", "qt", "u", "v", "qc", "qr"), m.T))
+        """Horizontal means: `s`, `qt`, `u`, `v` (true wind), `qc`, `qr`, `qs`, `t` (waits for the GPU)."""
+        if getattr(self, "_tpl_means", None) is None or self._tpl_means.shape[1] != 8:
+            self._tpl_means = self._up(np.zeros((self.config.nz, 8)))
+        m = atm_level_means(
+            self.s, self.qt, self.u, self.v, self.qc, self.qr, self.qs, self.t, self._tpl_means, device=self.device
+        ).numpy().astype(np.float64)
+        out = dict(zip(("s", "qt", "u", "v", "qc", "qr", "qs", "t"), m.T))
         out["u"] = out["u"] + self.config.frame_u
         out["v"] = out["v"] + self.config.frame_v
-        out["t"] = out["s"] + S_REF - GRAVITY / CP * self.z + LV / CP * (out["qc"] + out["qr"])
         return out
 
     def offset(self, *, s=None, qt=None, u=None, v=None) -> None:
@@ -365,14 +405,16 @@ class Atmosphere:
         with gs.batch(a.device):
             f = [
                 nest_fill(q, q, zero, min(c, 3), 1.0, 0.0, 0.0, 1.0 / factor, 1.0 / factor, 1.0, device=a.device)
-                for c, q in enumerate((self.u, self.v, self.w, self.s, self.qt, self.qr))
+                for c, q in enumerate(self.state())
             ]
             f[3] = atm_add(f[3], a._up(bump), device=a.device)
             a.u, a.v, a.w = a._project(*f[:3])
-            a.s, a.qt, a.qr = f[3:]
+            a.qs = zero
+            a._set_scalars(f[3:])
             a.diagnose()
-        rain = self.surface_rain.numpy()
-        a.surface_rain = a._up(np.repeat(np.repeat(rain, factor, axis=0), factor, axis=1))
+        for name in ("surface_rain", "surface_snow"):
+            fallen = getattr(self, name).numpy()
+            setattr(a, name, a._up(np.repeat(np.repeat(fallen, factor, axis=0), factor, axis=1)))
         return a
 
     def set_frame(self, frame_u: float, frame_v: float) -> None:
@@ -403,7 +445,7 @@ class Atmosphere:
         self.exner0 = (p / P00) ** (RD / CP)
         cfg.surface_pressure = float(surface_pressure)
         self.ref = self._up(np.stack([self.z, p, t, qv, qc, rho, low, self.exner0], axis=1))
-        self._s_ref = self._up(t + GRAVITY / CP * self.z - LV / CP * qc - S_REF)
+        self._s_ref = self._up(static_energy(t, qc, self.z, fusion=cfg.snow) - S_REF)
         self._qt_ref = self._up(qv + qc)
         self.diagnose()
 
@@ -411,7 +453,10 @@ class Atmosphere:
 
     def diagnose(self) -> None:
         """Temperature, cloud water and buoyancy of the current state."""
-        self.t, self.qc, self.b = atm_thermo(self.s, self.qt, self.qr, self.ref, S_REF, float(self.config.ice), device=self.device)
+        cfg = self.config
+        self.t, self.qc, self.b = atm_thermo(
+            self.s, self.qt, self.qr, self.qs, self.ref, S_REF, float(cfg.ice), float(cfg.snow), device=self.device
+        )
 
     # Hooks for a nested grid (see `NestedAtmosphere`)
     def _extra_tendencies(self, slow_v, slow_s):
@@ -472,10 +517,11 @@ class Atmosphere:
         cfg, dev = self.config, self.device
         inv = (1.0 / cfg.dx, 1.0 / cfg.dy, 1.0 / cfg.dz)
         dt = float(dt)
-        vel0, sca0 = (self.u, self.v, self.w), (self.s, self.qt, self.qr)
+        vel0, sca0 = (self.u, self.v, self.w), self.state()[3:]
+        ns = len(sca0)
         # Slow tendencies, evaluated once per step
         slow_v = [self._zero] * 3
-        slow_s = [self._zero] * 3
+        slow_s = [self._zero] * ns
         if cfg.smagorinsky > 0.0 or cfg.surface_theta_flux or cfg.surface_qt_flux or cfg.friction_velocity:
             km = atm_eddy_viscosity(
                 *vel0, self.t, self.qc, self.qt, self.ref, float(cfg.dx), float(cfg.dy), float(cfg.dz),
@@ -487,7 +533,7 @@ class Atmosphere:
                 )
                 for c in range(3)
             ]
-            fluxes = (cfg.surface_theta_flux * float(self.exner0[0]), cfg.surface_qt_flux, 0.0)
+            fluxes = (cfg.surface_theta_flux * float(self.exner0[0]), cfg.surface_qt_flux, 0.0, 0.0)
             slow_s = [
                 atm_diffuse_scalar(f, km, self.ref, *inv, 1.0 / float(cfg.prandtl), float(fx), device=dev)
                 for f, fx in zip(sca0 if cfg.rain else sca0[:2], fluxes)
@@ -512,7 +558,7 @@ class Atmosphere:
                 )  # fmt: skip
                 yield
             new_s = []
-            for c in range(3):
+            for c in range(ns):
                 if c == 2 and not cfg.rain:
                     new_s.append(sca0[2])
                     continue
@@ -521,25 +567,34 @@ class Atmosphere:
             vel = self._project(*self._bound_velocity(new_v))
             yield
             sca = tuple(self._bound_scalars(new_s))
-            t, qc, b = atm_thermo(*sca, self.ref, S_REF, float(self.config.ice), device=dev)
+            t, qc, b = atm_thermo(*sca[:3], sca[3] if ns > 3 else self._zero, self.ref, S_REF, float(cfg.ice), float(cfg.snow), device=dev)
             yield
         self.u, self.v, self.w = vel
-        self.s, self.qt, self.qr = sca
+        self._set_scalars(sca)
         if cfg.rain:
-            self.qt, rain, _ = atm_kessler(self.qt, self.qr, qc, t, self.ref, dt, float(cfg.ice), device=dev)
-            self.surface_rain = atm_surface_rain(self.surface_rain, rain, self.ref, dt, inv[2], device=dev)
-            fallen = atm_sediment(rain, self.ref, dt, inv[2], device=dev)
-            # Rain carries away the energy `-L qr / cp` it holds in `s`
-            minus = atm_axpy(self._zero, fallen, atm_axpy(self._zero, rain, self._zero, -1.0, device=dev), 1.0, device=dev)
-            self.s = atm_axpy(self.s, minus, self._zero, -LV / CP, device=dev)
-            self.qr = fallen
-            self.s, self.qt, self.qr = self._bound_scalars([self.s, self.qt, self.qr])
+            self.qt, rain, _ = atm_kessler(self.qt, self.qr, qc, t, self.ref, dt, float(cfg.ice), float(cfg.snow), device=dev)
+            snow = None
+            if cfg.snow:
+                self.qt, rain, snow = atm_snow(self.qt, rain, self.qs, qc, t, self.ref, dt, device=dev)
+            # Precipitation carries away the energy `-L q / cp` it holds in `s`
+            for q, heat, law, name in ((rain, LV, RAIN_FALL, "surface_rain"), (snow, LV + LF, SNOW_FALL, "surface_snow")):
+                if q is None:
+                    continue
+                setattr(self, name, atm_surface_rain(getattr(self, name), q, self.ref, dt, inv[2], *law, device=dev))
+                fallen = atm_sediment(q, self.ref, dt, inv[2], *law, device=dev)
+                minus = atm_axpy(self._zero, fallen, atm_axpy(self._zero, q, self._zero, -1.0, device=dev), 1.0, device=dev)
+                self.s = atm_axpy(self.s, minus, self._zero, -heat / CP, device=dev)
+                if name == "surface_rain":
+                    self.qr = fallen
+                else:
+                    self.qs = fallen
+            self._set_scalars(self._bound_scalars(list(self.state()[3:])))
         if cfg.ice:
-            # Crystals carry away the energy `-L qc / cp` they hold in `s`
+            # Crystals carry away the energy `-L qc / cp` they hold in `s` (with the heat of fusion when it is counted)
             change = atm_ice_fall(qc, t, self.ref, dt, inv[2], device=dev)
             self.qt = atm_add(self.qt, change, device=dev)
-            self.s = atm_axpy(self.s, change, self._zero, -LV / CP, device=dev)
-            self.s, self.qt, self.qr = self._bound_scalars([self.s, self.qt, self.qr])
+            self.s = atm_axpy(self.s, change, self._zero, -(LV + LF * cfg.snow) / CP, device=dev)
+            self._set_scalars(self._bound_scalars(list(self.state()[3:])))
         self.diagnose()
         self.time += dt
         self.steps += 1

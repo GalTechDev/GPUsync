@@ -672,13 +672,21 @@ def _condensation_columns(
     dt: gs.f32,
     tpl: gs.f32["ny", "nb", "cc", "g"],
 ) -> gs.f32["ny", "nb", "cc", "g"]:
-    """Resolved clouds: saturation adjustment, conversion to rain, immediate fall with evaporation (Sundqvist)."""
+    """Resolved clouds: saturation adjustment, conversion to rain, immediate fall with evaporation (Sundqvist).
+
+    Phase of the precipitation (diagnostic, the energy budget does not change): what forms below 0 °C and the
+    falling crystals leave frozen and melt on the way down at the rate of Lin et al. (1983), which follows the
+    wet-bulb temperature. Cells `3 nz`: precipitation at the ground (kg/m²/s), `3 nz + 1`: its frozen part,
+    `3 nz + 2`: share of a 1 mm/h snowfall leaving the 0 °C level that reaches the ground frozen."""
     j, b, c0, r = gs.index()
     i = b * 16 + r
     nz = th.shape[0]
     pi = pi0[j, i] + pip[j, i]
     rain = 0.0
     snow = 0.0
+    frozen = 0.0
+    probe = 0.0
+    above = 1.0
     for k in range(nz):
         p = 5000.0 + lev[k, 1] * pi
         ex = gs.pow(p * 1e-5, 0.285714)
@@ -726,16 +734,46 @@ def _condensation_columns(
             made = (ql - thr) * (1.0 - gs.exp(-1e-3 * dt)) * gs.min((t - 238.0) / 20.0, 1.0)
             ql -= made
         rain += made * dm / dt
+        if t < 273.15:
+            frozen += made * dm / dt
+            if above > 0.0:
+                probe = 2.7778e-4
+        else:
+            above = 0.0
         if ql <= 0.0 and rain > 0.0 and vap < qs:
             ev = 1e-5 * (1.0 - vap / qs) * gs.sqrt(rain) * dt
             ev = gs.min(gs.min(ev, rain * dt / dm), 0.5 * (qs - vap))
             vap += ev
             t -= 2489.4489 * ev
+            frozen = frozen * (1.0 - ev * dm / dt / rain)
             rain -= ev * dm / dt
+        if t > 273.15:
+            # Melting of the snow flux F = 2.414 (rho qs)^1.1025 (Lin et al. 1983, as in the 3D tile)
+            rho = p / (287.04 * t)
+            e0 = 611.2
+            qs0 = 0.62197 * e0 / gs.max(p - 0.378 * e0, 1.0)
+            heat = 0.0243 * (t - 273.15) - 2.501e6 * 2.26e-5 * rho * (qs0 - vap)
+            if heat > 0.0:
+                for h in range(2):
+                    flux = frozen
+                    if h == 1:
+                        flux = probe
+                    if flux > 1e-9:
+                        rq = gs.pow(flux / 2.4138622, 0.9070295)
+                        lam = gs.pow(9.424778e8 / rq, 0.25)
+                        vent = 0.78 / (lam * lam) + 334.91695 * gs.sqrt(rho) * gs.pow(lam, -2.705)
+                        melt = 6.2831853 / (rho * 3.337e5) * heat * 3e6 * vent * dm
+                        if h == 0:
+                            frozen = gs.max(frozen - melt, 0.0)
+                        else:
+                            probe = gs.max(probe - melt, 0.0)
+        frozen = gs.min(frozen, rain)
         gs.store(k, t / ex)
         gs.store(nz + k, vap)
         gs.store(2 * nz + k, ql)
     gs.store(3 * nz, rain + snow)
+    gs.store(3 * nz + 1, frozen + snow)
+    gs.store(3 * nz + 2, probe / 2.7778e-4)
 
 
 @gs.kernel
@@ -768,6 +806,18 @@ def wx_accumulate(
     """Accumulated rain (mm): convective and resolved."""
     j, i = gs.index()
     return acc[j, i] + dt * (a[j, i // 16, ka, i % 16] + b[j, i // 16, kb, i % 16])
+
+
+@gs.kernel
+def wx_accumulate_frozen(
+    acc: gs.f32["ny", "nx"], a: gs.f32["ny", "nb", "ca", "g"], ka: gs.i32, b: gs.f32["ny", "nb", "cb", "g"], kb: gs.i32, dt: gs.f32
+) -> gs.f32["ny", "nx"]:
+    """Accumulated snow (mm of water): frozen part of the resolved precipitation, and of the convective one by the
+    share of snow that survives the melting layer of the column (cells `kb + 1`, `kb + 2` of `_condensation_columns`)."""
+    j, i = gs.index()
+    o = i // 16
+    r = i % 16
+    return acc[j, i] + dt * (b[j, o, kb + 1, r] + a[j, o, ka, r] * b[j, o, kb + 2, r])
 
 
 @gs.kernel
@@ -1118,7 +1168,8 @@ def wx_map(
     lines: gs.i32,
     tpl: gs.u32["h", "w"],
 ) -> gs.u32["h", "w"]:
-    """Map: terrain and sea, clouds (mode 0) or 2-m temperature (mode 1), rain, cold-air edge, isobars (4 hPa)."""
+    """Map: terrain and sea, clouds (mode 0) or 2-m temperature (mode 1), rain, snow (blue: more than half of the
+    precipitation reaches the ground frozen), cold-air edge, isobars (4 hPa)."""
     y, x = gs.index()
     ny = qnh.shape[0]
     nx = qnh.shape[1]
@@ -1133,6 +1184,7 @@ def wx_map(
     t2 = 0.0
     rain = 0.0
     crain = 0.0
+    frozen = 0.0
     # Interpolation at the pixel and its right and lower neighbours (isobar slope)
     for n in range(3):
         px = gx + (float(nx) / ww if n == 1 else 0.0)
@@ -1158,6 +1210,7 @@ def wx_map(
                     t2 += wt * surface[jj, bb, 5 * nz + 9, rr]
                     rain += wt * cond[jj, bb, 3 * nz, rr] * 3600.0
                     crain += wt * cnv[jj, bb, 4 * nz, rr] * 3600.0
+                    frozen += wt * (cond[jj, bb, 3 * nz + 1, rr] + cnv[jj, bb, 4 * nz, rr] * cond[jj, bb, 3 * nz + 2, rr]) * 3600.0
         val[n] = acc
     # Bottom
     r = 0.05
@@ -1185,6 +1238,14 @@ def wx_map(
         r += (0.95 - r) * c
         g += (0.96 - g) * c
         b_ += (0.97 - b_) * c
+    snowy = frozen > 0.5 * (rain + crain) and rain + crain > 0.1
+    if snowy:
+        rain = 0.0
+        crain = 0.0
+        ink_a = gs.min(0.4 + 0.2 * gs.log(frozen * 10.0), 0.9)
+        r += (0.30 - r) * ink_a
+        g += (0.62 - g) * ink_a
+        b_ += (1.0 - b_) * ink_a
     if rain > 0.1:
         ink_a = gs.min(0.35 + 0.2 * gs.log(rain * 10.0), 0.9)
         r += (0.08 - r) * ink_a

@@ -23,7 +23,11 @@ def _totals(a):
     def integral(f):
         return float((f.numpy().astype(np.float64) * col).sum())
 
-    return integral(a.qt) + integral(a.qr) + rain, integral(a.s) - atm.LV / atm.CP * rain
+    snow = float(a.surface_snow.numpy().astype(np.float64).mean())
+    water = integral(a.qt) + integral(a.qr) + rain + snow
+    if a.config.snow:
+        water += integral(a.qs)
+    return water, integral(a.s) - atm.LV / atm.CP * rain - (atm.LV + atm.LF) / atm.CP * snow
 
 
 def test_stratified_air_stays_at_rest():
@@ -412,3 +416,77 @@ def test_live_renderer_survives_a_clear_sky():
     r.refresh_light(2)
     img = np.stack([c.numpy() for c in r.march(r.camera((2400.0, 600.0, 20.0), 0.0, 10.0), 64, 48)])
     assert np.isfinite(img).all() and img.min() >= 0.0 and r.cache_cells == 0
+
+
+def test_fusion_heat_is_counted_in_the_static_energy():
+    """With snow, `s` holds the heat of fusion of the cloud ice: diagnosing a state built from (T, qc) gives them back."""
+    t = np.linspace(235.0, 285.0, 24)[:, None, None] * np.ones((24, 4, 4))
+    p = np.full_like(t, 7e4)
+    qsat = atm.saturation_mixing(t, p, True)
+    cfg = gfx.AtmosphereConfig(nx=4, ny=4, nz=24, dx=100.0, dy=100.0, dz=100.0, rain=True, ice=True, snow=True)
+    a = gfx.Atmosphere(cfg)
+    ref = a.ref.numpy()
+    ref[:, 1] = 7e4
+    a.ref = a._up(ref)
+    qc = np.full_like(t, 1e-3)
+    a.qt = a._up(qsat + qc)
+    a.s = a._up(atm.static_energy(t, qc, a.z[:, None, None], fusion=True) - atm.S_REF)
+    a.diagnose()
+    assert np.abs(a.t.numpy() - t).max() < 0.02
+    assert np.abs(a.qc.numpy() - qc).max() < 2e-6
+    # Freezing a gram of cloud water at -30 °C warms the air by Lf / cp per kg/kg
+    cold = atm.static_energy(np.array(243.15), 1e-3, 0.0, fusion=True)
+    warm = atm.static_energy(np.array(243.15), 1e-3, 0.0, fusion=False)
+    assert abs((warm - cold) - atm.LF / atm.CP * 1e-3) < 1e-6
+
+
+def test_snow_falls_melts_and_the_budget_closes():
+    """Snow released in the cold air above the thermal: it falls, part of it melts below 0 °C level; water and
+    energy (liquid-ice static energy, heat of the precipitation on the ground) are conserved."""
+    a = _thermal(ice=True, snow=True)
+    snow = np.zeros((50, 48, 48))
+    snow[35:40, 16:32, 16:32] = 2e-3
+    a.qs = a._up(snow)
+    a.s = a._up(a.s.numpy() - (atm.LV + atm.LF) / atm.CP * snow)
+    a.diagnose()
+    water, energy = _totals(a)
+    a.run(2400.0)
+    assert a.surface_rain.numpy().max() + a.surface_snow.numpy().max() > 0.05
+    w2, e2 = _totals(a)
+    assert abs(w2 / water - 1.0) < 1e-4
+    assert abs(e2 - energy) < 1e-3 * abs(energy)
+
+
+def _snow_column(t_ground, rh):
+    """Still column, 6.5 K/km, snow released between 2.5 and 3 km; share of the ground precipitation that is snow."""
+    tsfc = 273.15 + t_ground
+
+    def temp(z):
+        return tsfc - 6.5e-3 * z
+
+    def pres(z):
+        return 1e5 * (1 - 6.5e-3 * z / tsfc) ** (atm.GRAVITY / (atm.RD * 6.5e-3))
+
+    cfg = gfx.AtmosphereConfig(
+        nx=4, ny=4, nz=60, dx=500.0, dy=500.0, dz=50.0, surface_pressure=1e5,
+        theta_l=lambda z: temp(z) * (atm.P00 / pres(z)) ** (atm.RD / atm.CP),
+        qt=lambda z: rh * atm.saturation_mixing(temp(z), pres(z), True),
+        smagorinsky=0.0, rain=True, ice=True, snow=True, max_dt=4.0,
+    )  # fmt: skip
+    a = gfx.Atmosphere(cfg)
+    snow = np.zeros((60, 4, 4))
+    snow[50:60] = 6e-4
+    a.qs = a._up(snow)
+    a.s = a._up(a.s.numpy() - (atm.LV + atm.LF) / atm.CP * snow)
+    a.diagnose()
+    a.run(5400.0)
+    rain, fallen = (float(f.numpy().mean()) for f in (a.surface_rain, a.surface_snow))
+    return fallen / (rain + fallen)
+
+
+def test_snow_line_follows_the_wet_bulb_temperature():
+    """Melting from the heat and vapour budget (Lin et al. 1983): snow at the ground at 0 °C, rain at +3 °C in
+    saturated air; in drier air evaporation cools the flakes and snow holds at +2 °C (wet bulb +0.8 °C)."""
+    assert _snow_column(0.0, 1.0) > 0.95
+    assert _snow_column(3.0, 1.0) < 0.05
+    assert _snow_column(2.0, 0.8) > 3.0 * _snow_column(2.0, 1.0)

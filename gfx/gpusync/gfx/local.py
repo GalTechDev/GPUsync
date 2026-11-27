@@ -71,7 +71,7 @@ class LocalClouds:
             nx=n, ny=n, nz=nz, dx=a["dx"], dy=a["dx"], dz=a["dz"], surface_pressure=s["surface_pressure"],
             theta_l=of(s["theta"] - LV / CP * s["qc"] * s["theta"] / s["t"]), qt=of(s["qv"] + s["qc"]), u=of(s["u"]), v=of(s["v"]),
             frame_u=float(s["u"][deep].mean()), frame_v=float(s["v"][deep].mean()),
-            rain=True, ice=True, sponge_depth=0.25 * a["top"], max_dt=0.02 * a["dx"], cfl=0.8, initial={"theta_l": bump},
+            rain=True, ice=True, snow=True, sponge_depth=0.25 * a["top"], max_dt=0.02 * a["dx"], cfl=0.8, initial={"theta_l": bump},
         )  # fmt: skip
         self.atmosphere = Atmosphere(cfg, device=self.weather.device)
         self.offset = np.zeros(2)  # position of the tile's corner on the map (m)
@@ -159,7 +159,7 @@ class LocalClouds:
         # Relaxation: on liquid water static energy and total water (clouds included), twice as fast aloft
         relax = self.nudge_time * (1.0 - 0.5 * np.clip((z - 3000.0) / 3000.0, 0.0, 1.0))
         s_target = c["t"] + GRAVITY / CP * z - LV / CP * c["qc"]
-        s_now = m["t"] + GRAVITY / CP * z - LV / CP * (m["qc"] + m["qr"])
+        s_now = m["t"] + GRAVITY / CP * z - LV / CP * (m["qc"] + m["qr"] + m["qs"])
         q_now = m["qt"]
         atm.set_forcing(
             w=w,

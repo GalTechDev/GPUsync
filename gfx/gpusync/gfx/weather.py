@@ -59,6 +59,7 @@ from .kernels.kwxphys import (  # noqa: F401 (the CNV_* and SFC_* names are re-e
     _convection_columns,
     _surface_columns,
     wx_accumulate,
+    wx_accumulate_frozen,
     wx_cold_pool,
     wx_convective_cover,
     wx_front_lift,
@@ -403,7 +404,7 @@ class Weather:
         data = {n: getattr(self, n).numpy() for n in ("u", "v", "th", "qv", "qc", "pip")}
         data["time"] = self.time
         if self.config.physics:
-            data.update({n: getattr(self, n).numpy() for n in ("ts", "rain", "cover", "lift", "memory")})
+            data.update({n: getattr(self, n).numpy() for n in ("ts", "rain", "snow", "cover", "lift", "memory")})
             data.update({f"pool{n}": f.numpy() for n, f in enumerate(self.pool)})
         np.savez(path, **data)
 
@@ -419,11 +420,12 @@ class Weather:
             if self.config.physics:
                 for n in ("ts", "rain", "cover", "lift", "memory"):
                     setattr(self, n, self._up(d[n]))
+                self.snow = self._up(d["snow"] if "snow" in d else np.zeros(self.rain.shape))  # older files: none
                 self.pool = [self._up(d[f"pool{n}"]) for n in range(4)]
                 self._dyn_start = (self.th, self.qv, self.qc)
                 self._dyn_pair = (self._dyn_start, self._dyn_start)
                 # Diagnostics (map, fluxes) available right away: one physics pass, of which only that is kept
-                names = ("u", "v", "th", "qv", "qc", "ts", "rain", "cover", "lift", "memory", "pool")
+                names = ("u", "v", "th", "qv", "qc", "ts", "rain", "snow", "cover", "lift", "memory", "pool")
                 kept = {n: getattr(self, n) for n in names}
                 with gs.batch(self.device):
                     self._physics(self.dt * self.physics_every)
@@ -496,6 +498,7 @@ class Weather:
         self.surf_np, self.surf = surf, self._up(surf)
         self.ts = self._up(ts)
         self.rain = self._up(np.zeros(shape))  # cumul (mm)
+        self.snow = self._up(np.zeros(shape))  # frozen part of `rain` (mm of water)
         self.cover = self._up(np.zeros(shape))
         self.lift = self._up(np.zeros(shape))
         r = cfg.cold_pool_refine
@@ -505,10 +508,10 @@ class Weather:
         nz = cfg.nz
         self._surface = column_kernel(_surface_columns, 5 * nz + SURFACE_CELLS)
         self._convection = column_kernel(_convection_columns, 4 * nz + CONVECTION_CELLS)
-        self._condensation = column_kernel(_condensation_columns, 3 * nz + 1)
+        self._condensation = column_kernel(_condensation_columns, 3 * nz + 3)
         self._tpl_s = self._columns(5 * nz + SURFACE_CELLS)
         self._tpl_c = self._columns(4 * nz + CONVECTION_CELLS)
-        self._tpl_l = self._columns(3 * nz + 1)
+        self._tpl_l = self._columns(3 * nz + 3)
         self._tpl4 = self._up(np.zeros((*shape, 4)))
         self.physics_every = max(1, round(cfg.physics_step / self.dt))
         self._dyn_start = (self.th, self.qv, self.qc)
@@ -560,6 +563,19 @@ class Weather:
         self.condensation_out = m
         if cfg.convection:
             self.rain = wx_accumulate(self.rain, self.convection_out, 4 * nz, m, 3 * nz, dt, device=dev)
+            self.snow = wx_accumulate_frozen(self.snow, self.convection_out, 4 * nz, m, 3 * nz, dt, device=dev)
+
+    def precipitation(self) -> dict:
+        """Precipitation at the ground now (mm/h, per cell): `total` (resolved and convective) and its `frozen` part."""
+        nz, dev = self.config.nz, self.device
+        cond, cnv = self.condensation_out, self.convection_out
+        if cond is None or cnv is None:
+            raise RuntimeError("Weather.precipitation: first advance by one physics step (physics=True, convection=True)")
+        f = lambda col, c: wx_unpack_surface(col, self._tpl2, c, device=dev).numpy().astype(np.float64) * 3600.0
+        conv = f(cnv, 4 * nz)
+        total = f(cond, 3 * nz) + conv
+        frozen = f(cond, 3 * nz + 1) + conv * f(cond, 3 * nz + 2) / 3600.0
+        return {"total": total, "frozen": np.minimum(frozen, total)}
 
     def surface_field(self, c: int) -> np.ndarray:
         """Diagnostic de surface (`SFC_*`)."""

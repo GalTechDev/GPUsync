@@ -184,7 +184,7 @@ class SkyRenderer:
         grids = [a] if self.nested is None else [a, self.nested]
         number = 4.0 * math.pi * 1000.0 * 0.8 * self.droplets / 3.0
         unit_scale = 1.5e-3 * number ** (1.0 / 3.0)
-        excess = [cloud_excess(g.qt, g.qc, g.t, g.ref, float(g.config.ice), unit_scale, device=dev) for g in grids]
+        excess = [cloud_excess(g.qt, g.qc, g.qr, g.qs, g.t, g.ref, float(g.config.ice), unit_scale, device=dev) for g in grids]
         # Majorants at scale 1 (rho q)^(2/3), read here: small, and they give the maximum water and the cloud blocks
         unit = [self._majorants(g, e) for g, e in zip(grids, excess)]
         self._blocks = [np.array(u.numpy()) for u in unit]
@@ -223,7 +223,8 @@ class SkyRenderer:
         for g, b in zip(grids, self._blocks):
             levels = np.flatnonzero(b.max(axis=(1, 2)) > 0.0)
             if len(levels):
-                low = min(low, (4.0 * levels[0] + 0.5) * g.config.dz)
+                # Down to the ground when the first block touches it (rain, snow): the camera is inside
+                low = min(low, 0.0 if levels[0] == 0 else (4.0 * levels[0] + 0.5) * g.config.dz)
                 high = max(high, (4.0 * levels[-1] + 4.5) * g.config.dz)
         ceiling = (cfg.nz - 0.501) * cfg.dz
         box[9], box[10] = max(min(low, ceiling - 1.0) - 1.0, 0.0), min(max(high, min(low, ceiling) if high else 10.0) + 1.0, ceiling)

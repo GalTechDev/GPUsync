@@ -12,6 +12,8 @@ BLOCK = 4  # side of the blocks of the majorant grid
 def cloud_excess(
     qt: gs.f32["nz", "ny", "nx"],
     qc: gs.f32["nz", "ny", "nx"],
+    qr: gs.f32["nz", "ny", "nx"],
+    qs: gs.f32["nz", "ny", "nx"],
     t: gs.f32["nz", "ny", "nx"],
     ref: gs.f32["nz", "c8"],
     ice: gs.f32,
@@ -20,19 +22,27 @@ def cloud_excess(
     """Liquid water where the air is saturated, deficit (negative) elsewhere: this signed field interpolates without bleeding at the edge.
 
     `ice` = 1: the ice share counts as liquid water of the same extinction (crystals of 30 µm effective radius);
-    `unit`: extinction of liquid water = unit (rho q)^(2/3)."""
+    `unit`: extinction of liquid water = unit (rho q)^(2/3). Rain and snow add their geometric extinction
+    (pi N0 / lambda^3, twice the cross-section, over the exponential distributions of the microphysics:
+    0.398 (rho qr)^0.75 and 1.752 (rho qs)^0.75, i.e. 13 km of visibility under 1 mm/h of rain, 1 km under 1 mm/h of
+    snow); the result is returned as the liquid water of the same extinction, positive even in unsaturated air."""
     k, j, i = gs.index()
     t_c = t[k, j, i]
     q = qc[k, j, i]
+    rho = ref[k, 5]
+    precip = 0.398162 * gs.pow(rho * gs.max(qr[k, j, i], 0.0), 0.75) + 1.752136 * gs.pow(rho * gs.max(qs[k, j, i], 0.0), 0.75)
     if q > 0.0:
         part = gs.min(gs.max((258.0 - t_c) / 20.0, 0.0), 1.0) * ice
+        liquid = unit * gs.pow(rho * q, 0.6666667)
+        beta = liquid
         if part > 0.0:
-            rho = ref[k, 5]
-            liquid = unit * gs.pow(rho * q, 0.6666667)
             crystals = 1.5 * rho * q / (917.0 * 30e-6)
             beta = (1.0 - part) * liquid + part * gs.min(crystals, liquid)
-            q = gs.pow(beta / unit, 1.5) / rho
+        if part > 0.0 or precip > 0.0:
+            q = gs.pow((beta + precip) / unit, 1.5) / rho
         return q
+    if precip > 1e-6:
+        return gs.pow(precip / unit, 1.5) / rho
     p = ref[k, 1]
     es = 611.2 * gs.exp(17.67 * (t_c - 273.15) / (t_c - 29.65))
     dqs = 17.67 * 243.5 / ((t_c - 29.65) * (t_c - 29.65))
@@ -40,9 +50,9 @@ def cloud_excess(
         mix = gs.max((t_c - 250.16) / 23.0, 0.0)
         mix = gs.min(mix * mix, 1.0)
         es = es * mix + (1.0 - mix) * 611.2 * gs.exp(22.46 * (t_c - 273.15) / (t_c - 0.55))
-    qs = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
-    dqs = dqs * qs
-    return gs.min((qt[k, j, i] - qs) / (1.0 + 2489.4489 * dqs), 0.0)
+    qs_sat = 0.62197 * es / gs.max(p - 0.37803 * es, 1.0)
+    dqs = dqs * qs_sat
+    return gs.min((qt[k, j, i] - qs_sat) / (1.0 + 2489.4489 * dqs), 0.0)
 
 
 @gs.kernel
