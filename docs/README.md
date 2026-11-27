@@ -42,6 +42,6 @@ For the internal design (IR, code generators, transfer engine, measurements), se
 - Examples marked `python` are run by `tests/test_docs.py`: they work as written. Those marked `py` (window,
   PyTorch, multi-gigabyte files) are not.
 - `gs` stands for `gpusync`, `np` for NumPy.
-- The documentation website (`docs/pages`, published on GitHub Pages) is generated from these pages by
+- The documentation website (the `.html` files of `docs/`, published on GitHub Pages) is generated from these pages by
   `python3 tools/build_pages.py`; a test checks that it is up to date.
 - Measurements come from two machines: a Mac with an Apple M5 Pro chip and a PC with an RTX 4080 SUPER.

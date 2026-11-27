@@ -35,7 +35,7 @@ z = normalize(y, 0.0, 2.0)              # chaining: y stays on the GPU
 
 ## Documentation
 
-Full documentation in [docs/](docs/README.md), also published as a website (generated into `docs/pages`):
+Full documentation in [docs/](docs/README.md), also published as a website (the `.html` files generated next to them):
 [installation](docs/installation.md), [writing a kernel](docs/kernels.md), [results and large data](docs/results.md),
 [devices](docs/devices.md), [atomics](docs/atomics.md), [thread groups](docs/groups.md), [window](docs/window.md),
 [errors and performance](docs/errors.md), [reference](docs/reference.md). Every Python example in it is run by the
@@ -87,8 +87,8 @@ crates/
   gpusync-py/               PyO3 binding → gpusync._core module
 python/gpusync/             Python package: @gs.kernel, gs.Array, types, devices, gs.Window
 gfx/                        gpusync-gfx package: the gpusync.gfx engine and its tests
-docs/                       library documentation (examples checked by tests/test_docs.py)
-docs/pages/                 GitHub Pages website, generated from docs/*.md by tools/build_pages.py
+docs/                       library documentation (*.md, examples checked by tests/test_docs.py) and the GitHub
+                            Pages website generated from it (*.html, assets/) by tools/build_pages.py
 tests/                      Python tests (differential on every device, errors, docs)
 tools/                      dev tasks (dev.py), website generator, benchmarks, remote test machines
 ```

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Documentation website (GitHub Pages): docs/*.md → docs/pages/*.html, in the visual style of bio.galtech.cc.
+"""Documentation website (GitHub Pages): docs/*.md → docs/*.html (next to their source), in the visual style of bio.galtech.cc.
 
-    python3 tools/build_pages.py            # regenerates docs/pages
-    python3 tools/build_pages.py --check    # fails if docs/pages is not up to date (tests, CI)
+    python3 tools/build_pages.py            # regenerates the site in docs/
+    python3 tools/build_pages.py --check    # fails if the site is not up to date (tests, CI)
 
 Standard library only. The Markdown converter covers what docs/ uses: headings, paragraphs, lists, tables, code
 blocks, inline code, bold, italics, links. ```python blocks are marked "verified": tests/test_docs.py runs them.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
-OUT = DOCS / "pages"
+OUT = DOCS  # GitHub Pages serves a branch from / or /docs only
 REPO = "https://github.com/GalTechDev/GPUsync"
 BRANCH = "new-rust"
 
@@ -430,11 +430,11 @@ def main() -> int:
         stale = [p for p, text in files.items() if not p.exists() or p.read_text(encoding="utf-8") != text]
         stale += _orphans(files)
         if stale:
-            print("docs/pages is not up to date, run: python3 tools/build_pages.py")
+            print("the site in docs/ is not up to date, run: python3 tools/build_pages.py")
             for p in stale:
                 print("  ", p.relative_to(ROOT))
             return 1
-        print("docs/pages is up to date")
+        print("the site in docs/ is up to date")
         return 0
     for p in _orphans(files):
         p.unlink()

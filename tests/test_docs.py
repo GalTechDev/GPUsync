@@ -33,7 +33,7 @@ def test_examples_of_the_page_run(page, tmp_path, monkeypatch, capsys):
 
 
 def test_site_pages_are_up_to_date():
-    """docs/pages (GitHub Pages) is generated from docs/*.md: after changing the docs, run
+    """The site (docs/*.html, GitHub Pages) is generated from docs/*.md: after changing the docs, run
     `python3 tools/build_pages.py` again."""
     import subprocess
     import sys
