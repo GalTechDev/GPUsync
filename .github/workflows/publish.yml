@@ -1,6 +1,7 @@
 name: Publish to PyPI
 
-# Publishing a GitHub release sends gpusync (one wheel per system + sources) and gpusync-gfx to PyPI.
+# Publishing a GitHub release runs the tests (ci.yml), builds gpusync (one wheel per system, abi3: Python ≥ 3.10,
+# each one installed and self-tested) and gpusync-gfx, then sends them to PyPI if everything passed.
 # Trusted publishing, one GitHub environment per PyPI project: `pypi` for gpusync, `pypi-gfx` for gpusync-gfx.
 
 on:
@@ -8,7 +9,13 @@ on:
     types: [published]
   workflow_dispatch:  # re-run by hand on a release tag (files already on PyPI are skipped)
 
+permissions:
+  contents: read
+
 jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+
   wheels:
     name: Wheel ${{ matrix.target }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -33,11 +40,11 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --out dist
-      - name: The wheel installs and finds its devices
+      - name: The wheel installs and passes its self-test
         shell: bash
         run: |
           python -m pip install dist/*.whl
-          cd "$RUNNER_TEMP" && python -m gpusync
+          cd "$RUNNER_TEMP" && python -m gpusync --check
       - uses: actions/upload-artifact@v4
         with:
           name: gpusync-${{ matrix.os }}-${{ matrix.target }}
@@ -73,7 +80,7 @@ jobs:
 
   publish:
     name: Publish gpusync
-    needs: [wheels, sources]
+    needs: [tests, wheels, sources]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

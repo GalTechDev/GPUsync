@@ -1,16 +1,13 @@
-# Continuous integration: tests on the three systems, wheels of gpusync (one per system, abi3: Python ≥ 3.10)
-# and of gpusync-gfx (pure Python). GitHub machines have no compute GPU: the tests go through the cpu:0
-# interpreter (and through Metal on macOS when it is exposed); the full GPU tests stay on the test machines
-# (tools/remote).
+# Tests on the three systems. GitHub machines have no compute GPU: the tests go through the cpu:0 interpreter
+# (and through Metal on macOS when it is exposed); the full GPU tests stay on the test machines (tools/remote).
 #
-# Publishing to PyPI is done by publish.yml, when a GitHub release is published.
+# Not run on every commit: publish.yml calls it when a GitHub release is published (nothing is published unless
+# it passes), and it can be started by hand (Actions → CI → Run workflow, or `gh workflow run ci.yml`).
 
 name: CI
 
 on:
-  push:
-    branches: [main, new-rust]
-  pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -38,8 +35,8 @@ jobs:
         run: |
           python -m pip install --no-build-isolation -e .
           python -m pip install --no-build-isolation --no-deps -e gfx
-      - name: Diagnostic
-        run: python -m gpusync
+      - name: Diagnostic and self-test
+        run: python -m gpusync --check
       - name: cargo test
         run: cargo test --workspace -q
       - name: Library tests
@@ -60,58 +57,5 @@ jobs:
       - run: |
           python -m pip install --no-build-isolation -e .
           python -m pip install --no-build-isolation --no-deps -e gfx
-      - run: python -m gpusync
+      - run: python -m gpusync --check
       - run: python -m pytest -q -ra gfx/tests
-
-  wheels:
-    name: Wheel ${{ matrix.target }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28" }
-          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
-          - { os: macos-latest, target: aarch64 }
-          - { os: macos-15-intel, target: x86_64 }
-          - { os: windows-latest, target: x64 }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --out dist
-      - name: The wheel installs and finds its devices
-        shell: bash
-        run: |
-          python -m pip install dist/*.whl
-          cd "$RUNNER_TEMP" && python -m gpusync
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheel-${{ matrix.os }}-${{ matrix.target }}
-          path: dist/*.whl
-
-  sdist:
-    name: Source archive and engine wheel
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-      - name: gpusync-gfx (sources and wheel)
-        run: |
-          python -m pip install build
-          python -m build --outdir dist gfx
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdist-and-gfx
-          path: dist/*

@@ -95,6 +95,32 @@ for d in gs.devices():                         # usable devices
 `cpu:0` always exists: it is GPUsync's reference interpreter, exact but slow, useful to check a result or to
 debug.
 
+## Check that everything works
+
+A detected device can still fail at the first kernel (old driver, broken OpenCL install). `--check` runs a few
+small kernels on every device — element-wise, indexed, atomics, thread groups, f64, chained results — and compares
+each result with NumPy:
+
+```bash
+python -m gpusync --check
+python -m gpusync --check -d opencl:0      # only this device (repeatable)
+```
+
+```text
+Self-test (each result compared with NumPy):
+
+  metal:0    Apple M5 Pro                     ✓ elementwise  ✓ indexed  ✓ atomics  ✓ groups  – f64  ✓ chained  (0.2 s)
+             f64: not supported
+  opencl:0   Apple M5 Pro                     ✓ elementwise  ✓ indexed  ✓ atomics  ✓ groups  – f64  ✓ chained  (0.1 s)
+             f64: not supported
+  cpu:0      GPUsync interpreter (CPU, slow)  ✓ elementwise  ✓ indexed  ✓ atomics  ✓ groups  ✓ f64  ✓ chained  (0.0 s)
+
+All 3 device(s) passed.
+```
+
+`✓` passed, `–` skipped (the device does not support it), `✗` failed, with the error below the line. The exit code
+is 1 when a test fails, so it can be used in a script or a CI job.
+
 ## Backends
 
 | Backend | Devices | Notes |

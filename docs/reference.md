@@ -122,3 +122,4 @@ Usable with `with`. See [Window](window.md).
 |---|---|
 | `gs.__version__` | library version |
 | `python -m gpusync` | diagnostic of backends and devices |
+| `python -m gpusync --check [-d ID]` | also runs a self-test on every device (exit code 1 on failure) |
