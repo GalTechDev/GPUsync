@@ -1,13 +1,12 @@
 # Tests on the three systems. GitHub machines have no compute GPU: the tests go through the cpu:0 interpreter
 # (and through Metal on macOS when it is exposed); the full GPU tests stay on the test machines (tools/remote).
 #
-# Not run on every commit: publish.yml calls it when a GitHub release is published (nothing is published unless
-# it passes), and it can be started by hand (Actions → CI → Run workflow, or `gh workflow run ci.yml`).
+# Never run automatically: start it by hand before a release (Actions → CI → Run workflow, or
+# `gh workflow run ci.yml`).
 
 name: CI
 
 on:
-  workflow_call:
   workflow_dispatch:
 
 permissions:

@@ -1,7 +1,8 @@
 name: Publish to PyPI
 
-# Publishing a GitHub release runs the tests (ci.yml), builds gpusync (one wheel per system, abi3: Python ≥ 3.10,
-# each one installed and self-tested) and gpusync-gfx, then sends them to PyPI if everything passed.
+# Publishing a GitHub release builds gpusync (one wheel per system, abi3: Python ≥ 3.10, each one installed and
+# checked with `python -m gpusync --check`) and gpusync-gfx, then sends them to PyPI. The full tests (ci.yml) are
+# not run here: start them by hand before a release (Actions → CI → Run workflow).
 # Trusted publishing, one GitHub environment per PyPI project: `pypi` for gpusync, `pypi-gfx` for gpusync-gfx.
 
 on:
@@ -13,9 +14,6 @@ permissions:
   contents: read
 
 jobs:
-  tests:
-    uses: ./.github/workflows/ci.yml
-
   wheels:
     name: Wheel ${{ matrix.target }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -80,7 +78,7 @@ jobs:
 
   publish:
     name: Publish gpusync
-    needs: [tests, wheels, sources]
+    needs: [wheels, sources]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
