@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Documentation website (GitHub Pages): docs/*.md → docs/*.html (next to their source), in the visual style of bio.galtech.cc.
+"""Documentation website (GitHub Pages): docs/markdown/*.md → docs/*.html, in the visual style of bio.galtech.cc.
 
     python3 tools/build_pages.py            # regenerates the site in docs/
     python3 tools/build_pages.py --check    # fails if the site is not up to date (tests, CI)
@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCS = ROOT / "docs"
-OUT = DOCS  # GitHub Pages serves a branch from / or /docs only
+DOCS = ROOT / "docs" / "markdown"  # sources
+OUT = ROOT / "docs"  # the site: GitHub Pages serves a branch from / or /docs only
 REPO = "https://github.com/GalTechDev/GPUsync"
 BRANCH = "new-rust"
 
@@ -105,8 +105,8 @@ def link_target(url: str) -> str:
     if "/" not in path and path.endswith(".md"):
         name = path[:-3]
         return ("index.html" if name == "README" else f"{name}.html") + frag
-    if path.startswith("../"):
-        rel = path[3:]
+    if path.startswith("../../"):
+        rel = path[6:]
         kind = "tree" if rel.endswith("README.md") and "/" in rel else "blob"
         if kind == "tree":
             rel = rel.rsplit("/", 1)[0]
@@ -281,7 +281,7 @@ def layout(*, name: str, title: str, top: str, description: str, main: str, toc:
 {main}
 {toc}
 </main>
-<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/markdown by tools/build_pages.py</span></footer>
 </div>
 </body>
 </html>

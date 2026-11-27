@@ -83,7 +83,7 @@ print(norm.source(<span class="tk-str">"ir"</span>))</code></pre></div>
 <ul><li>No slices (<code>x[a:b]</code>) and no calls to your own functions inside a kernel.</li><li>No broadcasting between arrays of different shapes in an element-wise kernel.</li><li>Non-contiguous arrays (transposed or strided NumPy views): copied to contiguous memory at call time.</li><li>64-bit <code>gs.Out</code> not allowed; <code>grid=</code> cannot be combined with <code>group=</code>.</li><li>Beyond 2³¹ − 1 elements in one array kept whole on the device: handled by OpenCL, CUDA and <code>cpu:0</code> (a 64-bit index variant compiled on demand), rejected by wgpu (Metal, Vulkan, DX12).</li><li>A GPU lost by the driver (<code>gs.DeviceError</code>) is reopened on the next call, but the running computation is lost.</li></ul><nav class="pager"><a href="window.html"><span class="dir">← Previous</span><span class="name">Window</span></a><a class="next" href="reference.html"><span class="dir">Next →</span><span class="name">Reference</span></a></nav></article>
 <aside class="toc" aria-label="On this page"><div class="toc-title">On this page</div><a href="#exceptions">Exceptions</a><a href="#debugging">Debugging</a><a href="#pitfalls">Pitfalls</a><a href="#performance">Performance</a><a href="#known-limits">Known limits</a></aside>
 </main>
-<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/ by tools/build_pages.py</span></footer>
+<footer class="footer"><span>GPUsync · GPU kernels in Python · CUDA, Metal, Vulkan, DX12, OpenCL</span><span>Generated from docs/markdown by tools/build_pages.py</span></footer>
 </div>
 </body>
 </html>

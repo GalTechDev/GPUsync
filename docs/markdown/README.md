@@ -18,7 +18,7 @@ print(y[:5])                            # waits for the result and copies it bac
 ```
 
 This documentation covers the library alone. The graphics engine `gpusync.gfx`, built on top of it, is a separate
-package ([gpusync-gfx](../gfx/README.md)) and is not described here.
+package ([gpusync-gfx](../../gfx/README.md)) and is not described here.
 
 ## Contents
 
@@ -35,13 +35,13 @@ package ([gpusync-gfx](../gfx/README.md)) and is not described here.
 | [Reference](reference.md) | every public name, on one page |
 
 For the internal design (IR, code generators, transfer engine, measurements), see
-[ARCHITECTURE.md](../ARCHITECTURE.md).
+[ARCHITECTURE.md](../../ARCHITECTURE.md).
 
 ## Conventions
 
 - Examples marked `python` are run by `tests/test_docs.py`: they work as written. Those marked `py` (window,
   PyTorch, multi-gigabyte files) are not.
 - `gs` stands for `gpusync`, `np` for NumPy.
-- The documentation website (the `.html` files of `docs/`, published on GitHub Pages) is generated from these pages by
+- The documentation website (`docs/`, published on GitHub Pages) is generated from these pages by
   `python3 tools/build_pages.py`; a test checks that it is up to date.
 - Measurements come from two machines: a Mac with an Apple M5 Pro chip and a PC with an RTX 4080 SUPER.

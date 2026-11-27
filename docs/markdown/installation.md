@@ -47,7 +47,7 @@ Run scripts with the Python from `.venv` (`.venv/bin/python`, or `.venv\Scripts\
 The only runtime dependency is NumPy ≥ 1.22.
 
 `setup` and `build` also install the graphics engine `gpusync.gfx`, which is a separate package
-([gpusync-gfx](../gfx/README.md), folder `gfx/`, pure Python). If you only want the library, ignore it: everything
+([gpusync-gfx](../../gfx/README.md), folder `gfx/`, pure Python). If you only want the library, ignore it: everything
 works without it, and `gs.gfx` raises an `ImportError` that gives the install command. To add or remove it by
 hand:
 

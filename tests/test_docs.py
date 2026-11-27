@@ -1,4 +1,4 @@
-"""The examples of docs/ work: every ```python block is run, page by page, in order.
+"""The examples of docs/markdown work: every ```python block is run, page by page, in order.
 
 Blocks of a page share their variables (like a notebook). They are written to a file, because a
 kernel needs readable source code. ```py blocks (window, PyTorch, large files) are not run.
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = Path(__file__).resolve().parent.parent / "docs" / "markdown"
 BLOCK = re.compile(r"^```python\n(.*?)^```", re.S | re.M)
 
 
@@ -38,6 +38,6 @@ def test_site_pages_are_up_to_date():
     import subprocess
     import sys
 
-    root = DOCS.parent
+    root = DOCS.parent.parent
     r = subprocess.run([sys.executable, str(root / "tools" / "build_pages.py"), "--check"], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
